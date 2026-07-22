@@ -7,11 +7,20 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const activeMenu = computed(() => route.path)
+const activeMenu = computed(() => {
+  if (route.path.startsWith('/rooms')) return '/rooms/manage'
+  return route.path
+})
 const openedMenus = computed(() =>
   route.path.startsWith('/devices') ? ['device-menu'] : [],
 )
 const displayName = computed(() => auth.profile?.full_name || auth.profile?.username || 'User')
+
+function handleMenuSelect(index: string) {
+  if (route.path !== index) {
+    void router.push(index)
+  }
+}
 
 async function handleLogout() {
   await auth.logout()
@@ -27,11 +36,12 @@ async function handleLogout() {
         <p>AI Native DCIM</p>
       </div>
       <el-menu
+        :key="activeMenu"
         :default-active="activeMenu"
         :default-openeds="openedMenus"
-        router
         background-color="#1d1e2c"
         text-color="#fff"
+        @select="handleMenuSelect"
       >
         <el-menu-item index="/">
           <span>Dashboard</span>
@@ -39,14 +49,14 @@ async function handleLogout() {
         <el-menu-item v-if="auth.hasPermission('datacenter:view')" index="/datacenters">
           <span>数据中心</span>
         </el-menu-item>
-        <el-menu-item v-if="auth.hasPermission('datacenter:view')" index="/rooms">
-          <span>机房</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.hasPermission('rack:view')" index="/racks">
-          <span>机柜</span>
+        <el-menu-item
+          v-if="auth.hasPermission('datacenter:view') || auth.hasPermission('rack:view')"
+          index="/rooms/manage"
+        >
+          <span>机房管理</span>
         </el-menu-item>
         <el-sub-menu v-if="auth.hasPermission('device:view')" index="device-menu">
-          <template #title><span>设备</span></template>
+          <template #title><span>设备管理</span></template>
           <el-menu-item index="/devices">设备管理</el-menu-item>
           <el-menu-item index="/devices/contracts">合同信息</el-menu-item>
         </el-sub-menu>

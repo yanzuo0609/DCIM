@@ -9,13 +9,28 @@ const props = withDefaults(
     slots?: RackLayoutSlot[]
     totalPower?: number
     compact?: boolean
+    selectable?: boolean
+    selectedU?: number | null
+    highlightDeviceId?: string | null
   }>(),
   {
     slots: () => [],
     totalPower: 0,
     compact: false,
+    selectable: false,
+    selectedU: null,
+    highlightDeviceId: null,
   },
 )
+
+const emit = defineEmits<{
+  'select-u': [u: number]
+}>()
+
+function onSlotClick(slot: RackLayoutSlot) {
+  if (!props.selectable || slot.occupied) return
+  emit('select-u', slot.u_position)
+}
 
 const displaySlots = computed(() => {
   if (props.slots.length) return props.slots
@@ -53,7 +68,7 @@ function formatPower(value: number | null | undefined) {
   return `${Math.round(value)} W`
 }
 
-function rowStyle(slot: RackLayoutSlot) {
+function rowStyle(_slot: RackLayoutSlot) {
   return { height: `${unitPx.value}px` }
 }
 
@@ -96,10 +111,15 @@ function isContinuation(slot: RackLayoutSlot) {
                 occupied: !!slot.device,
                 continuation: isContinuation(slot),
                 'span-start': slot.is_span_start,
+                selectable: selectable && !slot.occupied,
+                selected: selectable && selectedU === slot.u_position,
+                highlighted:
+                  !!highlightDeviceId && slot.device?.device_id === highlightDeviceId,
               },
               heightClass(slot.device),
             ]"
             :style="rowStyle(slot)"
+            @click="onSlotClick(slot)"
           >
             <div class="cell-u">U{{ slot.u_position }}</div>
 
@@ -319,6 +339,22 @@ function isContinuation(slot: RackLayoutSlot) {
 .u-row.empty {
   background: var(--idle-bg);
   border-color: rgba(255, 255, 255, 0.04);
+}
+
+.u-row.selectable {
+  cursor: pointer;
+}
+
+.u-row.selectable:hover {
+  box-shadow: inset 0 0 0 1px rgba(64, 158, 255, 0.55);
+}
+
+.u-row.selected {
+  box-shadow: inset 0 0 0 2px #409eff;
+}
+
+.u-row.highlighted {
+  box-shadow: inset 0 0 0 2px #e6a23c;
 }
 
 .u-row.occupied {

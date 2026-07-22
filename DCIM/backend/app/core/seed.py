@@ -86,7 +86,7 @@ async def ensure_permissions(session: AsyncSession) -> None:
 
 async def seed_rack_templates(session: AsyncSession) -> None:
     for code, name, total_u, width, depth, description in DEFAULT_RACK_TEMPLATES:
-        stmt = select(RackTemplate).where(RackTemplate.code == code, RackTemplate.deleted_at.is_(None))
+        stmt = select(RackTemplate).where(RackTemplate.code == code)
         if (await session.execute(stmt)).scalar_one_or_none():
             continue
         session.add(
@@ -104,7 +104,7 @@ async def seed_rack_templates(session: AsyncSession) -> None:
 
 async def seed_device_types(session: AsyncSession) -> None:
     for code, name, description in DEFAULT_DEVICE_TYPES:
-        stmt = select(DeviceType).where(DeviceType.code == code, DeviceType.deleted_at.is_(None))
+        stmt = select(DeviceType).where(DeviceType.code == code)
         if (await session.execute(stmt)).scalar_one_or_none():
             continue
         session.add(
@@ -120,27 +120,21 @@ async def seed_device_types(session: AsyncSession) -> None:
 
 async def seed_device_catalog(session: AsyncSession) -> None:
     for mfg_code, mfg_name, cat_code, cat_name, model_code, model_name, height_u, weight, power in DEFAULT_DEVICE_CATALOG:
-        mfg_stmt = select(Manufacturer).where(
-            Manufacturer.code == mfg_code, Manufacturer.deleted_at.is_(None)
-        )
+        mfg_stmt = select(Manufacturer).where(Manufacturer.code == mfg_code)
         manufacturer = (await session.execute(mfg_stmt)).scalar_one_or_none()
         if not manufacturer:
             manufacturer = Manufacturer(code=mfg_code, name=mfg_name)
             session.add(manufacturer)
             await session.flush()
 
-        cat_stmt = select(DeviceCategory).where(
-            DeviceCategory.code == cat_code, DeviceCategory.deleted_at.is_(None)
-        )
+        cat_stmt = select(DeviceCategory).where(DeviceCategory.code == cat_code)
         category = (await session.execute(cat_stmt)).scalar_one_or_none()
         if not category:
             category = DeviceCategory(code=cat_code, name=cat_name)
             session.add(category)
             await session.flush()
 
-        model_stmt = select(DeviceModel).where(
-            DeviceModel.code == model_code, DeviceModel.deleted_at.is_(None)
-        )
+        model_stmt = select(DeviceModel).where(DeviceModel.code == model_code)
         if (await session.execute(model_stmt)).scalar_one_or_none():
             continue
         session.add(

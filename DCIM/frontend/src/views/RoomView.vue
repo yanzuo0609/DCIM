@@ -2,10 +2,20 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listDatacenters, type DataCenter } from '@/api/datacenter'
-import { listRacks, type Rack } from '@/api/rack'
+import {
+  applyTemplateToRoom,
+  getRackLayout,
+  listRackTemplates,
+  listRacks,
+  unapplyTemplateFromRoom,
+  type Rack,
+  type RackLayoutSlot,
+  type RackTemplate,
+} from '@/api/rack'
 import { createRoomQuick, deleteRoom, listRooms, updateRoom } from '@/api/room'
 import type { Room } from '@/api/room'
 import { useAuthStore } from '@/stores/auth'
+import RackCabinet from '@/components/RackCabinet.vue'
 
 const auth = useAuthStore()
 const loading = ref(false)
@@ -19,6 +29,24 @@ const layoutVisible = ref(false)
 const layoutLoading = ref(false)
 const layoutRoom = ref<Room | null>(null)
 const layoutRacks = ref<Rack[]>([])
+const layoutDisplayMode = ref<'simple' | 'full'>('simple')
+const layoutDetails = ref<Record<string, { slots: RackLayoutSlot[]; totalPower: number }>>({})
+const fullLayoutLoading = ref(false)
+
+const templates = ref<RackTemplate[]>([])
+const applyVisible = ref(false)
+const applyLoading = ref(false)
+const applyForm = reactive({
+  template_id: '',
+  fill_empty_slots: true,
+})
+const unapplyVisible = ref(false)
+const unapplyLoading = ref(false)
+const unapplyForm = reactive({
+  template_id: '',
+  delete_empty_racks: true,
+  detach_template: true,
+})
 
 interface LayoutSlot {
   row: number
@@ -122,6 +150,7 @@ const rowPrefixHint = computed(() => {
 const canCreate = auth.hasPermission('datacenter:create')
 const canUpdate = auth.hasPermission('datacenter:update')
 const canDelete = auth.hasPermission('datacenter:delete')
+const canApplyRack = auth.hasPermission('rack:update')
 
 function datacenterLabel(dc: DataCenter) {
   return dc.location ? `${dc.name}（${dc.location}）` : dc.name
@@ -309,15 +338,6 @@ function openEdit(row: Room) {
   dialogVisible.value = true
 }
 
-function formatLayout(row: Room) {
-  const layout = row.row_layout?.length ? row.row_layout : Array(row.rack_rows).fill(row.rack_columns)
-  const uniform = layout.every((n) => n === layout[0])
-  if (uniform) {
-    return `${layout.length} 排 × ${layout[0]} 列（共 ${row.rack_capacity} 位）`
-  }
-  return `${layout.length} 排（${layout.join('+')}，共 ${row.rack_capacity} 位）`
-}
-
 async function handleSubmit() {
   if (!editingId.value && !form.datacenter_id) {
     ElMessage.warning('请选择数据中心（地理位置）')
@@ -432,13 +452,179 @@ function utilizationClass(rack: Rack | null) {
   return 'idle'
 }
 
+const appliedTemplates = computed(() =>
+  templates.value.filter((t) => (t.applied_rack_count || 0) > 0 || (t.applied_rooms?.length || 0) > 0),
+)
+
+const roomAppliedTemplates = computed(() => {
+  const roomId = layoutRoom.value?.id
+  if (!roomId) return [] as RackTemplate[]
+  return appliedTemplates.value.filter((t) =>
+    (t.applied_rooms || []).some((r) => r.id === roomId),
+  )
+})
+
+const unapplyTemplateOptions = computed(() => roomAppliedTemplates.value)
+
+const unapplyTemplate = computed(
+  () => templates.value.find((t) => t.id === unapplyForm.template_id) || null,
+)
+
+async function refreshTemplates() {
+  templates.value = await listRackTemplates()
+}
+
+async function reloadLayoutRacks() {
+  if (!layoutRoom.value) return
+  const data = await listRacks({ room_id: layoutRoom.value.id, page_size: 500 })
+  layoutRacks.value = data.items
+}
+
+async function loadFullLayoutDetails() {
+  const racksWithInstance = layoutRacks.value
+  if (!racksWithInstance.length) {
+    layoutDetails.value = {}
+    return
+  }
+  fullLayoutLoading.value = true
+  try {
+    const results = await Promise.all(
+      racksWithInstance.map(async (rack) => {
+        const data = await getRackLayout(rack.id)
+        return [
+          rack.id,
+          { slots: data.slots || [], totalPower: data.total_power || 0 },
+        ] as const
+      }),
+    )
+    layoutDetails.value = Object.fromEntries(results)
+  } catch (error: unknown) {
+    layoutDetails.value = {}
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '加载机柜详情失败')
+  } finally {
+    fullLayoutLoading.value = false
+  }
+}
+
+async function onLayoutModeChange(mode: 'simple' | 'full') {
+  if (mode === 'full') {
+    await loadFullLayoutDetails()
+  }
+}
+
+function openApplyTemplate() {
+  if (!layoutRoom.value) return
+  applyForm.template_id = templates.value[0]?.id || ''
+  applyForm.fill_empty_slots = true
+  applyVisible.value = true
+}
+
+async function submitApplyTemplate() {
+  if (!layoutRoom.value || !applyForm.template_id) {
+    ElMessage.warning('请选择机柜样式模板')
+    return
+  }
+  const tpl = templates.value.find((t) => t.id === applyForm.template_id)
+  await ElMessageBox.confirm(
+    `将模板「${tpl?.name}」应用到机房「${roomTitle(layoutRoom.value)}」？\n` +
+      (applyForm.fill_empty_slots
+        ? '将更新已有机柜，并为空闲机柜位创建机柜。'
+        : '仅更新该机房已有机柜规格。'),
+    '应用模板',
+    { type: 'warning' },
+  )
+  applyLoading.value = true
+  try {
+    const result = await applyTemplateToRoom(
+      applyForm.template_id,
+      layoutRoom.value.id,
+      applyForm.fill_empty_slots,
+    )
+    ElMessage.success(
+      `完成：更新 ${result.updated}，新建 ${result.created}` +
+        (result.skipped ? `，跳过 ${result.skipped}` : ''),
+    )
+    if (result.errors?.length) {
+      ElMessage.warning(result.errors.slice(0, 3).join('；'))
+    }
+    applyVisible.value = false
+    await Promise.all([refreshTemplates(), reloadLayoutRacks()])
+    if (layoutDisplayMode.value === 'full') {
+      await loadFullLayoutDetails()
+    }
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '应用失败')
+  } finally {
+    applyLoading.value = false
+  }
+}
+
+function openUnapplyTemplate() {
+  if (!layoutRoom.value) return
+  const preferred = roomAppliedTemplates.value[0]
+  if (!preferred) {
+    ElMessage.info('当前机房没有已应用的机柜模板')
+    return
+  }
+  unapplyForm.template_id = preferred.id
+  unapplyForm.delete_empty_racks = true
+  unapplyForm.detach_template = true
+  unapplyVisible.value = true
+}
+
+async function submitUnapplyTemplate() {
+  if (!layoutRoom.value || !unapplyForm.template_id) {
+    ElMessage.warning('请选择要取消的模板')
+    return
+  }
+  if (!unapplyForm.delete_empty_racks && !unapplyForm.detach_template) {
+    ElMessage.warning('请至少勾选一项操作')
+    return
+  }
+  const tpl = unapplyTemplate.value
+  await ElMessageBox.confirm(
+    `取消模板「${tpl?.name}」在机房「${roomTitle(layoutRoom.value)}」的应用？\n` +
+      (unapplyForm.delete_empty_racks ? '• 删除绑定该模板且无设备的机柜\n' : '') +
+      (unapplyForm.detach_template ? '• 其余机柜解除模板关联（保留实例）' : ''),
+    '取消模板应用',
+    { type: 'warning' },
+  )
+  unapplyLoading.value = true
+  try {
+    const result = await unapplyTemplateFromRoom(unapplyForm.template_id, layoutRoom.value.id, {
+      deleteEmptyRacks: unapplyForm.delete_empty_racks,
+      detachTemplate: unapplyForm.detach_template,
+    })
+    ElMessage.success(
+      `完成：删除 ${result.deleted}，解除关联 ${result.detached}` +
+        (result.skipped ? `，跳过 ${result.skipped}` : ''),
+    )
+    if (result.errors?.length) {
+      ElMessage.warning(result.errors.slice(0, 3).join('；'))
+    }
+    unapplyVisible.value = false
+    await Promise.all([refreshTemplates(), reloadLayoutRacks()])
+    if (layoutDisplayMode.value === 'full') {
+      await loadFullLayoutDetails()
+    }
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '取消应用失败')
+  } finally {
+    unapplyLoading.value = false
+  }
+}
+
 async function openLayout(row: Room) {
   layoutRoom.value = row
   layoutVisible.value = true
+  layoutDisplayMode.value = 'simple'
+  layoutDetails.value = {}
   layoutLoading.value = true
   try {
-    const data = await listRacks({ room_id: row.id, page_size: 500 })
-    layoutRacks.value = data.items
+    await reloadLayoutRacks()
   } catch (error: unknown) {
     layoutRacks.value = []
     const err = error as {
@@ -462,7 +648,7 @@ async function handleDelete(row: Room) {
 }
 
 onMounted(() => {
-  void Promise.all([loadDatacenters(), loadData()])
+  void Promise.all([loadDatacenters(), loadData(), refreshTemplates()])
 })
 </script>
 
@@ -497,9 +683,6 @@ onMounted(() => {
         <el-table-column label="机房编号" min-width="100">
           <template #default="{ row }">{{ row.room_no || row.name }}</template>
         </el-table-column>
-        <el-table-column label="机柜布局" min-width="180">
-          <template #default="{ row }">{{ formatLayout(row) }}</template>
-        </el-table-column>
         <el-table-column label="机柜编号" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">
             {{
@@ -530,18 +713,38 @@ onMounted(() => {
       </div>
     </el-card>
 
-    <el-drawer
+    <el-dialog
       v-model="layoutVisible"
       :title="layoutRoom ? `机房布局图 - ${roomTitle(layoutRoom)}` : '机房布局图'"
-      size="720px"
+      fullscreen
+      destroy-on-close
+      class="layout-dialog"
     >
-      <div v-loading="layoutLoading" class="floorplan">
-        <div class="floorplan-summary">
-          <span>机柜位 {{ layoutStats.total }}</span>
-          <span>已建 {{ layoutStats.occupied }}</span>
-          <span>空闲 {{ layoutStats.free }}</span>
+      <div v-loading="layoutLoading || fullLayoutLoading" class="floorplan">
+        <div class="floorplan-toolbar">
+          <div class="floorplan-summary">
+            <span>机柜位 {{ layoutStats.total }}</span>
+            <span>已建 {{ layoutStats.occupied }}</span>
+            <span>空闲 {{ layoutStats.free }}</span>
+          </div>
+          <div class="floorplan-actions">
+            <el-radio-group v-model="layoutDisplayMode" @change="onLayoutModeChange">
+              <el-radio-button value="simple">简单布局</el-radio-button>
+              <el-radio-button value="full">完整机柜</el-radio-button>
+            </el-radio-group>
+            <el-button v-if="canApplyRack" type="primary" plain @click="openApplyTemplate">
+              应用机柜模板
+            </el-button>
+            <el-button
+              v-if="canApplyRack"
+              :disabled="!roomAppliedTemplates.length"
+              @click="openUnapplyTemplate"
+            >
+              取消模板
+            </el-button>
+          </div>
         </div>
-        <div class="floorplan-legend">
+        <div v-if="layoutDisplayMode === 'simple'" class="floorplan-legend">
           <span><i class="dot empty" />空闲位</span>
           <span><i class="dot idle" />已建(空载/空闲U满)</span>
           <span><i class="dot low" />有设备·利用率&lt;40%</span>
@@ -549,7 +752,7 @@ onMounted(() => {
           <span><i class="dot high" />≥80%</span>
         </div>
 
-        <div v-if="layoutRows.length" class="floorplan-map">
+        <div v-if="layoutRows.length && layoutDisplayMode === 'simple'" class="floorplan-map">
           <div v-for="row in layoutRows" :key="row.row" class="floorplan-row">
             <div class="floorplan-row-label">第 {{ row.row }} 排</div>
             <div class="floorplan-slots">
@@ -570,9 +773,100 @@ onMounted(() => {
             </div>
           </div>
         </div>
+
+        <div v-else-if="layoutRows.length && layoutDisplayMode === 'full'" class="floorplan-map floorplan-map-full">
+          <div v-for="row in layoutRows" :key="row.row" class="floorplan-row floorplan-row-full">
+            <div class="floorplan-row-label">第 {{ row.row }} 排</div>
+            <div class="floorplan-slots floorplan-slots-full">
+              <div
+                v-for="slot in row.slots"
+                :key="`${slot.row}-${slot.col}-full`"
+                class="rack-cell-full"
+                :class="{ empty: !slot.rack }"
+              >
+                <template v-if="slot.rack">
+                  <RackCabinet
+                    v-if="layoutDetails[slot.rack.id]"
+                    :code="slot.rack.code"
+                    :total-u="slot.rack.total_u"
+                    :slots="layoutDetails[slot.rack.id].slots"
+                    :total-power="layoutDetails[slot.rack.id].totalPower"
+                    compact
+                  />
+                  <div v-else class="rack-cell-loading">加载中…</div>
+                </template>
+                <div v-else class="rack-cell-empty">
+                  <div class="rack-code">{{ slot.code }}</div>
+                  <div class="rack-meta">空闲位</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <el-empty v-else description="暂无布局数据" />
       </div>
-    </el-drawer>
+      <template #footer>
+        <el-button type="primary" @click="layoutVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="applyVisible" title="应用机柜模板" width="520px">
+      <el-form label-width="110px">
+        <el-form-item label="目标机房">
+          <el-input :model-value="layoutRoom ? roomTitle(layoutRoom) : ''" disabled />
+        </el-form-item>
+        <el-form-item label="样式模板" required>
+          <el-select v-model="applyForm.template_id" style="width: 100%">
+            <el-option
+              v-for="t in templates"
+              :key="t.id"
+              :label="`${t.name}（${t.total_u}U）`"
+              :value="t.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="空闲位">
+          <el-checkbox v-model="applyForm.fill_empty_slots">为空闲机柜位创建机柜并套用模板</el-checkbox>
+          <div class="field-hint">开启后：更新已有机柜规格，并按机房布局补齐全部机柜位</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="applyVisible = false">取消</el-button>
+        <el-button type="primary" :loading="applyLoading" @click="submitApplyTemplate">开始应用</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="unapplyVisible" title="取消机柜模板应用" width="520px">
+      <el-form label-width="110px">
+        <el-form-item label="目标机房">
+          <el-input :model-value="layoutRoom ? roomTitle(layoutRoom) : ''" disabled />
+        </el-form-item>
+        <el-form-item label="样式模板" required>
+          <el-select v-model="unapplyForm.template_id" style="width: 100%">
+            <el-option
+              v-for="t in unapplyTemplateOptions"
+              :key="t.id"
+              :label="t.name"
+              :value="t.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="处理方式">
+          <el-checkbox v-model="unapplyForm.delete_empty_racks">
+            删除绑定该模板且无设备的机柜
+          </el-checkbox>
+          <el-checkbox v-model="unapplyForm.detach_template">
+            对其余机柜解除模板关联（保留机柜实例与规格）
+          </el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="unapplyVisible = false">关闭</el-button>
+        <el-button type="warning" :loading="unapplyLoading" @click="submitUnapplyTemplate">
+          确认取消应用
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑机房' : '新建机房'" width="720px">
       <el-form label-width="110px">
@@ -770,7 +1064,11 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  min-height: 240px;
+  min-height: calc(100vh - 160px);
+}
+
+:deep(.layout-dialog .el-dialog__body) {
+  padding-top: 12px;
 }
 
 .floorplan-summary {
@@ -778,6 +1076,27 @@ onMounted(() => {
   gap: 20px;
   color: #606266;
   font-size: 14px;
+}
+
+.floorplan-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.floorplan-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.field-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #909399;
 }
 
 .floorplan-legend {
@@ -830,24 +1149,40 @@ onMounted(() => {
 .floorplan-map {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
+  flex: 1;
+  overflow: auto;
+}
+
+.floorplan-row {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
 }
 
 .floorplan-row-label {
+  flex: 0 0 72px;
   font-weight: 600;
   color: #303133;
-  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .floorplan-slots {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 
 .rack-cell {
-  width: 96px;
-  min-height: 72px;
+  flex: 0 0 108px;
+  width: 108px;
+  min-height: 80px;
   border: 1px solid #dcdfe6;
   border-radius: 6px;
   padding: 8px;
@@ -867,5 +1202,47 @@ onMounted(() => {
 .rack-meta {
   font-size: 12px;
   color: #909399;
+}
+
+.floorplan-map-full {
+  gap: 24px;
+}
+
+.floorplan-row-full {
+  align-items: flex-start;
+}
+
+.floorplan-slots-full {
+  align-items: flex-start;
+  padding-bottom: 12px;
+}
+
+.rack-cell-full {
+  flex: 0 0 300px;
+  width: 300px;
+  min-height: 120px;
+}
+
+.rack-cell-full.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rack-cell-empty {
+  width: 100%;
+  min-height: 100px;
+  border: 1px dashed #dcdfe6;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fafafa;
+  box-sizing: border-box;
+}
+
+.rack-cell-loading {
+  padding: 24px;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
 }
 </style>

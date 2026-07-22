@@ -35,6 +35,13 @@ export interface Device {
   updated_at: string
 }
 
+export interface Manufacturer {
+  id: string
+  code: string
+  name: string
+  description?: string | null
+}
+
 export interface DeviceModel {
   id: string
   code: string
@@ -237,6 +244,20 @@ export async function listDevices(params: Record<string, unknown> = {}) {
 
 export async function getDevice(id: string): Promise<Device> {
   const response = await api.get<ApiResponse<Device>>(`/devices/${id}`)
+  return unwrap(response)
+}
+
+export async function listManufacturers(params: Record<string, unknown> = {}) {
+  const response = await api.get('/manufacturers', { params: { page_size: 100, ...params } })
+  return response.data.data.items as Manufacturer[]
+}
+
+export async function createManufacturer(payload: {
+  code: string
+  name: string
+  description?: string | null
+}) {
+  const response = await api.post<ApiResponse<Manufacturer>>('/manufacturers', payload)
   return unwrap(response)
 }
 

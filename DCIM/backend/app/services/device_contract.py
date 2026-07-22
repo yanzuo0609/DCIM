@@ -65,13 +65,21 @@ def _items_from_entity(entity: DeviceContract) -> list[DeviceContractItem]:
             mfg = str(raw.get("manufacturer_name") or "").strip() or None
             qty = int(raw.get("quantity") or 0)
             price = _to_decimal(raw.get("unit_price"))
+            unit = str(raw.get("price_unit") or "yuan").strip().lower()
+            if unit not in ("yuan", "wan"):
+                unit = "yuan"
+            qty_unit = str(raw.get("quantity_unit") or "台").strip()
+            if qty_unit not in ("台", "个", "件", "套"):
+                qty_unit = "台"
             parsed.append(
                 DeviceContractItem(
                     device_name=name or model,
                     device_model_name=model or name,
                     manufacturer_name=mfg,
                     quantity=max(qty, 0),
+                    quantity_unit=qty_unit,
                     unit_price=price,
+                    price_unit=unit,
                 )
             )
         return _normalize_items(parsed)
@@ -113,6 +121,7 @@ def _items_from_entity(entity: DeviceContract) -> list[DeviceContractItem]:
                 device_model_name=model or name,
                 manufacturer_name=(mfg or fallback_mfg) or None,
                 quantity=fallback_qty if i == 0 else 0,
+                quantity_unit="台",
                 unit_price=fallback_price if i == 0 else None,
             )
         )
@@ -128,7 +137,9 @@ def _persist_items(
             "device_model_name": i.device_model_name,
             "manufacturer_name": i.manufacturer_name,
             "quantity": int(i.quantity or 0),
+            "quantity_unit": i.quantity_unit if i.quantity_unit in ("台", "个", "件", "套") else "台",
             "unit_price": str(i.unit_price) if i.unit_price is not None else None,
+            "price_unit": i.price_unit if i.price_unit in ("yuan", "wan") else "yuan",
         }
         for i in items
     ]

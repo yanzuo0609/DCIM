@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+QUANTITY_UNITS = frozenset({"台", "个", "件", "套"})
+
 
 class DeviceContractItem(BaseModel):
     """合同内一条设备明细：名称、型号、厂商、数量、单价成对对应。"""
@@ -11,7 +13,9 @@ class DeviceContractItem(BaseModel):
     device_model_name: str = Field(min_length=1, max_length=100)
     manufacturer_name: str | None = Field(default=None, max_length=100)
     quantity: int = Field(default=0, ge=0, le=100000)
+    quantity_unit: str = Field(default="台", max_length=10)
     unit_price: Decimal | None = Field(default=None, ge=0)
+    price_unit: str = Field(default="yuan", pattern="^(yuan|wan)$")
     line_amount: Decimal | None = None
 
     @field_validator("device_name", "device_model_name")
@@ -30,11 +34,32 @@ class DeviceContractItem(BaseModel):
         text = value.strip()
         return text[:100] if text else None
 
+    @field_validator("quantity_unit")
+    @classmethod
+    def normalize_quantity_unit(cls, value: str | None) -> str:
+        text = (value or "台").strip()
+        return text if text in QUANTITY_UNITS else "台"
+
 
 def _line_amount(quantity: int, unit_price: Decimal | None) -> Decimal | None:
     if unit_price is None or not quantity:
         return None
     return (unit_price * Decimal(quantity)).quantize(Decimal("0.01"))
+
+
+def _amount_in_yuan(amount: Decimal, price_unit: str) -> Decimal:
+    if price_unit == "wan":
+        return amount * Decimal("10000")
+    return amount
+
+
+def _line_amount_yuan(
+    quantity: int, unit_price: Decimal | None, price_unit: str = "yuan"
+) -> Decimal | None:
+    raw = _line_amount(quantity, unit_price)
+    if raw is None:
+        return None
+    return _amount_in_yuan(raw, price_unit).quantize(Decimal("0.01"))
 
 
 def _normalize_items(items: list[DeviceContractItem] | None) -> list[DeviceContractItem]:
@@ -47,9 +72,13 @@ def _normalize_items(items: list[DeviceContractItem] | None) -> list[DeviceContr
         if key in seen:
             continue
         seen.add(key)
+        unit = item.price_unit if item.price_unit in ("yuan", "wan") else "yuan"
         result.append(
             item.model_copy(
-                update={"line_amount": _line_amount(item.quantity, item.unit_price)}
+                update={
+                    "price_unit": unit,
+                    "line_amount": _line_amount(item.quantity, item.unit_price),
+                }
             )
         )
     return result
@@ -73,7 +102,8 @@ def _items_subtotal(items: list[DeviceContractItem]) -> Decimal | None:
     total = Decimal("0")
     has_any = False
     for item in items:
-        amount = _line_amount(item.quantity, item.unit_price)
+        unit = item.price_unit if item.price_unit in ("yuan", "wan") else "yuan"
+        amount = _line_amount_yuan(item.quantity, item.unit_price, unit)
         if amount is not None:
             total += amount
             has_any = True
@@ -103,7 +133,9 @@ def _pair_from_lists(
                 "device_model_name": str(model).strip() or str(name).strip(),
                 "manufacturer_name": mfg_text,
                 "quantity": fallback_quantity if i == 0 else 0,
+                "quantity_unit": "台",
                 "unit_price": fallback_unit_price if i == 0 else None,
+                "price_unit": "yuan",
             }
         )
     return paired
@@ -147,6 +179,10 @@ class DeviceContractCreate(BaseModel):
                     row["quantity"] = fallback_qty
                 if row.get("unit_price") is None and idx == 0 and fallback_price is not None:
                     row["unit_price"] = fallback_price
+                if not row.get("price_unit"):
+                    row["price_unit"] = "yuan"
+                if not row.get("quantity_unit"):
+                    row["quantity_unit"] = "台"
                 filled.append(row)
             data["device_items"] = filled
             return data
@@ -201,6 +237,10 @@ class DeviceContractUpdate(BaseModel):
                     row = dict(raw)
                     if fallback_mfg and not (row.get("manufacturer_name") or "").strip():
                         row["manufacturer_name"] = fallback_mfg
+                    if not row.get("price_unit"):
+                        row["price_unit"] = "yuan"
+                    if not row.get("quantity_unit"):
+                        row["quantity_unit"] = "台"
                     filled.append(row)
                 else:
                     filled.append(raw)
@@ -280,4 +320,11 @@ class DeviceContractBindRequest(BaseModel):
 class DeviceContractBindResult(BaseModel):
     bound: int
     skipped: int
+    errors: list[str] = Field(default_factory=list)
+
+
+class DeviceContractItemsImportResult(BaseModel):
+    items: list[DeviceContractItem] = Field(default_factory=list)
+    imported: int = 0
+    skipped: int = 0
     errors: list[str] = Field(default_factory=list)

@@ -27,15 +27,29 @@ const router = createRouter({
         },
         {
           path: 'rooms',
-          name: 'rooms',
-          component: () => import('@/views/RoomView.vue'),
-          meta: { permission: 'datacenter:view' },
+          component: () => import('@/layouts/RoomSectionLayout.vue'),
+          children: [
+            {
+              path: '',
+              redirect: '/rooms/manage',
+            },
+            {
+              path: 'manage',
+              name: 'rooms-manage',
+              component: () => import('@/views/RoomView.vue'),
+              meta: { permission: 'datacenter:view' },
+            },
+            {
+              path: 'templates',
+              name: 'room-rack-templates',
+              component: () => import('@/views/RackView.vue'),
+              meta: { permission: 'rack:view' },
+            },
+          ],
         },
         {
           path: 'racks',
-          name: 'racks',
-          component: () => import('@/views/RackView.vue'),
-          meta: { permission: 'rack:view' },
+          redirect: '/rooms/templates',
         },
         {
           path: 'devices',
@@ -89,8 +103,17 @@ router.beforeEach(async (to) => {
     }
   }
 
-  const permission = to.meta.permission as string | undefined
+  const permission = [...to.matched]
+    .reverse()
+    .find((record) => record.meta.permission)?.meta.permission as string | undefined
   if (permission && !auth.hasPermission(permission)) {
+    if (
+      to.name === 'rooms-manage'
+      && !auth.hasPermission('datacenter:view')
+      && auth.hasPermission('rack:view')
+    ) {
+      return { name: 'room-rack-templates' }
+    }
     return '/'
   }
 

@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type ElTable } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   bindContractDevices,
   calcItemsAmount,
   createDeviceContract,
   deleteDeviceContract,
+  downloadContractItemsTemplate,
   formatContractItems,
   getContractSummary,
+  importContractItems,
   listDeviceContracts,
   normalizeContractItems,
+  normalizeQuantityUnit,
+  QUANTITY_UNIT_OPTIONS,
   unbindContractDevices,
   updateDeviceContract,
   type DeviceContract,
@@ -34,12 +38,16 @@ const keyword = ref('')
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
 const saving = ref(false)
+const itemsImportInput = ref<HTMLInputElement | null>(null)
+const itemsImporting = ref(false)
 const emptyItem = (): DeviceContractItem => ({
   device_name: '',
   device_model_name: '',
   manufacturer_name: '',
   quantity: 0,
+  quantity_unit: '台',
   unit_price: null,
+  price_unit: 'yuan',
 })
 
 const form = reactive({
@@ -62,7 +70,10 @@ const bindContract = ref<DeviceContract | null>(null)
 const bindLoading = ref(false)
 const bindDevices = ref<Device[]>([])
 const selectedBindIds = ref<string[]>([])
-const bindTableRef = ref<InstanceType<typeof ElTable>>()
+const bindTableRef = ref<{
+  clearSelection?: () => void
+  toggleRowSelection?: (row: Device, selected?: boolean) => void
+} | null>(null)
 
 const detailVisible = ref(false)
 const detailContract = ref<DeviceContract | null>(null)
@@ -70,6 +81,40 @@ const detailItems = computed(() =>
   detailContract.value ? normalizeContractItems(detailContract.value) : [],
 )
 const detailPriceUnit = computed(() => detailContract.value?.price_unit || 'yuan')
+
+type PriceUnit = 'yuan' | 'wan'
+
+function convertPriceUnitAmount(
+  amount: number | null | undefined,
+  fromUnit: PriceUnit,
+  toUnit: PriceUnit,
+): number | null {
+  if (amount === null || amount === undefined || fromUnit === toUnit) {
+    return amount ?? null
+  }
+  const value = Number(amount)
+  if (!Number.isFinite(value)) return null
+  const converted = toUnit === 'wan' ? value / 10000 : value * 10000
+  return Math.round(converted * 100) / 100
+}
+
+function oppositePriceUnit(unit: PriceUnit): PriceUnit {
+  return unit === 'wan' ? 'yuan' : 'wan'
+}
+
+function onItemPriceUnitChange(item: DeviceContractItem, newUnit: PriceUnit) {
+  const oldUnit = oppositePriceUnit(newUnit)
+  if (item.unit_price !== null && item.unit_price !== undefined) {
+    item.unit_price = convertPriceUnitAmount(item.unit_price, oldUnit, newUnit)
+  }
+}
+
+function onContractPriceUnitChange(newUnit: PriceUnit) {
+  const oldUnit = oppositePriceUnit(newUnit)
+  if (form.contract_total !== null && form.contract_total !== undefined) {
+    form.contract_total = convertPriceUnitAmount(form.contract_total, oldUnit, newUnit)
+  }
+}
 
 async function loadData() {
   loading.value = true
@@ -111,7 +156,12 @@ function resetForm() {
 }
 
 function fillContractTotalFromItems() {
-  form.contract_total = itemsAmountHint.value
+  const yuanTotal = itemsAmountHint.value
+  if (yuanTotal === null) return
+  form.contract_total =
+    form.price_unit === 'wan'
+      ? convertPriceUnitAmount(yuanTotal, 'yuan', 'wan')
+      : yuanTotal
 }
 
 function addDeviceItem() {
@@ -124,6 +174,88 @@ function removeDeviceItem(index: number) {
     return
   }
   form.device_items.splice(index, 1)
+}
+
+function mapImportedItem(item: DeviceContractItem): DeviceContractItem {
+  return {
+    device_name: item.device_name,
+    device_model_name: item.device_model_name,
+    manufacturer_name: item.manufacturer_name || '',
+    quantity: Number(item.quantity || 0),
+    quantity_unit: normalizeQuantityUnit(item.quantity_unit),
+    unit_price:
+      item.unit_price === null || item.unit_price === undefined ? null : Number(item.unit_price),
+    price_unit: item.price_unit === 'wan' ? 'wan' : 'yuan',
+  }
+}
+
+function applyImportedItems(items: DeviceContractItem[]) {
+  const mapped = items.map(mapImportedItem)
+  const onlyEmpty =
+    form.device_items.length === 1 &&
+    !form.device_items[0].device_name.trim() &&
+    !form.device_items[0].device_model_name.trim() &&
+    !(form.device_items[0].manufacturer_name || '').trim()
+  if (onlyEmpty) {
+    form.device_items = mapped.length ? mapped : [emptyItem()]
+    return
+  }
+  form.device_items.push(...mapped)
+}
+
+function extractErrorMessage(error: unknown, fallback: string) {
+  const err = error as {
+    response?: { data?: { message?: string; details?: { errors?: unknown[] } } }
+    message?: string
+  }
+  const details = err.response?.data?.details?.errors
+  if (Array.isArray(details) && details.length) {
+    const first = details[0] as { msg?: string; loc?: unknown[] }
+    if (first?.msg) {
+      const field = Array.isArray(first.loc) ? first.loc.slice(-1)[0] : ''
+      return field ? `${field}: ${first.msg}` : first.msg
+    }
+  }
+  return err.response?.data?.message || err.message || fallback
+}
+
+function triggerItemsImport() {
+  itemsImportInput.value?.click()
+}
+
+async function handleDownloadItemsTemplate() {
+  try {
+    await downloadContractItemsTemplate()
+  } catch (error: unknown) {
+    ElMessage.error(extractErrorMessage(error, '下载模板失败'))
+  }
+}
+
+async function handleImportItemsFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  itemsImporting.value = true
+  try {
+    const result = await importContractItems(file)
+    if (!result.items.length) {
+      ElMessage.warning('未导入有效明细')
+      if (result.errors.length) {
+        ElMessage.warning(result.errors.slice(0, 3).join('; '))
+      }
+      return
+    }
+    applyImportedItems(result.items)
+    ElMessage.success(`已导入 ${result.imported} 条设备明细`)
+    if (result.errors.length) {
+      ElMessage.warning(result.errors.slice(0, 3).join('; '))
+    }
+  } catch (error: unknown) {
+    ElMessage.error(extractErrorMessage(error, '导入明细失败'))
+  } finally {
+    itemsImporting.value = false
+  }
 }
 
 function openCreate() {
@@ -144,6 +276,10 @@ function itemLineAmount(item: DeviceContractItem): number | null {
   return Math.round(qty * Number(price) * 100) / 100
 }
 
+function itemPriceUnit(item: DeviceContractItem): 'yuan' | 'wan' {
+  return item.price_unit === 'wan' ? 'wan' : 'yuan'
+}
+
 function openEdit(row: DeviceContract) {
   editingId.value = row.id
   form.contract_no = row.contract_no
@@ -155,7 +291,9 @@ function openEdit(row: DeviceContract) {
         device_model_name: i.device_model_name,
         manufacturer_name: i.manufacturer_name || '',
         quantity: Number(i.quantity || 0),
+        quantity_unit: normalizeQuantityUnit(i.quantity_unit),
         unit_price: i.unit_price ?? null,
+        price_unit: i.price_unit === 'wan' ? 'wan' : 'yuan',
       }))
     : [emptyItem()]
   form.contract_total = row.contract_total ?? row.total_amount ?? null
@@ -187,7 +325,9 @@ async function handleSubmit() {
       device_model_name: model,
       manufacturer_name: mfg || null,
       quantity: qty,
+      quantity_unit: normalizeQuantityUnit(row.quantity_unit),
       unit_price: price ?? null,
+      price_unit: row.price_unit === 'wan' ? 'wan' : 'yuan',
     })
   }
   if (!deviceItems.length) {
@@ -213,10 +353,13 @@ async function handleSubmit() {
       ElMessage.success('合同信息已创建')
     }
     dialogVisible.value = false
-    await Promise.all([loadData(), loadSummary()])
+    try {
+      await Promise.all([loadData(), loadSummary()])
+    } catch (error: unknown) {
+      ElMessage.warning(extractErrorMessage(error, '合同已保存，但刷新列表失败'))
+    }
   } catch (error: unknown) {
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    ElMessage.error(err.response?.data?.message || err.message || '保存失败')
+    ElMessage.error(extractErrorMessage(error, '保存失败'))
   } finally {
     saving.value = false
   }
@@ -250,10 +393,10 @@ async function openBind(row: DeviceContract) {
     } while ((page - 1) * 200 < total && page <= 10)
     bindDevices.value = pages
     await nextTick()
-    bindTableRef.value?.clearSelection()
+    bindTableRef.value?.clearSelection?.()
     for (const device of pages) {
       if (device.contract_id === row.id) {
-        bindTableRef.value?.toggleRowSelection(device, true)
+        bindTableRef.value?.toggleRowSelection?.(device, true)
       }
     }
   } catch {
@@ -394,7 +537,7 @@ onMounted(() => {
     <el-dialog
       v-model="dialogVisible"
       :title="editingId ? '编辑合同信息' : '新建合同信息'"
-      width="960px"
+      width="1040px"
       destroy-on-close
     >
       <el-form label-width="110px" @submit.prevent="handleSubmit">
@@ -406,12 +549,25 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="设备明细" required>
           <div class="multi-field">
+            <div class="items-toolbar">
+              <el-button @click="handleDownloadItemsTemplate">下载明细模板</el-button>
+              <el-button :loading="itemsImporting" @click="triggerItemsImport">导入明细</el-button>
+              <input
+                ref="itemsImportInput"
+                type="file"
+                accept=".xlsx,.xls"
+                style="display: none"
+                @change="handleImportItemsFile"
+              />
+            </div>
             <div class="pair-header">
               <span>设备名称</span>
               <span>设备型号</span>
               <span>厂商</span>
               <span>采购数量</span>
+              <span>数量单位</span>
               <span>单价</span>
+              <span>金额单位</span>
               <span class="pair-action" />
             </div>
             <div v-for="(item, idx) in form.device_items" :key="`item-${idx}`" class="multi-row pair-row">
@@ -437,14 +593,30 @@ onMounted(() => {
                 controls-position="right"
                 class="pair-number"
               />
+              <el-select v-model="item.quantity_unit" class="pair-qty-unit">
+                <el-option
+                  v-for="unit in QUANTITY_UNIT_OPTIONS"
+                  :key="unit"
+                  :label="unit"
+                  :value="unit"
+                />
+              </el-select>
               <el-input-number
                 v-model="item.unit_price"
                 :min="0"
                 :precision="2"
-                :step="form.price_unit === 'wan' ? 1 : 100"
+                :step="item.price_unit === 'wan' ? 0.01 : 100"
                 controls-position="right"
                 class="pair-number"
               />
+              <el-select
+                v-model="item.price_unit"
+                class="pair-unit"
+                @change="(val: PriceUnit) => onItemPriceUnitChange(item, val)"
+              >
+                <el-option label="元" value="yuan" />
+                <el-option label="万元" value="wan" />
+              </el-select>
               <el-button @click="removeDeviceItem(idx)">删除</el-button>
             </div>
             <div class="pair-foot">
@@ -456,41 +628,51 @@ onMounted(() => {
                 {{
                   itemsAmountHint === null
                     ? '—'
-                    : `${itemsAmountHint} ${priceUnitLabel(form.price_unit)}`
+                    : `${itemsAmountHint.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元`
                 }}
               </span>
             </div>
           </div>
         </el-form-item>
-        <el-form-item label="合同总价">
-          <div class="price-row">
-            <el-input-number
-              v-model="form.contract_total"
-              :min="0"
-              :precision="2"
-              :step="form.price_unit === 'wan' ? 1 : 100"
-              style="flex: 1"
-            />
-            <el-select v-model="form.price_unit" style="width: 100px">
-              <el-option label="元" value="yuan" />
-              <el-option label="万元" value="wan" />
-            </el-select>
-            <el-button
-              :disabled="itemsAmountHint === null"
-              @click="fillContractTotalFromItems"
-            >
-              按明细合计
-            </el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="采购时间">
-          <el-date-picker
-            v-model="form.purchase_date"
-            type="date"
-            value-format="YYYY-MM-DD"
-            style="width: 100%"
-          />
-        </el-form-item>
+        <el-row :gutter="16" class="contract-meta-row">
+          <el-col :span="15">
+            <el-form-item label="合同总价">
+              <div class="price-row">
+                <el-input-number
+                  v-model="form.contract_total"
+                  :min="0"
+                  :precision="2"
+                  :step="form.price_unit === 'wan' ? 0.01 : 100"
+                  style="flex: 1"
+                />
+                <el-select
+                  v-model="form.price_unit"
+                  style="width: 100px"
+                  @change="onContractPriceUnitChange"
+                >
+                  <el-option label="元" value="yuan" />
+                  <el-option label="万元" value="wan" />
+                </el-select>
+                <el-button
+                  :disabled="itemsAmountHint === null"
+                  @click="fillContractTotalFromItems"
+                >
+                  按明细合计
+                </el-button>
+              </div>
+            </el-form-item>
+          </el-col>
+          <el-col :span="9">
+            <el-form-item label="采购时间">
+              <el-date-picker
+                v-model="form.purchase_date"
+                type="date"
+                value-format="YYYY-MM-DD"
+                style="width: 100%"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-form-item label="备注">
           <el-input v-model="form.description" type="textarea" :rows="2" />
         </el-form-item>
@@ -526,15 +708,19 @@ onMounted(() => {
         <el-table-column label="厂商" min-width="110">
           <template #default="{ row }">{{ row.manufacturer_name || '—' }}</template>
         </el-table-column>
-        <el-table-column prop="quantity" label="采购数量" width="100" />
+        <el-table-column label="采购数量" width="110">
+          <template #default="{ row }">
+            {{ row.quantity ?? 0 }}{{ normalizeQuantityUnit(row.quantity_unit) }}
+          </template>
+        </el-table-column>
         <el-table-column label="单价" width="130">
           <template #default="{ row }">
-            {{ formatMoney(row.unit_price, detailPriceUnit) }}
+            {{ formatMoney(row.unit_price, itemPriceUnit(row)) }}
           </template>
         </el-table-column>
         <el-table-column label="小计" width="130">
           <template #default="{ row }">
-            {{ formatMoney(itemLineAmount(row), detailPriceUnit) }}
+            {{ formatMoney(itemLineAmount(row), itemPriceUnit(row)) }}
           </template>
         </el-table-column>
       </el-table>
@@ -618,11 +804,26 @@ onMounted(() => {
   line-height: 1.5;
 }
 
+.contract-meta-row {
+  width: 100%;
+}
+
+.contract-meta-row :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
+
 .price-row {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
+}
+
+.items-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
 }
 
 .multi-field {
@@ -640,7 +841,7 @@ onMounted(() => {
 
 .pair-header {
   display: grid;
-  grid-template-columns: 1.1fr 1.1fr 1fr 0.9fr 0.9fr 64px;
+  grid-template-columns: 1.05fr 1.05fr 0.95fr 0.82fr 0.62fr 0.82fr 0.68fr 64px;
   gap: 8px;
   color: #909399;
   font-size: 12px;
@@ -648,12 +849,17 @@ onMounted(() => {
 
 .pair-row {
   display: grid;
-  grid-template-columns: 1.1fr 1.1fr 1fr 0.9fr 0.9fr 64px;
+  grid-template-columns: 1.05fr 1.05fr 0.95fr 0.82fr 0.62fr 0.82fr 0.68fr 64px;
   gap: 8px;
   align-items: center;
 }
 
 .pair-number {
+  width: 100%;
+}
+
+.pair-qty-unit,
+.pair-unit {
   width: 100%;
 }
 

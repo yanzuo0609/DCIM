@@ -9,6 +9,7 @@ import {
   createDevice,
   createDeviceModel,
   createDeviceType,
+  createManufacturer,
   createParamProfile,
   createSystemProfile,
   deleteBmcProfile,
@@ -24,6 +25,7 @@ import {
   listBmcProfiles,
   listDeviceModels,
   listDeviceTypes,
+  listManufacturers,
   listDevices,
   listParamProfiles,
   listSystemProfiles,
@@ -44,6 +46,7 @@ import {
   type Device,
   type DeviceModel,
   type DeviceType,
+  type Manufacturer,
   type OsType,
   type ParamCustomField,
   type ParamDiskSpec,
@@ -67,10 +70,15 @@ import {
   type IpBindType,
   type IpStatus,
 } from '@/api/ip'
-import { listDeviceContracts, type DeviceContract } from '@/api/contract'
+import {
+  listDeviceContracts,
+  normalizeContractItems,
+  type DeviceContract,
+} from '@/api/contract'
 import { getRackLayout, listRacks, type Rack, type RackLayoutSlot } from '@/api/rack'
 import { listRooms, type Room } from '@/api/room'
 import BatchCreateDeviceDialog from '@/components/BatchCreateDeviceDialog.vue'
+import RackCabinet from '@/components/RackCabinet.vue'
 import RackRangePicker from '@/components/RackRangePicker.vue'
 import { useAuthStore } from '@/stores/auth'
 
@@ -89,6 +97,8 @@ const paramProfiles = ref<ParamProfile[]>([])
 const bmcProfiles = ref<BmcProfile[]>([])
 const systemProfiles = ref<SystemProfile[]>([])
 const contracts = ref<DeviceContract[]>([])
+const manufacturers = ref<Manufacturer[]>([])
+const syncModelsLoading = ref(false)
 const formContracts = computed(() => contracts.value)
 
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
@@ -179,7 +189,25 @@ const form = reactive({
   height_u: 1 as number | null,
   power: null as number | null,
   description: '',
+  room_id: '',
+  rack_id: '',
+  u_position: 1 as number | null,
 })
+
+const originalMount = ref<{ rack_id: string | null; u_position: number | null }>({
+  rack_id: null,
+  u_position: null,
+})
+
+const formRacks = computed(() =>
+  racks.value.filter((r) => !form.room_id || r.room_id === form.room_id),
+)
+
+const formRackMeta = computed(() => racks.value.find((r) => r.id === form.rack_id) || null)
+
+const formLayoutLoading = ref(false)
+const formLayoutSlots = ref<RackLayoutSlot[]>([])
+const formLayoutTotalPower = ref(0)
 
 const mountVisible = ref(false)
 const mountForm = reactive({
@@ -191,6 +219,18 @@ const mountForm = reactive({
 const mountRacks = computed(() =>
   racks.value.filter((r) => !mountForm.room_id || r.room_id === mountForm.room_id),
 )
+const mountRackMeta = computed(() => racks.value.find((r) => r.id === mountForm.rack_id) || null)
+const mountLayoutLoading = ref(false)
+const mountLayoutSlots = ref<RackLayoutSlot[]>([])
+const mountLayoutTotalPower = ref(0)
+const mountLayoutCode = ref('')
+
+const rackDetailVisible = ref(false)
+const rackDetailLoading = ref(false)
+const rackDetailRack = ref<Rack | null>(null)
+const rackDetailSlots = ref<RackLayoutSlot[]>([])
+const rackDetailPower = ref(0)
+const rackDetailDeviceId = ref<string | null>(null)
 
 const batchCreateVisible = ref(false)
 
@@ -386,6 +426,130 @@ function genModelCode(name: string) {
     .slice(0, 40)
   if (ascii) return ascii
   return `MODEL_${Date.now().toString(36).toUpperCase()}`
+}
+
+function genMfgCode(name: string) {
+  const ascii = name
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40)
+  if (ascii) return `MFG_${ascii}`
+  return `MFG_${Date.now().toString(36).toUpperCase()}`
+}
+
+interface ContractModelEntry {
+  modelName: string
+  manufacturerName: string | null
+}
+
+function collectContractModelEntries(): ContractModelEntry[] {
+  const map = new Map<string, ContractModelEntry>()
+  for (const contract of contracts.value) {
+    for (const item of normalizeContractItems(contract)) {
+      const modelName = item.device_model_name?.trim()
+      if (!modelName) continue
+      const key = modelName.toLowerCase()
+      const manufacturerName = item.manufacturer_name?.trim() || null
+      const existing = map.get(key)
+      if (!existing || (manufacturerName && !existing.manufacturerName)) {
+        map.set(key, { modelName, manufacturerName })
+      }
+    }
+  }
+  return [...map.values()]
+}
+
+function findModelByName(modelName: string) {
+  const key = modelName.trim().toLowerCase()
+  return models.value.find(
+    (m) => m.name.trim().toLowerCase() === key || m.code.trim().toLowerCase() === key,
+  )
+}
+
+async function loadManufacturers() {
+  manufacturers.value = await listManufacturers()
+}
+
+async function ensureManufacturer(name: string | null): Promise<string | undefined> {
+  const trimmed = name?.trim()
+  if (!trimmed) return undefined
+  let mfg = manufacturers.value.find((m) => m.name === trimmed)
+  if (mfg) return mfg.id
+  let code = genMfgCode(trimmed)
+  if (manufacturers.value.some((m) => m.code === code)) {
+    code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
+  }
+  try {
+    mfg = await createManufacturer({ code, name: trimmed })
+    manufacturers.value = [...manufacturers.value, mfg].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )
+    return mfg.id
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    const msg = err.response?.data?.message || err.message || ''
+    if (msg.includes('already exists') || msg.includes('已存在')) {
+      await loadManufacturers()
+      mfg = manufacturers.value.find((m) => m.name === trimmed || m.code === code)
+      return mfg?.id
+    }
+    throw error
+  }
+}
+
+async function syncModelsFromContracts(options?: { quiet?: boolean }) {
+  if (!auth.hasPermission('device:create')) return 0
+  const entries = collectContractModelEntries()
+  if (!entries.length) return 0
+  let created = 0
+  for (const entry of entries) {
+    if (findModelByName(entry.modelName)) continue
+    let code = genModelCode(entry.modelName)
+    if (models.value.some((m) => m.code === code)) {
+      code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
+    }
+    const manufacturerId = await ensureManufacturer(entry.manufacturerName)
+    try {
+      const createdModel = await createDeviceModel({
+        code,
+        name: entry.modelName,
+        manufacturer_id: manufacturerId,
+        height_u: 1,
+        description: '来自合同信息同步',
+      })
+      models.value = [...models.value, createdModel].sort((a, b) => a.name.localeCompare(b.name))
+      created += 1
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      const msg = err.response?.data?.message || err.message || ''
+      if (msg.includes('已存在') || msg.includes('already exists')) {
+        await loadProfileRefs()
+        continue
+      }
+      if (!options?.quiet) throw error
+    }
+  }
+  if (created > 0 && !options?.quiet) {
+    ElMessage.success(`已从合同同步 ${created} 个设备型号`)
+  }
+  return created
+}
+
+async function handleSyncModelsFromContracts() {
+  syncModelsLoading.value = true
+  try {
+    await loadLocationRefs()
+    await loadManufacturers()
+    const created = await syncModelsFromContracts()
+    if (created === 0) ElMessage.info('合同中的设备型号均已存在，无需同步')
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '从合同同步型号失败')
+  } finally {
+    syncModelsLoading.value = false
+  }
 }
 
 function resetModelForm() {
@@ -969,11 +1133,17 @@ async function loadLocationRefs() {
 
 async function loadCatalog() {
   try {
-    await Promise.all([loadProfileRefs(), loadLocationRefs()])
+    await Promise.all([loadProfileRefs(), loadLocationRefs(), loadManufacturers()])
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string; detail?: unknown } }; message?: string }
     const detail = err.response?.data?.message || err.message || ''
     ElMessage.error(detail ? `加载关联档案失败：${detail}` : '加载关联档案失败')
+    return
+  }
+  try {
+    await syncModelsFromContracts({ quiet: true })
+  } catch {
+    // 合同同步失败不阻断档案列表展示
   }
 }
 
@@ -1090,6 +1260,12 @@ function resetForm() {
   form.height_u = 1
   form.power = null
   form.description = ''
+  form.room_id = ''
+  form.rack_id = ''
+  form.u_position = 1
+  originalMount.value = { rack_id: null, u_position: null }
+  formLayoutSlots.value = []
+  formLayoutTotalPower.value = 0
 }
 
 function openCreate() {
@@ -1112,7 +1288,15 @@ function openEdit(row: Device) {
   form.height_u = row.height_u
   form.power = row.power
   form.description = row.description || ''
+  form.room_id = row.room_id || ''
+  form.rack_id = row.rack_id || ''
+  form.u_position = row.u_position || 1
+  originalMount.value = {
+    rack_id: row.rack_id || null,
+    u_position: row.u_position || null,
+  }
   editVisible.value = true
+  if (form.rack_id) void loadFormRackLayout(form.rack_id)
 }
 
 watch(
@@ -1127,6 +1311,73 @@ watch(
     }
   },
 )
+
+async function loadFormRackLayout(rackId: string) {
+  formLayoutSlots.value = []
+  formLayoutTotalPower.value = 0
+  if (!rackId) return
+  formLayoutLoading.value = true
+  try {
+    const data = await getRackLayout(rackId)
+    formLayoutSlots.value = data.slots || []
+    formLayoutTotalPower.value = data.total_power || 0
+  } catch {
+    formLayoutSlots.value = []
+  } finally {
+    formLayoutLoading.value = false
+  }
+}
+
+async function loadMountRackLayout(rackId: string) {
+  mountLayoutSlots.value = []
+  mountLayoutTotalPower.value = 0
+  mountLayoutCode.value = ''
+  if (!rackId) return
+  mountLayoutLoading.value = true
+  try {
+    const data = await getRackLayout(rackId)
+    mountLayoutSlots.value = data.slots || []
+    mountLayoutTotalPower.value = data.total_power || 0
+    mountLayoutCode.value = data.rack?.code || ''
+  } catch {
+    mountLayoutSlots.value = []
+  } finally {
+    mountLayoutLoading.value = false
+  }
+}
+
+async function openRackDetail(row: Device) {
+  if (!row.rack_id) return
+  rackDetailDeviceId.value = row.id
+  rackDetailVisible.value = true
+  rackDetailLoading.value = true
+  try {
+    const data = await getRackLayout(row.rack_id)
+    rackDetailRack.value = data.rack
+    rackDetailSlots.value = data.slots || []
+    rackDetailPower.value = data.total_power || 0
+  } catch {
+    rackDetailVisible.value = false
+    ElMessage.error('加载机柜图失败')
+  } finally {
+    rackDetailLoading.value = false
+  }
+}
+
+async function applyDeviceLocation(deviceId: string) {
+  const hasLocation = !!form.rack_id && form.u_position != null && form.u_position > 0
+  const prev = originalMount.value
+
+  if (hasLocation) {
+    const changed =
+      !prev.rack_id || prev.rack_id !== form.rack_id || prev.u_position !== form.u_position
+    if (changed) {
+      await mountDevice(form.rack_id, deviceId, form.u_position!)
+    }
+  } else if (prev.rack_id) {
+    await unmountDevice(deviceId)
+  }
+}
 
 async function handleSubmit() {
   if (!form.serial_number || !form.device_model_id) {
@@ -1147,37 +1398,77 @@ async function handleSubmit() {
     power: form.power,
     description: form.description || null,
   }
-  if (editingId.value) {
-    await updateDevice(editingId.value, payload)
-    ElMessage.success('已保存')
-  } else {
-    await createDevice(payload)
-    ElMessage.success('创建成功')
+  try {
+    let deviceId = editingId.value
+    if (editingId.value) {
+      await updateDevice(editingId.value, payload)
+      deviceId = editingId.value
+      ElMessage.success('已保存')
+    } else {
+      const created = await createDevice(payload)
+      deviceId = created.id
+      ElMessage.success('创建成功')
+    }
+    if (deviceId) {
+      await applyDeviceLocation(deviceId)
+    }
+    editVisible.value = false
+    await loadData()
+  } catch {
+    ElMessage.error('保存失败，请检查位置或参数是否正确')
   }
-  editVisible.value = false
-  await loadData()
+}
+
+function isMessageBoxCancel(error: unknown): boolean {
+  return error === 'cancel' || error === 'close'
 }
 
 async function handleDelete(row: Device) {
-  await ElMessageBox.confirm(`确定删除设备「${row.name || row.hostname}」吗？`, '确认删除', {
-    type: 'warning',
-  })
-  await deleteDevice(row.id)
-  ElMessage.success('删除成功')
-  await loadData()
+  if (row.rack_id) {
+    ElMessage.warning('请先下架设备后再删除')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(`确定删除设备「${row.name || row.hostname}」吗？`, '确认删除', {
+      type: 'warning',
+    })
+    await deleteDevice(row.id)
+    ElMessage.success('删除成功')
+    await loadData()
+  } catch (error: unknown) {
+    if (isMessageBoxCancel(error)) return
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '删除失败')
+  }
 }
 
 async function handleBatchDelete() {
   if (!selectedDevices.value.length) return
-  await ElMessageBox.confirm(`确定删除选中的 ${selectedDevices.value.length} 台设备吗？`, '批量删除', {
-    type: 'warning',
-  })
+  const mounted = selectedDevices.value.filter((d) => d.rack_id)
+  if (mounted.length === selectedDevices.value.length) {
+    ElMessage.warning('选中的设备均已上架，请先下架后再删除')
+    return
+  }
+  if (mounted.length) {
+    ElMessage.warning(`已跳过 ${mounted.length} 台已上架设备，仅删除库存设备`)
+  }
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${selectedDevices.value.length} 台设备吗？`, '批量删除', {
+      type: 'warning',
+    })
+  } catch (error: unknown) {
+    if (isMessageBoxCancel(error)) return
+    throw error
+  }
   batchBusy.value = true
   try {
     const result = await batchDeleteDevices(selectedDevices.value.map((d) => d.id))
     ElMessage.success(`删除 ${result.deleted} 台，跳过 ${result.skipped} 台`)
     if (result.errors.length) ElMessage.warning(result.errors.slice(0, 3).join('; '))
     await loadData()
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '批量删除失败')
   } finally {
     batchBusy.value = false
   }
@@ -1210,6 +1501,7 @@ function openMount(row: Device) {
   mountForm.rack_id = row.rack_id || roomRacks[0]?.id || ''
   mountForm.u_position = row.u_position || 1
   mountVisible.value = true
+  if (mountForm.rack_id) void loadMountRackLayout(mountForm.rack_id)
 }
 
 watch(
@@ -1218,6 +1510,39 @@ watch(
     const list = mountRacks.value
     if (!list.find((r) => r.id === mountForm.rack_id)) {
       mountForm.rack_id = list[0]?.id || ''
+    }
+  },
+)
+
+watch(
+  () => mountForm.rack_id,
+  (rackId) => {
+    if (mountVisible.value && rackId) void loadMountRackLayout(rackId)
+    else if (!rackId) {
+      mountLayoutSlots.value = []
+      mountLayoutTotalPower.value = 0
+      mountLayoutCode.value = ''
+    }
+  },
+)
+
+watch(
+  () => form.room_id,
+  () => {
+    const list = formRacks.value
+    if (form.rack_id && !list.find((r) => r.id === form.rack_id)) {
+      form.rack_id = ''
+    }
+  },
+)
+
+watch(
+  () => form.rack_id,
+  (rackId) => {
+    if (editVisible.value && rackId) void loadFormRackLayout(rackId)
+    else if (!rackId) {
+      formLayoutSlots.value = []
+      formLayoutTotalPower.value = 0
     }
   },
 )
@@ -1961,6 +2286,7 @@ const currentProfiles = computed(() => {
 
 watch(activeTab, (tab) => {
   if (tab === 'ips') loadIpData()
+  if (tab === 'profiles') void loadCatalog()
 })
 
 onMounted(() => {
@@ -2062,16 +2388,31 @@ onMounted(() => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" width="280" fixed="right">
               <template #default="{ row }">
                 <el-button v-if="canUpdate" type="primary" link @click="openEdit(row)">编辑</el-button>
+                <el-button v-if="row.rack_id" type="primary" link @click="openRackDetail(row)">机柜图</el-button>
                 <el-button v-if="canUpdate" type="primary" link @click="openMount(row)">
                   {{ row.rack_id ? '改位' : '上架' }}
                 </el-button>
                 <el-button v-if="canUpdate && row.rack_id" type="warning" link @click="handleUnmount(row)">
                   下架
                 </el-button>
-                <el-button v-if="canDelete" type="danger" link @click="handleDelete(row)">删除</el-button>
+                <el-tooltip
+                  v-if="canDelete"
+                  :disabled="!row.rack_id"
+                  content="请先下架设备后再删除"
+                  placement="top"
+                >
+                  <el-button
+                    type="danger"
+                    link
+                    :disabled="!!row.rack_id"
+                    @click.stop="handleDelete(row)"
+                  >
+                    删除
+                  </el-button>
+                </el-tooltip>
               </template>
             </el-table-column>
           </el-table>
@@ -2104,6 +2445,13 @@ onMounted(() => {
                     ? '新型号'
                     : '新建档案'
               }}
+            </el-button>
+            <el-button
+              v-if="canCreate && profileSubTab === 'model'"
+              :loading="syncModelsLoading"
+              @click="handleSyncModelsFromContracts"
+            >
+              从合同同步型号
             </el-button>
           </div>
           <el-table v-if="profileSubTab === 'type'" :data="types" stripe>
@@ -2335,7 +2683,7 @@ onMounted(() => {
     <el-drawer
       v-model="editVisible"
       :title="editingId ? '编辑设备' : '新建设备'"
-      size="520px"
+      size="720px"
     >
       <el-form label-width="100px">
         <el-form-item label="名称" required>
@@ -2385,6 +2733,53 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="功率(W)">
           <el-input-number v-model="form.power" :min="0" :step="50" />
+        </el-form-item>
+        <el-divider content-position="left">上架位置</el-divider>
+        <el-form-item label="机房">
+          <el-select v-model="form.room_id" clearable filterable style="width: 100%" placeholder="选择机房">
+            <el-option v-for="r in rooms" :key="r.id" :label="r.name" :value="r.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="机柜">
+          <el-select
+            v-model="form.rack_id"
+            clearable
+            filterable
+            style="width: 100%"
+            placeholder="选择机柜"
+            :disabled="!form.room_id"
+          >
+            <el-option
+              v-for="r in formRacks"
+              :key="r.id"
+              :label="`${r.code} · 空闲 ${r.free_u}U`"
+              :value="r.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="U 位">
+          <el-input-number
+            v-model="form.u_position"
+            :min="1"
+            :max="formRackMeta?.total_u || 60"
+            :disabled="!form.rack_id"
+          />
+        </el-form-item>
+        <el-form-item v-if="form.rack_id" label="机柜图">
+          <div v-loading="formLayoutLoading" class="device-rack-preview">
+            <RackCabinet
+              selectable
+              :code="formRackMeta?.code || '机柜'"
+              :total-u="formRackMeta?.total_u || 42"
+              :slots="formLayoutSlots"
+              :total-power="formLayoutTotalPower"
+              :selected-u="form.u_position"
+              :highlight-device-id="editingId"
+              compact
+              @select-u="(u) => { form.u_position = u }"
+            />
+            <p class="bind-device-hint">点击空闲 U 位选择上架位置；已上架设备会高亮显示</p>
+          </div>
         </el-form-item>
         <el-form-item label="参数档案">
           <el-select v-model="form.param_profile_id" clearable style="width: 100%" filterable>
@@ -2442,32 +2837,81 @@ onMounted(() => {
       </template>
     </el-drawer>
 
-    <el-dialog v-model="mountVisible" title="手动上架 / 改位" width="480px">
-      <el-form label-width="80px">
-        <el-form-item label="机房" required>
-          <el-select v-model="mountForm.room_id" style="width: 100%" filterable>
-            <el-option v-for="r in rooms" :key="r.id" :label="r.name" :value="r.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="机柜" required>
-          <el-select v-model="mountForm.rack_id" style="width: 100%" filterable>
-            <el-option
-              v-for="r in mountRacks"
-              :key="r.id"
-              :label="`${r.code} · 空闲 ${r.free_u}U`"
-              :value="r.id"
+    <el-dialog v-model="mountVisible" title="手动上架 / 改位" width="880px" destroy-on-close>
+      <div class="mount-layout">
+        <el-form label-width="80px" class="mount-form">
+          <el-form-item label="机房" required>
+            <el-select v-model="mountForm.room_id" style="width: 100%" filterable>
+              <el-option v-for="r in rooms" :key="r.id" :label="r.name" :value="r.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="机柜" required>
+            <el-select v-model="mountForm.rack_id" style="width: 100%" filterable>
+              <el-option
+                v-for="r in mountRacks"
+                :key="r.id"
+                :label="`${r.code} · 空闲 ${r.free_u}U`"
+                :value="r.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="U 位" required>
+            <el-input-number
+              v-model="mountForm.u_position"
+              :min="1"
+              :max="mountRackMeta?.total_u || 60"
             />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="U 位" required>
-          <el-input-number v-model="mountForm.u_position" :min="1" :max="60" />
-        </el-form-item>
-      </el-form>
+          </el-form-item>
+          <p v-if="mountRackMeta" class="bind-device-hint">
+            {{ mountRackMeta.code }} · {{ mountRackMeta.total_u }}U · 利用率 {{ mountRackMeta.utilization }}%
+          </p>
+        </el-form>
+        <div v-loading="mountLayoutLoading" class="mount-preview">
+          <RackCabinet
+            v-if="mountForm.rack_id"
+            selectable
+            :code="mountRackMeta?.code || mountLayoutCode || '机柜'"
+            :total-u="mountRackMeta?.total_u || 42"
+            :slots="mountLayoutSlots"
+            :total-power="mountLayoutTotalPower"
+            :selected-u="mountForm.u_position"
+            :highlight-device-id="mountForm.device_id"
+            compact
+            @select-u="(u) => { mountForm.u_position = u }"
+          />
+          <el-empty v-else description="请选择机柜" :image-size="64" />
+          <p v-if="mountForm.rack_id" class="bind-device-hint">点击空闲 U 位快速选择上架位置</p>
+        </div>
+      </div>
       <template #footer>
         <el-button @click="mountVisible = false">取消</el-button>
         <el-button type="primary" @click="handleMount">确认</el-button>
       </template>
     </el-dialog>
+
+    <el-drawer
+      v-model="rackDetailVisible"
+      :title="`机柜图 - ${rackDetailRack?.code || ''}`"
+      size="480px"
+    >
+      <div v-loading="rackDetailLoading" class="layout-panel">
+        <div v-if="rackDetailRack" class="layout-toolbar">
+          <div class="layout-meta">
+            <span>编号 {{ rackDetailRack.code }}</span>
+            <span>已用 {{ rackDetailRack.occupied_u }}/{{ rackDetailRack.total_u }}U</span>
+            <span>利用率 {{ rackDetailRack.utilization }}%</span>
+          </div>
+        </div>
+        <RackCabinet
+          v-if="rackDetailRack"
+          :code="rackDetailRack.code"
+          :total-u="rackDetailRack.total_u"
+          :slots="rackDetailSlots"
+          :total-power="rackDetailPower"
+          :highlight-device-id="rackDetailDeviceId"
+        />
+      </div>
+    </el-drawer>
 
     <BatchCreateDeviceDialog
       v-model="batchCreateVisible"
@@ -3288,6 +3732,48 @@ onMounted(() => {
   color: var(--el-color-warning);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.mount-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(320px, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.mount-form {
+  padding-top: 4px;
+}
+
+.mount-preview,
+.device-rack-preview {
+  min-width: 0;
+}
+
+.layout-panel {
+  min-height: 200px;
+}
+
+.layout-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.layout-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #606266;
+  font-size: 13px;
+}
+
+@media (max-width: 860px) {
+  .mount-layout {
+    grid-template-columns: 1fr;
+  }
 }
 .bind-loc-summary {
   margin: 6px 0 0;

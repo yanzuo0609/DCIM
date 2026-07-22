@@ -1,12 +1,23 @@
 import api, { unwrap } from '@/api'
 import type { ApiResponse, PaginatedResponse } from '@/types/api'
 
+export type QuantityUnit = '台' | '个' | '件' | '套'
+
+export const QUANTITY_UNIT_OPTIONS: QuantityUnit[] = ['台', '个', '件', '套']
+
+export function normalizeQuantityUnit(value: string | null | undefined): QuantityUnit {
+  const text = (value || '台').trim()
+  return QUANTITY_UNIT_OPTIONS.includes(text as QuantityUnit) ? (text as QuantityUnit) : '台'
+}
+
 export interface DeviceContractItem {
   device_name: string
   device_model_name: string
   manufacturer_name?: string | null
   quantity?: number
+  quantity_unit?: QuantityUnit
   unit_price?: number | null
+  price_unit?: 'yuan' | 'wan'
   line_amount?: number | null
 }
 
@@ -65,9 +76,10 @@ export function formatItemLabel(item: DeviceContractItem): string {
   const parts = [item.device_name, item.device_model_name]
   if (item.manufacturer_name) parts.push(item.manufacturer_name)
   const qty = Number(item.quantity || 0)
-  if (qty > 0) parts.push(`×${qty}`)
+  if (qty > 0) parts.push(`×${qty}${normalizeQuantityUnit(item.quantity_unit)}`)
   if (item.unit_price !== null && item.unit_price !== undefined) {
-    parts.push(`单价${Number(item.unit_price)}`)
+    const unit = item.price_unit === 'wan' ? '万元' : '元'
+    parts.push(`单价${Number(item.unit_price)}${unit}`)
   }
   return parts.filter(Boolean).join(' / ')
 }
@@ -105,7 +117,10 @@ export function normalizeContractItems(contract: {
       device_model_name: i.device_model_name,
       manufacturer_name: i.manufacturer_name || null,
       quantity: Number(i.quantity || 0),
-      unit_price: i.unit_price ?? null,
+      quantity_unit: normalizeQuantityUnit(i.quantity_unit),
+      unit_price:
+        i.unit_price === null || i.unit_price === undefined ? null : Number(i.unit_price),
+      price_unit: i.price_unit === 'wan' ? 'wan' : 'yuan',
       line_amount: i.line_amount ?? null,
     }))
   }
@@ -139,7 +154,9 @@ export function normalizeContractItems(contract: {
       device_model_name: model || name,
       manufacturer_name: mfg,
       quantity: i === 0 ? fallbackQty : 0,
+      quantity_unit: '台',
       unit_price: i === 0 ? fallbackPrice : null,
+      price_unit: 'yuan' as const,
     })
   }
   return items
@@ -152,10 +169,44 @@ export function calcItemsAmount(items: DeviceContractItem[]): number | null {
     const qty = Number(item.quantity || 0)
     const price = item.unit_price
     if (price === null || price === undefined || !qty) continue
-    total += qty * Number(price)
+    const line = qty * Number(price)
+    const yuan = item.price_unit === 'wan' ? line * 10000 : line
+    total += yuan
     has = true
   }
   return has ? Math.round(total * 100) / 100 : null
+}
+
+export interface ContractItemsImportResult {
+  items: DeviceContractItem[]
+  imported: number
+  skipped: number
+  errors: string[]
+}
+
+async function downloadBlob(path: string, filename: string) {
+  const response = await api.get(path, { responseType: 'blob' })
+  const url = window.URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  window.URL.revokeObjectURL(url)
+}
+
+export async function downloadContractItemsTemplate() {
+  await downloadBlob('/device-contracts/items/import/template', 'contract_items_template.xlsx')
+}
+
+export async function importContractItems(file: File): Promise<ContractItemsImportResult> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await api.post<ApiResponse<ContractItemsImportResult>>(
+    '/device-contracts/items/import',
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  )
+  return unwrap(response)
 }
 
 export async function listDeviceContracts(params: Record<string, unknown> = {}) {
