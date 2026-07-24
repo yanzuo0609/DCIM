@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.models.network import NetworkLink, NetworkNode, NetworkTopology
+from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology
 from app.repositories.device import DeviceRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.network import (
     NetworkLinkRepository,
     NetworkNodeRepository,
+    NetworkProjectRepository,
     NetworkTopologyRepository,
 )
 from app.repositories.rack import RackRepository
@@ -28,6 +29,9 @@ from app.schemas.network import (
     NetworkLinkType,
     NetworkNodeKind,
     NetworkNodeResponse,
+    NetworkProjectCreate,
+    NetworkProjectResponse,
+    NetworkProjectUpdate,
     NetworkTopologyCreate,
     NetworkTopologyDetailResponse,
     NetworkTopologyResponse,
@@ -118,6 +122,7 @@ def _normalize_kind(kind: str | NetworkNodeKind) -> str:
 class NetworkDesignService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.project_repo = NetworkProjectRepository(session)
         self.topology_repo = NetworkTopologyRepository(session)
         self.node_repo = NetworkNodeRepository(session)
         self.link_repo = NetworkLinkRepository(session)
@@ -125,15 +130,140 @@ class NetworkDesignService:
         self.rack_repo = RackRepository(session)
         self.room_repo = RoomRepository(session)
 
-    async def list_topologies(
+    def _to_project_response(
+        self, project: NetworkProject, topology_id: uuid.UUID | None = None
+    ) -> NetworkProjectResponse:
+        return NetworkProjectResponse(
+            id=project.id,
+            code=project.code,
+            name=project.name,
+            description=project.description,
+            topology_id=topology_id,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+        )
+
+    async def list_projects(
         self, params: PaginationParams
+    ) -> tuple[list[NetworkProjectResponse], PaginationMeta]:
+        items, total = await self.project_repo.list_paginated(
+            page=params.page,
+            page_size=params.page_size,
+            keyword=params.keyword,
+            sort=params.sort or "updated_at",
+            order=params.order,
+            search_fields=["code", "name", "description"],
+        )
+        pagination = PaginationMeta(
+            page=params.page,
+            page_size=params.page_size,
+            total=total,
+            pages=math.ceil(total / params.page_size) if total else 0,
+        )
+        responses: list[NetworkProjectResponse] = []
+        for item in items:
+            topo = await self.project_repo.get_primary_topology(item.id)
+            responses.append(self._to_project_response(item, topo.id if topo else None))
+        return responses, pagination
+
+    async def get_project(self, project_id: uuid.UUID) -> NetworkProjectResponse:
+        entity = await self.project_repo.get_by_id(project_id)
+        if not entity:
+            raise NotFoundError("Network project not found")
+        topo = await self.project_repo.get_primary_topology(project_id)
+        return self._to_project_response(entity, topo.id if topo else None)
+
+    async def create_project(
+        self, payload: NetworkProjectCreate, user_id: uuid.UUID | None = None
+    ) -> NetworkProjectResponse:
+        code = payload.code.strip().upper()
+        name = payload.name.strip()
+        if not code or not name:
+            raise ValidationError("Project code and name are required")
+        existing = await self.project_repo.get_by_code(code)
+        if existing:
+            raise ValidationError(f"Project code already exists: {code}")
+
+        project = NetworkProject(
+            code=code,
+            name=name,
+            description=payload.description,
+            created_by=user_id,
+            updated_by=user_id,
+        )
+        created = await self.project_repo.create(project)
+        topology = NetworkTopology(
+            name=name,
+            description=payload.description,
+            project_id=created.id,
+            created_by=user_id,
+            updated_by=user_id,
+        )
+        topo = await self.topology_repo.create(topology)
+        return self._to_project_response(created, topo.id)
+
+    async def update_project(
+        self,
+        project_id: uuid.UUID,
+        payload: NetworkProjectUpdate,
+        user_id: uuid.UUID | None = None,
+    ) -> NetworkProjectResponse:
+        entity = await self.project_repo.get_by_id(project_id)
+        if not entity:
+            raise NotFoundError("Network project not found")
+        if payload.code is not None:
+            code = payload.code.strip().upper()
+            if not code:
+                raise ValidationError("Project code is required")
+            conflict = await self.project_repo.get_by_code(code)
+            if conflict and conflict.id != project_id:
+                raise ValidationError(f"Project code already exists: {code}")
+            entity.code = code
+        if payload.name is not None:
+            name = payload.name.strip()
+            if not name:
+                raise ValidationError("Project name is required")
+            entity.name = name
+        if payload.description is not None:
+            entity.description = payload.description
+        entity.updated_by = user_id
+
+        topo = await self.project_repo.get_primary_topology(project_id)
+        if topo and payload.name is not None:
+            topo.name = entity.name
+            topo.updated_by = user_id
+        if topo and payload.description is not None:
+            topo.description = entity.description
+            topo.updated_by = user_id
+
+        await self.session.flush()
+        return self._to_project_response(entity, topo.id if topo else None)
+
+    async def delete_project(
+        self, project_id: uuid.UUID, user_id: uuid.UUID | None = None
+    ) -> None:
+        entity = await self.project_repo.get_by_id(project_id)
+        if not entity:
+            raise NotFoundError("Network project not found")
+        topologies = await self.topology_repo.list_by_project(project_id)
+        for topo in topologies:
+            await self.delete_topology(topo.id, user_id=user_id)
+        now = datetime.now(timezone.utc)
+        entity.deleted_at = now
+        entity.deleted_by = user_id
+        await self.session.flush()
+
+    async def list_topologies(
+        self, params: PaginationParams, project_id: uuid.UUID | None = None
     ) -> tuple[list[NetworkTopologyResponse], PaginationMeta]:
+        filters = {"project_id": project_id} if project_id else None
         items, total = await self.topology_repo.list_paginated(
             page=params.page,
             page_size=params.page_size,
             keyword=params.keyword,
             sort=params.sort or "updated_at",
             order=params.order,
+            filters=filters,
             search_fields=["name", "description"],
         )
         pagination = PaginationMeta(
@@ -147,9 +277,14 @@ class NetworkDesignService:
     async def create_topology(
         self, payload: NetworkTopologyCreate, user_id: uuid.UUID | None = None
     ) -> NetworkTopologyResponse:
+        if payload.project_id:
+            project = await self.project_repo.get_by_id(payload.project_id)
+            if not project:
+                raise NotFoundError("Network project not found")
         entity = NetworkTopology(
             name=payload.name.strip(),
             description=payload.description,
+            project_id=payload.project_id,
             created_by=user_id,
             updated_by=user_id,
         )
@@ -169,6 +304,11 @@ class NetworkDesignService:
             entity.name = payload.name.strip()
         if payload.description is not None:
             entity.description = payload.description
+        if payload.project_id is not None:
+            project = await self.project_repo.get_by_id(payload.project_id)
+            if not project:
+                raise NotFoundError("Network project not found")
+            entity.project_id = payload.project_id
         entity.updated_by = user_id
         await self.session.flush()
         return NetworkTopologyResponse.model_validate(entity)
@@ -203,6 +343,7 @@ class NetworkDesignService:
             id=entity.id,
             name=entity.name,
             description=entity.description,
+            project_id=entity.project_id,
             nodes=[
                 self._to_node_response(node, device_map.get(node.device_id) if node.device_id else None)
                 for node in nodes

@@ -13,13 +13,17 @@ import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const {
+  projects,
+  currentProjectId,
+  currentProject,
   currentId,
   currentTopology,
   nodes,
   links,
   loading,
   saving,
-  loadTopologies,
+  loadProjects,
+  selectProject,
   saveCanvas,
 } = useNetworkTopology()
 
@@ -84,8 +88,13 @@ function removeLink(linkId: string) {
   links.value = links.value.filter((l) => l.id !== linkId)
 }
 
+async function onProjectChange(id: string) {
+  if (!id) return
+  await selectProject(id)
+}
+
 onMounted(() => {
-  void loadTopologies()
+  void loadProjects()
 })
 </script>
 
@@ -95,7 +104,22 @@ onMounted(() => {
       <section class="workspace">
         <div class="toolbar">
           <span class="title">接口设计</span>
-          <span v-if="currentTopology" class="topology-name">当前拓扑：{{ currentTopology.name }}</span>
+          <el-select
+            :model-value="currentProjectId"
+            placeholder="选择项目"
+            style="width: 220px"
+            filterable
+            @change="onProjectChange"
+          >
+            <el-option
+              v-for="p in projects"
+              :key="p.id"
+              :label="`${p.name} (${p.code})`"
+              :value="p.id"
+            />
+          </el-select>
+          <span v-if="currentProject" class="topology-name">项目：{{ currentProject.name }}</span>
+          <span v-if="currentTopology" class="topology-name">拓扑：{{ currentTopology.name }}</span>
           <el-select v-model="linkType" style="width: 220px" :disabled="!canEdit">
               <el-option v-for="(label, key) in LINK_TYPE_LABELS" :key="key" :label="label" :value="key" />
             </el-select>
@@ -124,7 +148,7 @@ onMounted(() => {
               </template>
             </el-table-column>
           </el-table>
-          <el-empty v-else description="请先在「拓扑设计」中创建拓扑，或选择已有拓扑" />
+          <el-empty v-else description="请先在「设备定义」中创建或选择项目" />
       </section>
     </el-card>
 

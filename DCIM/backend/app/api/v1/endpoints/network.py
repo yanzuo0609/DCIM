@@ -28,11 +28,12 @@ async def list_topologies(
     keyword: str | None = None,
     sort: str = "updated_at",
     order: str = "desc",
+    project_id: uuid.UUID | None = None,
 ) -> PaginatedResponse[NetworkTopologyResponse]:
     params = PaginationParams(
         page=page, page_size=page_size, keyword=keyword, sort=sort, order=order
     )
-    items, pagination = await service.list_topologies(params)
+    items, pagination = await service.list_topologies(params, project_id=project_id)
     return PaginatedResponse(
         data=PaginatedData(items=items, pagination=pagination),
         timestamp=datetime.now(),

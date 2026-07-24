@@ -102,17 +102,20 @@ def default_slots() -> list[SlotConfig]:
 class NetworkTopologyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
+    project_id: uuid.UUID | None = None
 
 
 class NetworkTopologyUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
+    project_id: uuid.UUID | None = None
 
 
 class NetworkTopologyResponse(BaseModel):
     id: uuid.UUID
     name: str
     description: str | None
+    project_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -165,10 +168,35 @@ class NetworkTopologyDetailResponse(BaseModel):
     id: uuid.UUID
     name: str
     description: str | None
+    project_id: uuid.UUID | None = None
     nodes: list[NetworkNodeResponse]
     links: list[NetworkLinkResponse]
     created_at: datetime
     updated_at: datetime
+
+
+class NetworkProjectCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+
+
+class NetworkProjectUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=50)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+
+
+class NetworkProjectResponse(BaseModel):
+    id: uuid.UUID
+    code: str
+    name: str
+    description: str | None
+    topology_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 def _clamp_int(value: object, lo: int, hi: int, default: int | None = None) -> int | None:

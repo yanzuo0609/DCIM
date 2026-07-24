@@ -1,10 +1,24 @@
 import uuid
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
+
+
+class NetworkProject(BaseModel):
+    __tablename__ = "network_project"
+    __table_args__ = (UniqueConstraint("code", name="uk_network_project_code"),)
+
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    topologies: Mapped[list["NetworkTopology"]] = relationship(
+        "NetworkTopology",
+        back_populates="project",
+    )
 
 
 class NetworkTopology(BaseModel):
@@ -12,7 +26,17 @@ class NetworkTopology(BaseModel):
 
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("network_project.id"),
+        nullable=True,
+        index=True,
+    )
 
+    project: Mapped["NetworkProject | None"] = relationship(
+        "NetworkProject",
+        back_populates="topologies",
+    )
     nodes: Mapped[list["NetworkNode"]] = relationship(
         "NetworkNode",
         back_populates="topology",

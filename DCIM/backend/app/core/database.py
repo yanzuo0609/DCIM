@@ -19,6 +19,7 @@ from app.models import (  # noqa: F401
     IpAddress,
     NetworkLink,
     NetworkNode,
+    NetworkProject,
     NetworkTopology,
     Floor,
     Manufacturer,
@@ -416,6 +417,73 @@ async def _ensure_sqlite_network_node_columns(connection) -> None:
         await connection.exec_driver_sql("ALTER TABLE network_node ADD COLUMN port_layout JSON")
 
 
+async def _ensure_sqlite_network_project(connection) -> None:
+    """Create network_project / topology.project_id for existing SQLite DBs without alembic."""
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    tables = await connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='network_project'"
+    )
+    if not tables.fetchall():
+        await connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS network_project (
+              id CHAR(36) NOT NULL PRIMARY KEY,
+              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              created_by CHAR(36),
+              updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_by CHAR(36),
+              deleted_at DATETIME,
+              deleted_by CHAR(36),
+              version INTEGER NOT NULL DEFAULT 1,
+              code VARCHAR(50) NOT NULL UNIQUE,
+              name VARCHAR(100) NOT NULL,
+              description TEXT
+            )
+            """
+        )
+    topo = await connection.exec_driver_sql("PRAGMA table_info(network_topology)")
+    topo_cols = {row[1] for row in topo.fetchall()}
+    if topo_cols and "project_id" not in topo_cols:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_topology ADD COLUMN project_id CHAR(36)"
+        )
+    # Backfill orphan topologies under DEFAULT project
+    if not topo_cols:
+        return
+    orphans = await connection.exec_driver_sql(
+        """
+        SELECT COUNT(1) FROM network_topology
+        WHERE deleted_at IS NULL AND project_id IS NULL
+        """
+    )
+    orphan_count = orphans.fetchone()[0] if orphans else 0
+    if orphan_count:
+        existing = await connection.exec_driver_sql(
+            "SELECT id FROM network_project WHERE code='DEFAULT' AND deleted_at IS NULL LIMIT 1"
+        )
+        row = existing.fetchone()
+        if row:
+            project_id = row[0]
+        else:
+            import uuid as _uuid
+
+            project_id = str(_uuid.uuid4())
+            await connection.exec_driver_sql(
+                f"""
+                INSERT INTO network_project (id, version, code, name, description)
+                VALUES ('{project_id}', 1, 'DEFAULT', '默认项目', '自动创建，挂载已有拓扑')
+                """
+            )
+        await connection.exec_driver_sql(
+            f"""
+            UPDATE network_topology
+            SET project_id = '{project_id}'
+            WHERE deleted_at IS NULL AND project_id IS NULL
+            """
+        )
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -425,6 +493,7 @@ async def init_db() -> None:
         await _ensure_sqlite_device_contract_columns(conn)
         await _ensure_sqlite_ip_address_columns(conn)
         await _ensure_sqlite_network_node_columns(conn)
+        await _ensure_sqlite_network_project(conn)
 
     async with async_session_factory() as session:
         await seed_defaults(session)

@@ -11,13 +11,17 @@ import { useAuthStore } from '@/stores/auth'
 const router = useRouter()
 const auth = useAuthStore()
 const {
+  projects,
+  currentProjectId,
+  currentProject,
   topologies,
   currentId,
   nodes,
   links,
   loading,
   saving,
-  loadTopologies,
+  loadProjects,
+  selectProject,
   selectTopology,
   saveCanvas,
   createTopology,
@@ -42,6 +46,10 @@ function goToDevice(deviceId: string) {
 }
 
 async function handleCreateTopology(name: string, description: string | null) {
+  if (!currentProjectId.value) {
+    ElMessage.warning('请先在「设备定义」中创建项目')
+    return
+  }
   try {
     await createTopology(name, description)
     ElMessage.success('拓扑已创建')
@@ -50,8 +58,14 @@ async function handleCreateTopology(name: string, description: string | null) {
   }
 }
 
+async function onProjectChange(id: string) {
+  if (!id) return
+  selectedNodeId.value = null
+  await selectProject(id)
+}
+
 onMounted(() => {
-  void loadTopologies()
+  void loadProjects()
 })
 </script>
 
@@ -59,14 +73,32 @@ onMounted(() => {
   <div class="page" v-loading="loading">
     <el-card shadow="never" class="main-card">
       <div class="layout">
-        <NetworkTopologyPicker
-          :topologies="topologies"
-          :current-id="currentId"
-          :loading="loading"
-          @select="selectTopology"
-          @create="handleCreateTopology"
-          @delete="removeTopology"
-        />
+        <aside class="project-side">
+          <div class="side-title">项目</div>
+          <el-select
+            :model-value="currentProjectId"
+            placeholder="选择项目"
+            style="width: 100%"
+            filterable
+            @change="onProjectChange"
+          >
+            <el-option
+              v-for="p in projects"
+              :key="p.id"
+              :label="`${p.name} (${p.code})`"
+              :value="p.id"
+            />
+          </el-select>
+          <p v-if="currentProject" class="side-hint">{{ currentProject.description || '当前项目画布' }}</p>
+          <NetworkTopologyPicker
+            :topologies="topologies"
+            :current-id="currentId"
+            :loading="loading"
+            @select="selectTopology"
+            @create="handleCreateTopology"
+            @delete="removeTopology"
+          />
+        </aside>
 
         <section class="workspace">
           <div class="toolbar">
@@ -92,7 +124,7 @@ onMounted(() => {
             @select-node="selectedNodeId = $event"
             @move-node="moveNode"
           />
-          <el-empty v-else description="请选择或新建拓扑" />
+          <el-empty v-else description="请先在「设备定义」中创建或选择项目" />
         </section>
 
         <aside class="inspector">
@@ -138,8 +170,30 @@ onMounted(() => {
 
 .layout {
   display: grid;
-  grid-template-columns: 220px 1fr 280px;
+  grid-template-columns: 240px 1fr 280px;
   height: 100%;
+}
+
+.project-side {
+  border-right: 1px solid #ebeef5;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.side-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.side-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
 }
 
 .workspace {

@@ -84,12 +84,13 @@ function submitCreate() {
 
 <style scoped>
 .topology-picker {
-  width: 220px;
-  border-right: 1px solid #ebeef5;
-  padding: 16px;
+  width: 100%;
+  border: none;
+  padding: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  flex: 1;
 }
 
 .picker-header {

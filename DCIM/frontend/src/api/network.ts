@@ -145,6 +145,7 @@ export interface NetworkTopology {
   id: string
   name: string
   description: string | null
+  project_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -152,6 +153,16 @@ export interface NetworkTopology {
 export interface NetworkTopologyDetail extends NetworkTopology {
   nodes: NetworkNode[]
   links: NetworkLink[]
+}
+
+export interface NetworkProject {
+  id: string
+  code: string
+  name: string
+  description: string | null
+  topology_id: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface CanvasNodeInput {
@@ -244,7 +255,11 @@ export async function listNetworkTopologies(params: Record<string, unknown> = {}
   return response.data.data
 }
 
-export async function createNetworkTopology(payload: { name: string; description?: string | null }) {
+export async function createNetworkTopology(payload: {
+  name: string
+  description?: string | null
+  project_id?: string | null
+}) {
   const response = await api.post<ApiResponse<NetworkTopology>>('/network-topologies', payload)
   return unwrap(response)
 }
@@ -256,7 +271,7 @@ export async function getNetworkTopologyDetail(id: string): Promise<NetworkTopol
 
 export async function updateNetworkTopology(
   id: string,
-  payload: { name?: string; description?: string | null },
+  payload: { name?: string; description?: string | null; project_id?: string | null },
 ) {
   const response = await api.put<ApiResponse<NetworkTopology>>(`/network-topologies/${id}`, payload)
   return unwrap(response)
@@ -275,6 +290,37 @@ export async function saveNetworkCanvas(
 
 export async function deleteNetworkTopology(id: string) {
   await api.delete(`/network-topologies/${id}`)
+}
+
+export async function listNetworkProjects(params: Record<string, unknown> = {}) {
+  const response = await api.get('/network-projects', { params })
+  return response.data.data
+}
+
+export async function createNetworkProject(payload: {
+  code: string
+  name: string
+  description?: string | null
+}) {
+  const response = await api.post<ApiResponse<NetworkProject>>('/network-projects', payload)
+  return unwrap(response)
+}
+
+export async function getNetworkProject(id: string): Promise<NetworkProject> {
+  const response = await api.get<ApiResponse<NetworkProject>>(`/network-projects/${id}`)
+  return unwrap(response)
+}
+
+export async function updateNetworkProject(
+  id: string,
+  payload: { code?: string; name?: string; description?: string | null },
+) {
+  const response = await api.put<ApiResponse<NetworkProject>>(`/network-projects/${id}`, payload)
+  return unwrap(response)
+}
+
+export async function deleteNetworkProject(id: string) {
+  await api.delete(`/network-projects/${id}`)
 }
 
 export const PORT_TYPE_LABELS: Record<PortType, string> = {

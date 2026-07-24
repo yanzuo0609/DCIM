@@ -39,20 +39,37 @@ import { SEC_FRAME_HEIGHT_BY_U, defaultSecurityZones } from '@/utils/securityFro
 const router = useRouter()
 const auth = useAuthStore()
 const {
+  projects,
+  currentProjectId,
+  currentProject,
   currentId,
   nodes,
   links,
   loading,
   saving,
-  loadTopologies,
+  loadProjects,
+  selectProject,
+  createProject,
+  editProject,
+  removeProject,
   saveCanvas,
 } = useNetworkTopology()
 
 const canEdit = computed(() => auth.hasPermission('network:update'))
+const canCreate = computed(() => auth.hasPermission('network:create'))
+const canDelete = computed(() => auth.hasPermission('network:delete'))
 const deviceOptions = ref<Device[]>([])
 const deviceLoading = ref(false)
 const selectedNodeId = ref<string | null>(null)
 const basicVisible = ref(false)
+const projectDialogVisible = ref(false)
+const projectDialogMode = ref<'create' | 'edit'>('create')
+const projectForm = reactive({
+  code: '',
+  name: '',
+  description: '',
+})
+const projectSaving = ref(false)
 const basicForm = reactive({
   kind: 'switch' as NetworkNodeKind,
   name: '',
@@ -81,8 +98,8 @@ const peerNodes = computed(() =>
 )
 
 function openCreate(kind: NetworkNodeKind) {
-  if (!currentId.value) {
-    ElMessage.warning('请先在「拓扑设计」中创建拓扑')
+  if (!currentId.value || !currentProjectId.value) {
+    ElMessage.warning('请先创建或选择项目')
     return
   }
   basicForm.kind = kind
@@ -103,6 +120,61 @@ function openCreate(kind: NetworkNodeKind) {
     basicForm.security_height_u = 1
   }
   basicVisible.value = true
+}
+
+function openCreateProject() {
+  projectDialogMode.value = 'create'
+  projectForm.code = ''
+  projectForm.name = ''
+  projectForm.description = ''
+  projectDialogVisible.value = true
+}
+
+function openEditProject() {
+  if (!currentProject.value) return
+  projectDialogMode.value = 'edit'
+  projectForm.code = currentProject.value.code
+  projectForm.name = currentProject.value.name
+  projectForm.description = currentProject.value.description || ''
+  projectDialogVisible.value = true
+}
+
+async function confirmProjectDialog() {
+  if (!projectForm.code.trim() || !projectForm.name.trim()) {
+    ElMessage.warning('请填写项目编码与名称')
+    return
+  }
+  projectSaving.value = true
+  try {
+    if (projectDialogMode.value === 'create') {
+      await createProject({
+        code: projectForm.code,
+        name: projectForm.name,
+        description: projectForm.description || null,
+      })
+      ElMessage.success('项目已创建')
+    } else if (currentProjectId.value) {
+      await editProject(currentProjectId.value, {
+        code: projectForm.code,
+        name: projectForm.name,
+        description: projectForm.description || null,
+      })
+      ElMessage.success('项目已更新')
+    }
+    projectDialogVisible.value = false
+  } catch (err: unknown) {
+    const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message
+    ElMessage.error(msg || '操作失败')
+  } finally {
+    projectSaving.value = false
+  }
+}
+
+async function onProjectChange(id: string) {
+  if (!id || id === currentProjectId.value) return
+  selectedNodeId.value = null
+  await selectProject(id)
+  if (nodes.value.length) selectNode(nodes.value[0])
 }
 
 function onSwitchSubtypeChange(subtype: SwitchSubtype) {
@@ -288,7 +360,7 @@ watch(
 )
 
 onMounted(async () => {
-  await loadTopologies()
+  await loadProjects()
   await searchDevices('')
   if (nodes.value.length && !selectedNodeId.value) {
     selectNode(nodes.value[0])
@@ -302,6 +374,29 @@ onMounted(async () => {
       <section class="workspace">
         <div class="toolbar">
           <span class="title">设备定义</span>
+          <div class="project-bar">
+            <span class="project-label">项目</span>
+            <el-select
+              :model-value="currentProjectId"
+              placeholder="选择项目"
+              style="width: 220px"
+              filterable
+              :disabled="!projects.length"
+              @change="onProjectChange"
+            >
+              <el-option
+                v-for="p in projects"
+                :key="p.id"
+                :label="`${p.name} (${p.code})`"
+                :value="p.id"
+              />
+            </el-select>
+            <el-button v-if="canCreate" type="primary" plain @click="openCreateProject">新建项目</el-button>
+            <el-button v-if="canEdit" :disabled="!currentProjectId" @click="openEditProject">编辑</el-button>
+            <el-button v-if="canDelete" type="danger" plain :disabled="!currentProjectId" @click="removeProject">
+              删除
+            </el-button>
+          </div>
           <el-button-group v-if="canEdit">
             <el-button :disabled="!currentId" @click="openCreate('switch')">网络设备</el-button>
             <el-button :disabled="!currentId" @click="openCreate('server')">服务器</el-button>
@@ -402,12 +497,37 @@ onMounted(async () => {
           </section>
           <el-empty v-else description="请选择设备以编辑接口构成" class="editor-empty" />
         </div>
-        <el-empty v-else description="请先在「拓扑设计」中创建拓扑，或选择已有拓扑" />
+        <el-empty v-else description="请先新建或选择项目，再添加设备" />
       </section>
     </el-card>
 
+    <el-dialog
+      v-model="projectDialogVisible"
+      :title="projectDialogMode === 'create' ? '新建项目' : '编辑项目'"
+      width="480px"
+    >
+      <el-form label-width="90px">
+        <el-form-item label="项目编码" required>
+          <el-input v-model="projectForm.code" placeholder="如 PROJ01" maxlength="50" />
+        </el-form-item>
+        <el-form-item label="项目名称" required>
+          <el-input v-model="projectForm.name" placeholder="项目显示名称" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="projectForm.description" type="textarea" :rows="3" maxlength="500" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="projectDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="projectSaving" @click="confirmProjectDialog">确定</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="basicVisible" title="新建设备" width="620px">
       <el-form label-width="120px">
+        <el-form-item label="所属项目">
+          <el-tag type="info">{{ currentProject?.name || '—' }}</el-tag>
+        </el-form-item>
         <el-form-item label="类型">
           <el-tag>{{ NODE_KIND_LABELS[basicForm.kind] }}</el-tag>
         </el-form-item>
@@ -583,8 +703,22 @@ onMounted(async () => {
   margin-bottom: 12px;
 }
 
+.project-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-right: 8px;
+}
+
+.project-label {
+  color: #606266;
+  font-size: 13px;
+}
+
 .title {
   font-weight: 600;
+  margin-right: 4px;
 }
 
 .content {
