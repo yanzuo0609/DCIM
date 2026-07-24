@@ -1,640 +1,254 @@
 ---
 title: Database Design Specification
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Database
 ---
 
-# Database Design Specification
+# Database Design Specification (DDS)
 
-> RackDCIM Pro
->
-> Database Design (DDS)
+> PostgreSQL 16 (production) · SQLite (development) · SQLAlchemy 2.x · Alembic
 
 ---
 
-# Revision History
+## Revision History
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1: room layout columns, migrations 0003–0005 |
-
----
-
-# Table of Contents
-
-1. Database Overview
-2. Design Principles
-3. Naming Convention
-4. Data Types
-5. Audit Fields
-6. Primary Key Strategy
-7. Foreign Key Strategy
-8. Index Strategy
-9. Soft Delete
-10. Database Schema
-11. Core Tables
-12. Relationship Design
-13. Constraints
-14. Performance Design
-15. Backup Strategy
-16. Migration Strategy
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | Complete table catalog, migrations 0001–0016, dev/prod paths |
 
 ---
 
-# 1 Database Overview
+## 1. Overview
 
-数据库采用：
-
-```
-PostgreSQL 16
-```
-
-开发环境：
-
-```
-SQLite
-```
-
-ORM：
-
-```
-SQLAlchemy 2.x
-```
-
-Migration：
-
-```
-Alembic
-```
-
-数据库目标：
-
-- 高性能
-- 高一致性
-- 易扩展
-- 多租户预留
-- AI Ready
+| Item | Value |
+| ---- | ----- |
+| ORM | SQLAlchemy 2.x async |
+| Migrations | Alembic (`backend/alembic/`) |
+| Dev URL | `sqlite+aiosqlite:///./rackdcim.db` |
+| Prod URL | `postgresql+asyncpg://...` |
+| Init | `init_db()` on app startup |
+| Seed | `seed_defaults()` when no users |
 
 ---
 
-# 2 Design Principles
+## 2. Design Principles
 
-数据库遵循以下原则：
-
-- Third Normal Form（3NF）
-- UUID 主键
-- 审计字段统一
-- 逻辑删除
-- 乐观锁预留
-- 全部字段必须备注
-- 禁止业务逻辑进入数据库
+- UUID primary keys (distributed-safe)
+- 3NF normalized core schema
+- Soft delete via `deleted_at`
+- Unified audit columns on all business tables
+- Business logic in application layer, not DB triggers
+- Real foreign keys for referential integrity
 
 ---
 
-# 3 Naming Convention
+## 3. Naming Conventions
 
-## Table
+| Object | Rule | Example |
+| ------ | ---- | ------- |
+| Table | snake_case singular | `device`, `rack_template` |
+| Column | snake_case | `created_at`, `device_model_id` |
+| PK | `id` UUID | |
+| UK | `uk_{table}_{column}` | `uk_rack_room_code` |
+| FK | implicit `_id` suffix | `room_id` → `room.id` |
+| Index | `ix_*` / inline `index=True` | |
 
-全部小写
+---
 
-snake_case
+## 4. Standard Column Set (BaseModel)
 
-例如：
+Every business table includes:
 
-```
-rack
-device
-room
-user_role
-audit_log
+```sql
+id              UUID PRIMARY KEY
+created_at      TIMESTAMP NOT NULL
+created_by      UUID NULL
+updated_at      TIMESTAMP NOT NULL
+updated_by      UUID NULL
+deleted_at      TIMESTAMP NULL
+deleted_by      UUID NULL
+version         INTEGER NOT NULL DEFAULT 1
 ```
 
 ---
 
-## Column
+## 5. Table Catalog (V1 — 22 tables)
 
-全部：
+### 5.1 Infrastructure (4)
 
-snake_case
+| Table | PK | Notable Columns | UK/FK |
+| ----- | -- | --------------- | ----- |
+| datacenter | id | code, name, location | uk code |
+| building | id | datacenter_id, name | FK datacenter |
+| floor | id | building_id, name | FK building |
+| room | id | floor_id, name, rack_rows, rack_columns, row_layout, code_mode, code_prefix, slot_codes | FK floor; uk (floor_id, name) |
 
-例如：
+### 5.2 Rack (3)
 
-```
-created_at
-updated_at
-deleted_at
-device_name
-rack_id
-```
+| Table | PK | Notable Columns | UK/FK |
+| ----- | -- | --------------- | ----- |
+| rack_template | id | code, total_u, width, depth | uk code |
+| rack | id | room_id, code, name, row_no, column_no, total_u, status | uk (room_id, code), uk (room_id, name) |
+| rack_position | id | rack_id, u_position, occupied, device_id | FK rack, device |
 
----
+### 5.3 Device (9)
 
-## Index
+| Table | UK |
+| ----- | -- |
+| manufacturer | code |
+| device_category | code |
+| device_type | code |
+| device_param_profile | code |
+| device_system_profile | code |
+| device_bmc_profile | code |
+| device_model | code |
+| device_contract | contract_no |
+| device | hostname, serial_number |
 
-格式：
+Device FKs: model, type, profiles, contract, rack.
 
-```
-idx_table_column
-```
+### 5.4 IP (1)
 
-例如：
+| Table | UK | Notable |
+| ----- | -- | ------- |
+| ip_address | system_ip | bmc_ip, vip, status, bind_type, scope_rack_ids JSON |
 
-```
-idx_device_hostname
-```
+### 5.5 Identity (5)
 
----
+| Table | Purpose |
+| ----- | ------- |
+| users | Accounts |
+| role | RBAC roles |
+| permission | Permission codes |
+| user_role | M:N |
+| role_permission | M:N |
 
-## Unique
+### 5.6 System (1)
 
-```
-uk_table_column
-```
+| Table | Purpose |
+| ----- | ------- |
+| audit_log | Action audit trail |
 
-例如：
+### 5.7 Planned (not created)
 
-```
-uk_rack_code
-```
-
----
-
-## Foreign Key
-
-```
-fk_child_parent
-```
-
-例如：
-
-```
-fk_device_rack
-```
-
----
-
-# 4 Data Types
-
-| Business    | Database      |
-| ----------- | ------------- |
-| ID          | UUID          |
-| Name        | VARCHAR(100)  |
-| Code        | VARCHAR(50)   |
-| Description | TEXT          |
-| Boolean     | BOOLEAN       |
-| DateTime    | TIMESTAMP     |
-| JSON        | JSONB         |
-| Power       | NUMERIC(10,2) |
-| Weight      | NUMERIC(10,2) |
+`asset`, `vendor`, `purchase_order`, `dashboard_snapshot`, `system_config`, `file_storage`.
 
 ---
 
-# 5 Audit Fields
+## 6. Relationship Hierarchy
 
-所有业务表统一包含：
-
-| Field      | Type      |
-| ---------- | --------- |
-| created_at | TIMESTAMP |
-| created_by | UUID      |
-| updated_at | TIMESTAMP |
-| updated_by | UUID      |
-| deleted_at | TIMESTAMP |
-| deleted_by | UUID      |
-| version    | INTEGER   |
-
-说明：
-
-- 支持审计
-- 支持乐观锁
-- 支持软删除
-
----
-
-# 6 Primary Key Strategy
-
-统一：
-
-```
-UUID
-```
-
-示例：
-
-```
-id UUID PRIMARY KEY
-```
-
-优点：
-
-- 分布式
-- 安全
-- 避免自增冲突
-
----
-
-# 7 Foreign Key Strategy
-
-全部采用真实外键。
-
-例如：
-
-```
-device
-
-↓
-
-rack
-
-↓
-
-room
-
-↓
-
-floor
-
-↓
-
-building
-
-↓
-
+```text
 datacenter
-```
+  └── building
+        └── floor
+              └── room
+                    └── rack
+                          └── rack_position ← device (when mounted)
 
-保证数据一致性。
+device ──→ device_model ──→ manufacturer
+       ──→ device_type / profiles / device_contract
+       ←── ip_address (optional bind)
 
----
-
-# 8 Index Strategy
-
-建立以下索引：
-
-- 主键索引
-- 唯一索引
-- 外键索引
-- 查询索引
-- 组合索引
-
-例如：
-
-```
-hostname
-
-serial_number
-
-rack_id
-
-room_id
-
-(device_type,status)
+users ←→ role ←→ permission
 ```
 
 ---
 
-# 9 Soft Delete
+## 7. Constraints & Invariants
 
-采用：
+| Constraint | Enforcement |
+| ---------- | ----------- |
+| Rack code per room | DB uk_rack_room_code + service |
+| Device hostname/SN | DB unique + service |
+| IP system_ip | DB unique |
+| U position overlap | Service (layout engine) |
+| Room layout shrink | Service validation |
+| slot_codes uniqueness | Service (case-insensitive) |
+| Admin protection | Service (user_mgmt) |
 
-```
-deleted_at
-```
+---
 
-而不是：
+## 8. Alembic Migration Chain
 
-```
-status=0
-```
+| Rev | File | Change |
+| --- | ---- | ------ |
+| 0001 | initial | DC, user, RBAC, building, floor, room |
+| 0002 | add_rack_tables | rack_template, rack, rack_position |
+| 0003 | add_room_rack_layout | rack_rows, rack_columns |
+| 0004 | add_room_row_layout | row_layout JSON |
+| 0005 | add_room_slot_codes | code_mode, code_prefix, slot_codes |
+| 0006 | rack_code_unique_per_room | uk (room_id, code) |
+| 0007 | device_types_and_profiles | device_type, profiles, device FKs |
+| 0008 | bmc_profile | device_bmc_profile |
+| 0009 | ip_address | ip_address table |
+| 0010 | ip_network_fields | netmask, gateway, dns |
+| 0011 | ip_address_status | status column |
+| 0012 | device_contract | device_contract, device.contract_id |
+| 0013 | contract_manual_fields | manual name fields |
+| 0014 | contract_multi_names | JSON name arrays |
+| 0015 | contract_manufacturer_names | manufacturer_names |
+| 0016 | contract_items_total | device_items, contract_total |
 
-查询默认：
+**Production deploy:**
 
-```
-deleted_at IS NULL
+```bash
+cd backend
+alembic upgrade head
 ```
 
 ---
 
-# 10 Database Schema
+## 9. Development (SQLite) Path
 
-系统划分以下 Schema：
+When `database_url` starts with `sqlite`:
 
-| Schema | Description |
-| ------ | ----------- |
-| public | 业务数据    |
-| audit  | 审计日志    |
-| system | 系统配置    |
+1. `Base.metadata.create_all()` creates all ORM tables
+2. `_ensure_sqlite_*` patches in `core/database.py` align columns with migrations 0003–0016
+3. `seed_defaults()` runs if no users exist
 
----
-
-# 11 Core Tables
-
-## Infrastructure
-
-| Table      |
-| ---------- |
-| datacenter |
-| building   |
-| floor      |
-| room       |
-
-### room 表关键列（V1）
-
-| Column       | Type         | Notes                                      |
-| ------------ | ------------ | ------------------------------------------ |
-| floor_id     | UUID FK      | → floor.id                                 |
-| name         | VARCHAR(100) | 同楼层唯一（uk_room_floor_name）           |
-| description  | TEXT         | 可空                                       |
-| rack_rows    | INTEGER      | NOT NULL，默认 4                           |
-| rack_columns | INTEGER      | NOT NULL，默认 6                           |
-| row_layout   | JSON         | 可空；如 `[6,6,8,4]`；空则均匀网格         |
-| code_mode    | VARCHAR(20)  | NOT NULL，默认 `auto`（`auto`/`custom`）  |
-| code_prefix  | VARCHAR(50)  | 可空；自动编号前缀表达式                   |
-| slot_codes   | JSON         | 可空；机柜位编号矩阵                       |
-
-另含 BaseModel 审计字段：`id`、`created_at`、`created_by`、`updated_at`、`updated_by`、`deleted_at`、`deleted_by`、`version`。
+This allows zero-config local dev without running Alembic. **Production must use Alembic**, not rely on create_all patches.
 
 ---
 
-## Rack
+## 10. Index Strategy
 
-| Table         |
-| ------------- |
-| rack          |
-| rack_template |
-| rack_position |
-
----
-
-## Device
-
-| Table           |
-| --------------- |
-| device          |
-| device_model    |
-| manufacturer    |
-| device_category |
+| Pattern | Tables |
+| ------- | ------ |
+| FK indexes | All `*_id` foreign keys |
+| Lookup | device.hostname, device.serial_number, ip_address.system_ip |
+| Filter | ip_address.status, device.status |
+| Pagination | created_at (default sort) |
 
 ---
 
-## Asset
+## 11. Performance & Capacity
 
-| Table          |
-| -------------- |
-| asset          |
-| vendor         |
-| purchase_order |
-
----
-
-## User
-
-| Table           |
-| --------------- |
-| user            |
-| role            |
-| permission      |
-| user_role       |
-| role_permission |
+| Entity | Expected Scale | Query Target |
+| ------ | -------------- | -------------- |
+| rack | 10,000+ | <100ms list |
+| device | 200,000+ | paginated <500ms |
+| audit_log | 10M+ | indexed time range |
+| dashboard | aggregate | <2s |
 
 ---
 
-## Dashboard
+## 12. Backup Strategy
 
-| Table              |
-| ------------------ |
-| dashboard_snapshot |
-
----
-
-## System
-
-| Table         |
-| ------------- |
-| audit_log     |
-| system_config |
-| file_storage  |
+| Environment | Method |
+| ----------- | ------ |
+| PostgreSQL | pg_dump daily; WAL optional |
+| SQLite dev | Copy `rackdcim.db` |
+| Docker | Volume `postgres_data` |
 
 ---
 
-# 12 Relationship Design
-
-```
-DataCenter
-
-↓
-
-Building
-
-↓
-
-Floor
-
-↓
-
-Room
-
-↓
-
-Rack
-
-↓
-
-RackPosition
-
-↓
-
-Device
-```
-
-权限关系：
-
-```
-User
-
-↓
-
-Role
-
-↓
-
-Permission
-```
-
----
-
-# 13 Constraints
-
-必须保证：
-
-- Rack Code 全局唯一
-- Device SN / hostname 唯一
-- Username / Email 唯一
-- Room 在同一 Floor 内 name 唯一
-- Room `slot_codes` 机房内大小写不敏感唯一
-- Rack `name` 在同一 Room 内唯一
-- Rack `(room_id, row_no, column_no)` 位置不冲突（业务层校验）
-
-U 位：
-
-```
-Rack + UPosition
-
-Unique
-```
-
-禁止重复占用。
-
-缩小 Room 布局时，不得小于已有机柜所在行列。
-
----
-
-# 14 Performance Design
-
-预计：
-
-```
-Rack
-
-10000+
-
-Device
-
-200000+
-
-User
-
-5000+
-
-Audit
-
-10000000+
-```
-
-要求：
-
-普通查询：
-
-```
-<100ms
-```
-
-分页：
-
-```
-<500ms
-```
-
-Dashboard：
-
-```
-<2s
-```
-
----
-
-# 15 Backup Strategy
-
-支持：
-
-- pg_dump
-- WAL
-- Docker Volume
-- 自动备份
-
-未来：
-
-- PostgreSQL Cluster
-
----
-
-# 16 Migration Strategy
-
-统一：
-
-```
-Alembic
-```
-
-迁移流程：
-
-```
-ORM
-
-↓
-
-Alembic Revision
-
-↓
-
-Review
-
-↓
-
-Migration
-
-↓
-
-Deploy
-```
-
-禁止直接修改数据库。
-
-### V1 已落地迁移（room 布局相关）
-
-| Revision | File | 变更 |
-| -------- | ---- | ---- |
-| 0003 | `0003_add_room_rack_layout.py` | `rack_rows`、`rack_columns` |
-| 0004 | `0004_add_room_row_layout.py` | `row_layout` JSON |
-| 0005 | `0005_add_room_slot_codes.py` | `code_mode`、`code_prefix`、`slot_codes` |
-
-链：`0002_add_rack_tables` → `0003` → `0004` → `0005`。
-
-### SQLite 开发路径补列
-
-当 `database_url` 以 `sqlite` 开头时，`create_all` 之后由 `_ensure_sqlite_room_columns`（`app/core/database.py`）用 `PRAGMA` + `ALTER TABLE` 补齐上述 room 列，再执行 `seed_defaults`。生产 / PostgreSQL 仍以 Alembic 为准。
-
----
-
-# Appendix A
-
-## Planned Tables（V1）
-
-| Category       | Table Count |
-| -------------- | ----------- |
-| Infrastructure | 4           |
-| Rack           | 3           |
-| Device         | 4           |
-| Asset          | 3           |
-| User           | 5           |
-| System         | 5           |
-
-预计：
-
-```
-约25~30张核心业务表
-```
-
-V2 将扩展：
-
-- cable
-- pdu
-- ups
-- monitoring
-- ipam
-- cmdb
-
----
-
-# References
-
-- docs/02-System-Architecture.md
-- docs/03-Domain-Model.md
-- docs/05-API-Design.md
-
----
+## References
+
+- [03-Domain-Model.md](03-Domain-Model.md)
+- [05-API-Design.md](05-API-Design.md)
+- [12-Deployment.md](12-Deployment.md)

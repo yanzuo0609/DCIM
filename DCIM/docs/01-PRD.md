@@ -1,387 +1,233 @@
 ---
 title: Product Requirement Document
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Product
-reviewers:
-approved_by:
 ---
 
-# Product Requirement Document（PRD）
+# Product Requirement Document (PRD)
 
-> RackDCIM Pro
->
-> AI Native Data Center Infrastructure Management Platform
+> RackDCIM Pro — AI Native Data Center Infrastructure Management Platform
 
 ---
 
-# Revision History
+## Document Conventions
 
-| Version | Date       | Author | Description   |
-| ------- | ---------- | ------ | ------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Draft |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 room layout & RBAC scope |
-
----
-
-# Table of Contents
-
-1. Product Overview
-2. Business Background
-3. Product Positioning
-4. Product Objectives
-5. Product Value
-6. Target Users
-7. Product Scope
-8. Product Principles
-9. Product Roadmap
+| Symbol | Meaning |
+| ------ | ------- |
+| ✅ | Delivered in V1 |
+| 🚧 | Partial |
+| 📋 | Future version |
 
 ---
 
-# 1 Product Overview
+## Revision History
 
-## 1.1 Product Name
-
-### Chinese Name
-
-RackDCIM Pro
-
-智能数据中心基础设施管理平台
-
-### English Name
-
-RackDCIM Pro
-
-### Product Slogan
-
-AI Native Infrastructure Management Platform
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.0.0 | 2026-07-16 | Enzo | Initial draft |
+| 1.1.0 | 2026-07-17 | Enzo | Room layout & RBAC scope |
+| 1.2.0 | 2026-07-22 | Enzo | IP, contracts, profiles |
+| 1.3.0 | 2026-07-22 | Enzo | Professional rewrite with acceptance criteria |
 
 ---
 
-## 1.2 Product Vision
+## 1. Product Overview
 
-打造一套现代化、智能化、轻量级的数据中心基础设施管理平台（DCIM）。
+### 1.1 Product Identity
 
-通过统一的数据模型、自动布局算法、可视化展示和 AI 能力，帮助企业实现基础设施数字化管理。
+| Field | Value |
+| ----- | ----- |
+| Product name | RackDCIM Pro |
+| Chinese name | 智能数据中心基础设施管理平台 |
+| Slogan | AI Native Infrastructure Management Platform |
+| Current release | 1.0.0 (application) |
 
----
+### 1.2 Vision
 
-## 1.3 Mission
+统一数据中心资产数据模型，提供机柜可视化、自动 U 位上架、导入导出与权限管理，替代 Excel 运维模式。
 
-建立一个：
+### 1.3 Mission
 
-- 易部署
-- 易维护
-- 可扩展
-- 开放接口
-- AI 原生
-
-的数据中心管理平台。
-
----
-
-# 2 Business Background
-
-## 2.1 Current Situation
-
-目前大量企业仍采用 Excel 管理：
-
-- 机柜
-- 服务器
-- 网络设备
-- 存储
-- PDU
-
-存在以下问题：
-
-- 数据分散
-- 更新困难
-- 多人维护冲突
-- 无法自动统计
-- 无法容量规划
-- 无法自动生成机柜图
-- 无法进行智能分析
+易部署、易维护、API First、可扩展、AI Ready（架构预留，V1 无 AI 运行时）。
 
 ---
 
-## 2.2 Pain Points
+## 2. Business Background
 
-### Pain Point 1
+### 2.1 Pain Points
 
-机柜利用率无法统计。
-
-### Pain Point 2
-
-设备查找效率低。
-
-### Pain Point 3
-
-人工维护成本高。
-
-### Pain Point 4
-
-设备上下架容易出错。
-
-### Pain Point 5
-
-无法自动规划。
-
-### Pain Point 6
-
-无法预测容量。
+| ID | Pain | V1 Solution |
+| -- | ---- | ----------- |
+| P1 | 机柜利用率无法统计 | Dashboard utilization ✅ |
+| P2 | 设备查找效率低 | 设备 CRUD + 机柜 SVG ✅ |
+| P3 | 人工维护成本高 | Excel 导入 + 快速建机房 ✅ |
+| P4 | 上下架易出错 | Layout conflict detection ✅ |
+| P5 | 无法自动规划 | Auto layout + mount API ✅ |
+| P6 | 无法预测容量 | 📋 V3 AI |
 
 ---
 
-# 3 Product Positioning
+## 3. Target Users
 
-RackDCIM Pro 是一款：
-
-- 企业级
-- 私有化部署
-- AI Native
-- 模块化
-- API First
-
-的数据中心基础设施管理平台。
+| Persona | Primary Tasks |
+| ------- | ------------- |
+| 数据中心管理员 | 建机房、机柜、看布局图 |
+| 运维工程师 | 设备上下架、IP 绑定 |
+| 资产管理员 | 合同、导入导出 |
+| 系统管理员 | 用户、角色、权限 |
+| 审计人员 | 📋 审计 UI（API ✅） |
 
 ---
 
-## 3.1 Core Features
+## 4. Functional Requirements (V1)
 
-- Asset Management
-- Rack Management
-- Device Management
-- Capacity Planning
-- Smart Layout
-- Dashboard
-- AI Assistant
+### 4.1 Infrastructure (FR-INF)
 
----
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-INF-01 | 数据中心 CRUD（含 location） | P0 | ✅ | `/datacenters` + DatacenterView |
+| FR-INF-02 | Building/Floor CRUD | P1 | ✅ | API；Room quick 自动创建 |
+| FR-INF-03 | Room 快速创建 | P0 | ✅ | `POST /rooms/quick` |
+| FR-INF-04 | Room 布局 row_layout | P0 | ✅ | auto/manual 模式 |
+| FR-INF-05 | 机柜位编号 slot_codes | P0 | ✅ | auto/custom code_mode |
+| FR-INF-06 | 布局图可视化 | P1 | ✅ | RoomView 抽屉 |
 
-# 4 Product Objectives
+### 4.2 Rack (FR-RACK)
 
-## Version 1.0
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-RACK-01 | 机柜模板 STD-42U/48U | P0 | ✅ | seed + RackView |
+| FR-RACK-02 | 机柜位选位创建 | P0 | ✅ | row_no/column_no |
+| FR-RACK-03 | 模板批量应用到机房 | P1 | ✅ | apply-to-room |
+| FR-RACK-04 | 批量放置机柜 | P1 | ✅ | place-batch |
+| FR-RACK-05 | 机柜 SVG | P0 | ✅ | `/racks/{id}/svg` |
+| FR-RACK-06 | 机柜 Excel 批量导入 | P2 | 📋 | — |
 
-必须完成：
+### 4.3 Device (FR-DEV)
 
-### Infrastructure
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-DEV-01 | 设备 CRUD | P0 | ✅ | DeviceView |
+| FR-DEV-02 | 厂商/型号/类型 catalog | P0 | ✅ | devices.py catalog APIs |
+| FR-DEV-03 | Param/System/BMC 配置档 | P1 | ✅ | profile APIs |
+| FR-DEV-04 | U 位上架/下架 | P0 | ✅ | layout mount/unmount |
+| FR-DEV-05 | Excel 导入 | P0 | ✅ | `/devices/import` |
+| FR-DEV-06 | Excel/PDF 导出 | P0 | ✅ | `/devices/export` |
+| FR-DEV-07 | 批量删除 | P1 | ✅ | batch-delete |
 
-- Data Center（含地理位置）
-- Building / Floor（可由机房快速创建自动建默认 `1F`）
-- Room（布局 row_layout、机柜位 slot_codes、布局图）
+### 4.4 IP Address (FR-IP)
 
-### Rack
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-IP-01 | IP CRUD | P0 | ✅ | `/ip-addresses` |
+| FR-IP-02 | 批量创建/删除 | P0 | ✅ | batch-create/delete |
+| FR-IP-03 | 绑定设备/机柜/范围 | P0 | ✅ | bind, batch-bind |
+| FR-IP-04 | 自动分配 | P1 | ✅ | allocate |
+| FR-IP-05 | 状态管理 | P1 | ✅ | free/allocated/disabled |
 
-- Rack Template（STD-42U / STD-48U）
-- Rack（机柜位选位、自定义 U）
-- Rack Group
+### 4.5 Device Contract (FR-CON)
 
-### Device
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-CON-01 | 合同 CRUD | P0 | ✅ | ContractView |
+| FR-CON-02 | 明细 Excel 导入 | P1 | ✅ | items/import |
+| FR-CON-03 | 绑定/解绑设备 | P1 | ✅ | bind/unbind-devices |
+| FR-CON-04 | 合同汇总 | P2 | ✅ | `/summary` |
 
-- Device Type
-- Device
-- Manufacturer
-- Model
+### 4.6 Security (FR-SEC)
 
-### Layout
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-SEC-01 | JWT 登录/刷新/登出 | P0 | ✅ | auth endpoints |
+| FR-SEC-02 | RBAC 权限 | P0 | ✅ | require_permissions |
+| FR-SEC-03 | 用户/角色管理 UI | P0 | ✅ | UserView, RoleView |
+| FR-SEC-04 | 默认 admin 种子 | P0 | ✅ | seed.py |
+| FR-SEC-05 | 审计日志 | P1 | 🚧 | API ✅, UI 📋 |
+| FR-SEC-06 | Rate limiting | P2 | 📋 | — |
 
-- Auto Layout
-- U Position
-- Conflict Detection
+### 4.7 Dashboard (FR-DASH)
 
-### Visualization
-
-- SVG Rack
-- Dashboard
-
-### Import / Export
-
-- Excel Import
-- Excel Export
-- PDF Export
-
-### Security
-
-- Login
-- RBAC
-- Audit Log
-
----
-
-## Version 2.0
-
-增加：
-
-- Cable Management
-- PDU
-- UPS
-- CMDB
-- REST API
-- LDAP
-
----
-
-## Version 3.0
-
-增加：
-
-- AI Assistant
-- Capacity Prediction
-- AI Layout
-- Digital Twin
+| ID | Requirement | Priority | Status | Acceptance |
+| -- | ----------- | -------- | ------ | ---------- |
+| FR-DASH-01 | 汇总统计 | P0 | ✅ | `/dashboard/summary` |
+| FR-DASH-02 | 利用率 | P0 | ✅ | `/dashboard/utilization` |
+| FR-DASH-03 | 功耗统计 | P2 | 📋 | — |
+| FR-DASH-04 | 设备数量趋势 | P2 | 📋 | — |
 
 ---
 
-# 5 Product Value
+## 5. Non-Functional Requirements
 
-## Business Value
-
-降低：
-
-- 人工维护成本
-- 上架时间
-- 查找时间
-
-提高：
-
-- 数据准确率
-- 管理效率
-- 利用率
+| ID | Category | Requirement | Target | Status |
+| -- | -------- | ----------- | ------ | ------ |
+| NFR-01 | Performance | API P95 | <500ms (typical CRUD) | 🚧 未压测 |
+| NFR-02 | Performance | SVG render | <500ms | 🚧 |
+| NFR-03 | Security | HTTPS production | Required | 📋 deploy doc |
+| NFR-04 | Security | Password min length | 12 chars | ✅ |
+| NFR-05 | Availability | Docker Compose deploy | Single node | ✅ |
+| NFR-06 | Maintainability | Code coverage | ≥90% goal | 📋 ~low today |
+| NFR-07 | i18n | 中英文 | Full UI | 📋 中文为主 |
 
 ---
 
-## Technical Value
+## 6. Product Scope Summary
 
-统一：
+### 6.1 Included (V1)
 
-- 数据模型
-- API
-- 权限
-- 数据来源
+数据中心、机房（快速创建/布局/编号）、机柜（模板/选位/SVG）、设备（档案/上下架/导入导出）、IP、合同、Dashboard、RBAC。
 
----
+### 6.2 Excluded (V1)
 
-# 6 Target Users
-
-## Primary Users
-
-- IDC
-- 企业IT
-- 运维工程师
-- 数据中心管理员
-- GPU集群管理员
+实时监控、工单、UPS/PDU 控制、AI 运行时、MinIO、Celery Worker、审计 UI。
 
 ---
 
-## Secondary Users
+## 7. Design Principles
 
-- 企业管理层
-- 运维经理
-- 审计人员
-
----
-
-# 7 Product Scope
-
-## Included
-
-V1 包括：
-
-- 数据中心
-- 机房（快速创建、布局与编号、布局图）
-- 机柜（模板与机柜位）
-- 设备
-- 自动布局（U 位）
-- Dashboard
-- SVG
-- Excel / PDF 导入导出
-- 用户 / 角色管理（RBAC）
+| Principle | Implementation |
+| --------- | -------------- |
+| API First | All features exposed via REST |
+| Configuration First | Rack templates, room layout, code rules |
+| Data Driven | Pinia + API, no page-only state |
+| AI Native | OpenAPI + structured data for future agents |
+| Plugin Architecture | 📋 Future |
 
 ---
 
-## Excluded
+## 8. Roadmap
 
-V1 不包括：
-
-- 实时监控
-- 视频监控
-- 工单审批
-- 自动控制UPS
-- 自动控制PDU
+| Version | Theme | Key Features |
+| ------- | ----- | ------------ |
+| V1.0 | Core DCIM | Rack, Device, Layout, IP, Contract, RBAC ✅ |
+| V2.0 | Operations | Cable, PDU, UPS, CMDB, LDAP |
+| V3.0 | Intelligence | AI Assistant, Prediction, Digital Twin |
 
 ---
 
-# 8 Product Design Principles
+## Appendix A — Glossary
 
-## API First
-
-所有业务必须提供 REST API。
-
----
-
-## Configuration First
-
-所有业务规则均可配置。
-
----
-
-## Data Driven
-
-数据驱动，而非页面驱动。
-
----
-
-## AI Native
-
-所有模块均可供 AI 调用。
-
----
-
-## Plug-in Architecture
-
-支持未来插件扩展。
-
----
-
-# 9 Product Roadmap
-
-| Version | Features                        |
-| ------- | ------------------------------- |
-| V1.0    | Rack、Device、Layout、Dashboard |
-| V2.0    | Cable、PDU、UPS、CMDB           |
-| V3.0    | AI、Prediction、Digital Twin    |
-
----
-
-# Appendix A - Glossary
-
-| Term | Description                           |
-| ---- | ------------------------------------- |
+| Term | Definition |
+| ---- | ---------- |
 | DCIM | Data Center Infrastructure Management |
-| Rack | 机柜                                  |
-| U    | Rack Unit                             |
-| PDU  | Power Distribution Unit               |
-| CMDB | Configuration Management Database     |
-| RBAC | Role Based Access Control             |
+| U | Rack unit (1.75") |
+| RBAC | Role-Based Access Control |
+| slot_codes | 2D matrix of rack position labels in a room |
 
 ---
 
-# Appendix B - Non Goals
+## Appendix B — Non-Goals (V1)
 
-以下内容不属于 V1：
-
-- AI 视频识别
-- IoT 实时采集
-- 大屏监控系统
-- 自动巡检机器人
+AI 视频识别、IoT 实时采集、大屏监控、自动巡检机器人。
 
 ---
 
-# References
+## References
 
-- 00-Project.md
-- 02-System-Architecture.md
-- 03-Domain-Model.md
+- [00-Project.md](00-Project.md)
+- [05-API-Design.md](05-API-Design.md)
+- [14-Roadmap.md](14-Roadmap.md)

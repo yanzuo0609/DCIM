@@ -1,523 +1,163 @@
 ---
 title: AI Platform Design Specification
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Planned
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: AI Platform
 ---
 
 # AI Platform Design Specification
 
-> RackDCIM Pro
+> **Status: PLANNED — No AI code or `/api/v1/ai/*` endpoints exist in V1.**
 
-Enterprise AI Platform
-
----
-
-# Revision History
-
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
+This document defines the **target architecture** for V3. Implementation must not begin without updating this spec and [01-PRD.md](01-PRD.md).
 
 ---
 
-# Table of Contents
+## Revision History
 
-1. AI Platform Overview
-2. Design Objectives
-3. AI Architecture
-4. AI Capability Matrix
-5. LLM Provider
-6. MCP Integration
-7. RAG Knowledge Base
-8. AI Agent
-9. AI Workflow
-10. Prompt Engineering
-11. AI Security
-12. AI APIs
-13. Performance
-14. Future Evolution
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | Mark V1 gap; refine target architecture |
 
 ---
 
-# 1 AI Platform Overview
+## 1. Current State (V1)
 
-AI Platform 是 RackDCIM Pro 的智能核心。
+| Component | Status |
+| --------- | ------ |
+| AI API endpoints | ❌ None |
+| LLM integration | ❌ None |
+| RAG / vector DB | ❌ None |
+| MCP tools | ❌ None |
+| Frontend AI UI | ❌ None |
 
-负责：
+**AI-ready aspects of V1:**
 
-- AI 问答
-- AI 自动布局
-- AI 容量规划
-- AI 设备推荐
-- AI 故障分析
-- AI 运维助手
-- AI 文档生成
-
-不负责：
-
-- 数据库存储
-- 页面渲染
-- 用户认证
+- Complete OpenAPI at `/api/v1/docs`
+- Structured JSON responses
+- RBAC on all endpoints (future tool auth)
+- Audit log table (future AI action logging)
 
 ---
 
-# 2 Design Objectives
+## 2. Design Objectives (Target)
 
-平台目标：
-
-✓ AI Native
-
-✓ 可扩展
-
-✓ 多模型支持
-
-✓ 企业级安全
-
-✓ 可审计
-
-✓ 可离线部署
-
-✓ Tool Calling
-
-✓ Agent Ready
+| Objective | Description |
+| --------- | ----------- |
+| AI Native | All business ops callable as tools |
+| Multi-model | OpenAI, DeepSeek, Qwen, Claude via gateway |
+| Enterprise security | Tool permission = RBAC |
+| Auditable | Log every AI-initiated action |
+| Offline option | Local Llama for air-gapped deploy |
 
 ---
 
-# 3 AI Architecture
+## 3. Target Architecture
 
-```
-                 User
-                   │
-                   ▼
-           AI Assistant API
-                   │
-                   ▼
-             Prompt Builder
-                   │
-         ┌─────────┴─────────┐
-         ▼                   ▼
-      RAG Engine        Tool Manager
-         │                   │
-         ▼                   ▼
- Knowledge Base      Layout / Device / Report
-         │                   │
-         └─────────┬─────────┘
-                   ▼
-              LLM Gateway
-                   │
-   ┌───────────────┼────────────────┐
-   ▼               ▼                ▼
- OpenAI        DeepSeek         Qwen
-                   │
-                   ▼
-             AI Response
+```mermaid
+flowchart TB
+  User[User / Agent Client]
+  User --> API[AI Assistant API]
+  API --> PB[Prompt Builder]
+  PB --> RAG[RAG Engine]
+  PB --> TM[Tool Manager]
+  RAG --> VDB[(Vector DB)]
+  TM --> DCIM[Existing /api/v1 REST]
+  PB --> GW[LLM Gateway]
+  GW --> LLM[External LLM]
+  TM --> Audit[Audit Log]
 ```
 
 ---
 
-# 4 AI Capability Matrix
+## 4. Planned Tool Catalog (MCP)
 
-| Module    | AI Capability  |
-| --------- | -------------- |
-| Rack      | 自动布局建议   |
-| Device    | 设备推荐       |
-| Dashboard | 趋势分析       |
-| Asset     | 生命周期预测   |
-| Power     | 功耗分析       |
-| Cooling   | 散热建议       |
-| Report    | 自动生成报告   |
-| Import    | Excel 自动修复 |
-| SVG       | 自动解释机柜图 |
+Tools wrap existing REST endpoints:
 
----
+| Tool | Maps To |
+| ---- | ------- |
+| list_rooms | GET /rooms |
+| list_racks | GET /racks |
+| get_rack_svg | GET /racks/{id}/svg |
+| find_device | GET /devices?keyword= |
+| mount_device | POST /layout/mount |
+| calculate_capacity | GET /dashboard/utilization |
+| import_devices | POST /devices/import |
+| list_contracts | GET /device-contracts |
 
-# 5 LLM Provider
-
-支持多模型。
-
-默认：
-
-```
-OpenAI GPT
-```
-
-兼容：
-
-```
-DeepSeek
-
-Qwen
-
-Claude
-
-Gemini
-
-Llama
-
-Mistral
-```
-
-通过统一 Gateway 调用。
+Each tool invocation: validate JWT + permission + write audit entry.
 
 ---
 
-# 6 MCP Integration
+## 5. Planned API Endpoints
 
-AI Platform 支持 MCP（Model Context Protocol）。
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| POST | /api/v1/ai/chat | Conversational assistant |
+| POST | /api/v1/ai/layout | Layout suggestion |
+| POST | /api/v1/ai/report | Report generation |
+| POST | /api/v1/ai/agent/run | Multi-step agent |
+| GET | /api/v1/ai/history | Session history |
 
-提供以下工具：
-
-```
-list_racks
-
-get_rack
-
-find_device
-
-move_device
-
-calculate_capacity
-
-generate_svg
-
-import_excel
-
-export_pdf
-
-search_assets
-
-generate_report
-```
-
-所有 Tool 均支持：
-
-- 参数校验
-- 权限控制
-- 审计日志
+**None implemented in V1.**
 
 ---
 
-# 7 RAG Knowledge Base
+## 6. RAG Knowledge Base (Planned)
 
-知识来源：
+| Source | Use |
+| ------ | --- |
+| docs/*.md | Product & API context |
+| OpenAPI JSON | Tool schema |
+| Device models | Hardware specs |
+| Audit logs | Historical actions |
 
-```
-设备资料
-
-项目文档
-
-运维规范
-
-PRD
-
-API
-
-数据库结构
-
-历史工单
-
-操作日志
-```
-
-数据流程：
-
-```
-Documents
-    │
-Chunk
-    │
-Embedding
-    │
-Vector DB
-    │
-Retriever
-    │
-LLM
-```
-
-推荐向量数据库：
-
-- pgvector（默认）
-- Milvus
-- Qdrant
+Vector store options: pgvector (preferred), Milvus, Qdrant.
 
 ---
 
-# 8 AI Agent
+## 7. Security (Planned)
 
-内置 Agent：
+| Threat | Mitigation |
+| ------ | ---------- |
+| Prompt injection | Input filter + system prompt isolation |
+| Tool abuse | RBAC per tool; confirm destructive ops |
+| Data exfiltration | Response sanitization |
+| Cost overrun | Token quota per user |
 
-```
-Rack Planner
-
-Capacity Planner
-
-Asset Analyst
-
-Report Generator
-
-Network Advisor
-
-Power Optimizer
-```
-
-Agent 能力：
-
-- 调用 Tool
-- 推理
-- 生成计划
-- 多步执行
-- 输出结构化结果
+See [11-Security.md](11-Security.md) §13.
 
 ---
 
-# 9 AI Workflow
+## 8. Performance Targets (Planned)
 
-示例：自动布局
-
-```
-用户输入
-
-↓
-
-Prompt Builder
-
-↓
-
-RAG 检索规则
-
-↓
-
-Layout Tool
-
-↓
-
-LLM 推理
-
-↓
-
-返回布局方案
-
-↓
-
-用户确认
-
-↓
-
-执行布局
-
-↓
-
-生成 SVG
-
-↓
-
-更新数据库
-```
+| Operation | Target |
+| --------- | ------ |
+| Chat response | <5s |
+| RAG retrieval | <1s |
+| Layout suggestion | <10s |
+| Streaming | SSE support |
 
 ---
 
-# 10 Prompt Engineering
+## 9. Implementation Roadmap
 
-Prompt 分层：
-
-```
-System Prompt
-
-↓
-
-Domain Prompt
-
-↓
-
-Task Prompt
-
-↓
-
-User Prompt
-```
-
-支持：
-
-- Few-shot
-- Chain of Thought（仅内部推理）
-- Structured Output
-- JSON Schema 输出
+| Phase | Deliverable | Depends On |
+| ----- | ----------- | ---------- |
+| P1 | LLM gateway + /ai/chat | API stable ✅ |
+| P2 | Tool calling (read-only) | OpenAPI tools |
+| P3 | Write tools with confirmation | Audit UI |
+| P4 | RAG over docs | pgvector |
+| P5 | Multi-agent workflows | P1–P4 |
 
 ---
 
-# 11 AI Security
-
-安全策略：
-
-- 用户身份验证
-- 权限校验
-- Prompt Injection 防护
-- 敏感信息脱敏
-- Token 配额管理
-- 操作审计
-
-禁止 AI：
-
-- 越权访问
-- 删除数据（未经确认）
-- 修改系统配置（未经授权）
-
----
-
-# 12 AI APIs
-
-主要接口：
-
-```
-POST /api/v1/ai/chat
-
-POST /api/v1/ai/layout
-
-POST /api/v1/ai/report
-
-POST /api/v1/ai/analyze
-
-POST /api/v1/ai/agent/run
-
-GET /api/v1/ai/history
-
-DELETE /api/v1/ai/history/{id}
-```
-
----
-
-# 13 Performance
-
-目标：
-
-| Item         | Target |
-| ------------ | ------ |
-| 普通问答     | <5s    |
-| RAG 检索     | <1s    |
-| 自动布局建议 | <10s   |
-| 报告生成     | <20s   |
-| SVG 分析     | <8s    |
-
-支持：
-
-- 流式输出（Streaming）
-- 响应缓存
-- 多模型负载均衡
-
----
-
-# 14 Future Evolution
-
-未来规划：
-
-## Multi-Agent
-
-多个 Agent 协同：
-
-```
-Planning Agent
-
-↓
-
-Layout Agent
-
-↓
-
-Validation Agent
-
-↓
-
-Execution Agent
-```
-
----
-
-## AI Digital Twin
-
-支持：
-
-- 数据中心数字孪生
-- 3D 机房
-- AI 导航
-- 实时容量预测
-
----
-
-## Autonomous Operations
-
-长期目标：
-
-- AI 自动规划
-- AI 自动巡检
-- AI 自动生成变更方案
-- AI 辅助故障定位
-- AI 运维 Copilot
-
----
-
-# Appendix A
-
-## Prompt Template
-
-```
-System
-
-↓
-
-Role
-
-↓
-
-Knowledge
-
-↓
-
-Task
-
-↓
-
-Constraints
-
-↓
-
-Output Format
-```
-
----
-
-# Appendix B
-
-## Supported Output
-
-```
-Text
-
-Markdown
-
-JSON
-
-Table
-
-SVG Annotation
-
-PDF Report
-
-Excel Recommendation
-```
-
----
-
-# References
-
-- docs/01-PRD.md
-- docs/02-System-Architecture.md
-- docs/05-API-Design.md
-- docs/08-Layout-Engine.md
-- docs/09-SVG-Engine.md
-
----
+## References
+
+- [01-PRD.md](01-PRD.md) — V3 scope
+- [05-API-Design.md](05-API-Design.md) — REST surface for tools
+- [11-Security.md](11-Security.md) — AI security section

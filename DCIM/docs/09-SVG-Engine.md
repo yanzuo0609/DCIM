@@ -1,708 +1,182 @@
 ---
 title: SVG Rendering Engine Design Specification
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: SVG Engine
 ---
 
 # SVG Rendering Engine Design Specification
 
-> RackDCIM Pro
-
-SVG Render Engine
+> Rack elevation diagrams — backend generation + frontend display
 
 ---
 
-# Revision History
+## Revision History
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-
----
-
-# Table of Contents
-
-1.Engine Overview
-
-2.Design Objectives
-
-3.Rendering Architecture
-
-4.Layout Model
-
-5.Rendering Pipeline
-
-6.Component Library
-
-7.Rack Rendering
-
-8.Device Rendering
-
-9.Label Rendering
-
-10.Interaction Design
-
-11.Export Engine
-
-12.Theme Engine
-
-13.Performance Optimization
-
-14.API Interface
-
-15.Future Evolution
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | V1 implementation spec with pipeline & API |
 
 ---
 
-# 1 Engine Overview
+## 1. Overview
 
-SVG Engine 是整个系统唯一负责图形绘制的模块。
-
-职责：
-
-- SVG生成
-
-- SVG更新
-
-- SVG缩放
-
-- SVG动画
-
-- PNG导出
-
-- PDF导出
-
-- 缩略图生成
-
-不负责：
-
-- 自动布局
-
-- 数据计算
-
-- 数据库存储
+| Aspect | V1 Implementation |
+| ------ | ----------------- |
+| Backend | `app/services/svg.py` generates SVG XML string |
+| API | `GET /racks/{id}/svg`, `GET /svg/rack/{rack_id}` |
+| Frontend | `RackCabinet.vue` renders SVG + interaction |
+| Export PNG/PDF | 📋 Not implemented |
 
 ---
 
-# 2 Design Objectives
+## 2. Data Flow
 
-SVG Engine 必须保证：
+```mermaid
+flowchart LR
+  DB[(rack + rack_position + device)] --> Svc[SvgService]
+  Svc --> SVG[SVG XML string]
+  SVG --> API[HTTP Response]
+  API --> FE[RackCabinet.vue]
+  FE --> DOM[Browser SVG DOM]
+```
 
-✓ 高性能
-
-✓ 可缩放
-
-✓ 分辨率无损
-
-✓ 浏览器兼容
-
-✓ 打印兼容
-
-✓ PDF兼容
-
-✓ AI可识别
+The SVG service reads rack layout from DB — it does **not** accept arbitrary Layout JSON POST in V1.
 
 ---
 
-# 3 Rendering Architecture
+## 3. SVG Structure
 
-整体流程：
-
-```
-Database
-
-↓
-
-Layout Engine
-
-↓
-
-Layout Model(JSON)
-
-↓
-
-SVG Engine
-
-↓
-
-SVG Document
-
-↓
-
-Browser
-
-↓
-
-PNG / PDF
+```text
+<svg viewBox="0 0 W H">
+  ├── Background
+  ├── Rack frame (border, header)
+  ├── U-slot grid (lines + labels 42→1)
+  ├── Device blocks (rect per mounted device)
+  │     └── height = height_u × slot_height
+  └── Labels (hostname / model)
+</svg>
 ```
 
-Render Engine 永远只消费：
+### 3.1 Coordinate System
 
-```
-Layout Model
-```
+| Property | Value |
+| -------- | ----- |
+| Origin | Top-left |
+| X axis | Left → right |
+| Y axis | Top → bottom |
+| U slot height | Computed: total_height / total_u |
 
-不直接访问数据库。
+### 3.2 Device Block Styling
+
+| Attribute | Source |
+| --------- | ------ |
+| y, height | u_position, height_u |
+| fill color | device status / category (service logic) |
+| label | hostname or name |
 
 ---
 
-# 4 Layout Model
+## 4. API
 
-输入：
+### 4.1 Get Rack SVG ✅
 
-```json
-{
-  "rack":"Rack001",
-  "total_u":42,
-  "devices":[
-    {
-      "name":"GPU001",
-      "u_start":5,
-      "u_end":8,
-      "status":"online"
-    }
-  ]
-}
+```http
+GET /api/v1/racks/{rack_id}/svg
+Authorization: Bearer <token>
 ```
 
-输出：
+Response: `Content-Type: image/svg+xml` or JSON wrapper depending on endpoint variant.
 
+Alternate route:
+
+```http
+GET /api/v1/svg/rack/{rack_id}
 ```
-SVG Document
-```
+
+Permission: `rack:view`.
+
+### 4.2 Planned Endpoints 📋
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | /svg/export | Bulk export |
+| POST | /svg/render | Custom layout JSON input |
 
 ---
 
-# 5 Rendering Pipeline
+## 5. Frontend Component
 
-```
-Layout JSON
+### 5.1 RackCabinet.vue ✅
 
-↓
-
-Theme
-
-↓
-
-Rack Layer
-
-↓
-
-Slot Layer
-
-↓
-
-Device Layer
-
-↓
-
-Text Layer
-
-↓
-
-Status Layer
-
-↓
-
-SVG Output
-```
-
-每层独立渲染。
+| Feature | Status |
+| ------- | ------ |
+| Load SVG from API | ✅ |
+| Display U grid | ✅ |
+| Show device blocks | ✅ |
+| Basic scaling | ✅ |
+| Drag/pan/zoom | 🚧 limited |
+| Click device detail | 🚧 |
+| Front/rear view | 📋 |
+| Export PNG | 📋 |
 
 ---
 
-# 6 Component Library
+## 6. Color Convention (Target)
 
-SVG组件：
+| State / Category | Color |
+| ---------------- | ----- |
+| Free slot | Light gray |
+| Server | Blue |
+| Network | Orange |
+| Storage | Green |
+| Maintenance | Yellow |
+| Fault | Red |
 
-```
-RackFrame
-
-USlot
-
-DeviceBlock
-
-Label
-
-StatusIcon
-
-TemperatureBar
-
-PowerBar
-
-ConnectionLine
-
-Tooltip
-
-Legend
-```
-
-所有组件支持：
-
-- 重用
-
-- 缩放
-
-- 动态更新
+Exact hex values defined in `svg.py` and component CSS.
 
 ---
 
-# 7 Rack Rendering
+## 7. Performance
 
-机柜组成：
+| Metric | Target | V1 |
+| ------ | ------ | -- |
+| Single rack SVG | <500ms | ✅ typical |
+| 100 racks sequential | <30s | 📋 untested |
+| Client render | <200ms | ✅ |
 
-```
-Rack
-
-├── Frame
-
-├── Header
-
-├── Footer
-
-├── U Slot
-
-├── Number
-
-├── Border
-```
-
-支持：
-
-```
-42U
-
-46U
-
-48U
-
-52U
-```
-
-自动适配高度。
+Optimization opportunities: cache SVG string in Redis, incremental DOM update.
 
 ---
 
-# 8 Device Rendering
+## 8. Export Engine 📋
 
-设备绘制：
+Planned pipeline:
 
-依据：
-
-```
-height_u
-
-status
-
-category
-
-color
-
-direction
+```text
+SVG string → Cairo/rsvg → PNG/PDF
 ```
 
-设备颜色：
-
-| Category | Color  |
-| -------- | ------ |
-| Server   | Blue   |
-| Storage  | Green  |
-| Switch   | Orange |
-| Firewall | Red    |
-| PDU      | Purple |
-| UPS      | Brown  |
-
-支持：
-
-图标
-
-Logo
-
-状态灯
+Use cases: print rack elevation, attach to audit reports.
 
 ---
 
-# 9 Label Rendering
+## 9. Future Evolution 📋
 
-标签内容：
-
-```
-Device Name
-
-Hostname
-
-IP
-
-SN
-
-Owner
-
-Power
-```
-
-支持：
-
-自动换行
-
-字体缩放
-
-隐藏
-
-旋转
-
-Tooltip
+- 3D rack (Three.js)
+- Heat map overlay (temperature)
+- Power bar per U
+- Digital twin integration
+- AI natural language rack explanation
 
 ---
 
-# 10 Interaction Design
-
-支持：
-
-Hover
-
-Click
-
-Double Click
-
-Right Click
-
-Drag
-
-Zoom
-
-Pan
-
-Keyboard
-
-点击设备：
-
-```
-↓
-
-Device Detail
-
-↓
-
-History
-
-↓
-
-Maintenance
-```
-
----
-
-# 11 Export Engine
-
-支持：
-
-```
-SVG
-
-PNG
-
-PDF
-
-JPEG
-```
-
-未来：
-
-```
-DXF
-
-Visio
-
-CAD
-```
-
-导出参数：
-
-```
-A4
-
-A3
-
-A2
-
-300DPI
-
-600DPI
-```
-
----
-
-# 12 Theme Engine
-
-主题：
-
-```
-Light
-
-Dark
-
-Blue
-
-Enterprise
-```
-
-颜色变量：
-
-```
-Primary
-
-Success
-
-Warning
-
-Danger
-
-Background
-
-Border
-```
-
-支持：
-
-CSS Variable
-
----
-
-# 13 Performance Optimization
-
-目标：
-
-```
-1000 Rack
-
-实时浏览
-```
-
-SVG：
-
-```
-<500ms
-```
-
-策略：
-
-- Virtual Rendering
-
-- Incremental Update
-
-- DOM Reuse
-
-- Lazy Render
-
-- ViewBox Optimization
-
----
-
-# 14 API Interface
-
-提供：
-
-```python
-render_svg()
-
-render_png()
-
-render_pdf()
-
-render_thumbnail()
-
-render_preview()
-
-export_svg()
-
-export_pdf()
-```
-
-输入：
-
-```
-Layout Model
-```
-
-输出：
-
-```
-SVG File
-
-PNG
-
-PDF
-```
-
----
-
-# 15 Future Evolution
-
-未来支持：
-
-Digital Twin
-
-3D Rack
-
-Three.js
-
-WebGL
-
-实时动画
-
-设备闪烁
-
-温度热力图
-
-电流流向
-
-风道动画
-
-GPU状态动画
-
-AI自动讲解
-
-AR机柜
-
-VR机房
-
----
-
-# Appendix A
-
-SVG Layer
-
-```
-SVG
-
-├── Background
-
-├── Rack Layer
-
-├── Device Layer
-
-├── Label Layer
-
-├── Status Layer
-
-├── Tooltip Layer
-
-└── Overlay
-```
-
----
-
-# Appendix B
-
-SVG Coordinate
-
-```
-Origin
-
-↓
-
-Top Left
-
-↓
-
-X →
-
-↓
-
-Y ↓
-```
-
-单位：
-
-```
-Pixel
-```
-
-支持：
-
-```
-Responsive ViewBox
-```
-
----
-
-# Appendix C
-
-SVG Style Example
-
-```css
-.rack-frame {
-    stroke:#444;
-    stroke-width:2;
-    fill:#F8F9FA;
-}
-
-.device-online{
-    fill:#4CAF50;
-}
-
-.device-offline{
-    fill:#F44336;
-}
-
-.device-maintenance{
-    fill:#FFC107;
-}
-```
-
----
-
-# Appendix D
-
-SVG Render Workflow
-
-```
-Import Excel
-
-↓
-
-Layout Engine
-
-↓
-
-Generate Layout JSON
-
-↓
-
-SVG Engine
-
-↓
-
-Preview
-
-↓
-
-Export
-
-↓
-
-PNG
-
-↓
-
-PDF
-
-↓
-
-Print
-```
-
----
-
-# References
-
-- docs/08-Layout-Engine.md
-- docs/07-Backend-Design.md
-- docs/06-Frontend-Design.md
-- docs/05-API-Design.md
-
----
+## References
+
+- [08-Layout-Engine.md](08-Layout-Engine.md)
+- [06-Frontend-Design.md](06-Frontend-Design.md)
+- Code: `backend/app/services/svg.py`, `frontend/src/components/RackCabinet.vue`

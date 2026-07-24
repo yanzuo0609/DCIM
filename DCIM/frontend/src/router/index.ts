@@ -64,6 +64,39 @@ const router = createRouter({
           meta: { permission: 'device:view' },
         },
         {
+          path: 'network',
+          component: () => import('@/layouts/NetworkSectionLayout.vue'),
+          meta: { permission: 'network:view' },
+          children: [
+            {
+              path: '',
+              redirect: '/network/devices',
+            },
+            {
+              path: 'devices',
+              name: 'network-devices',
+              component: () => import('@/views/network/NetworkDeviceDefineView.vue'),
+              meta: { permission: 'network:view' },
+            },
+            {
+              path: 'topology',
+              name: 'network-topology',
+              component: () => import('@/views/network/NetworkTopologyDesignView.vue'),
+              meta: { permission: 'network:view' },
+            },
+            {
+              path: 'interfaces',
+              name: 'network-interfaces',
+              component: () => import('@/views/network/NetworkInterfaceDesignView.vue'),
+              meta: { permission: 'network:view' },
+            },
+          ],
+        },
+        {
+          path: 'network/design',
+          redirect: '/network/topology',
+        },
+        {
           path: 'system/users',
           name: 'users',
           component: () => import('@/views/UserView.vue'),

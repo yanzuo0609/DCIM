@@ -25,6 +25,7 @@ from app.services.infrastructure import (
     RoomService,
 )
 from app.services.layout import LayoutService
+from app.services.network import NetworkDesignService
 from app.services.rack import RackService, RackTemplateService
 from app.services.svg import SVGService
 from app.services.user_mgmt import RoleManagementService, UserManagementService
@@ -90,6 +91,12 @@ async def get_ip_address_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> IpAddressService:
     return IpAddressService(session)
+
+
+async def get_network_design_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> NetworkDesignService:
+    return NetworkDesignService(session)
 
 
 async def get_layout_service(

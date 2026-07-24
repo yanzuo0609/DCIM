@@ -1,520 +1,314 @@
 ---
 title: Frontend Design Specification
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Frontend
 tech_stack: Vue3 + TypeScript + Vite + Element Plus
 ---
 
-# Frontend Design Specification
+# Frontend Design Specification (FDS)
 
-> RackDCIM Pro  
-> Frontend Design Specification (FDS)
-
----
-
-# Revision History
-
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 routes, Room floorplan, Rack slots, Users/Roles |
+> SPA architecture — `frontend/src/`
 
 ---
 
-# Table of Contents
+## Revision History
 
-1. Frontend Overview
-2. Design Principles
-3. Technology Stack
-4. Project Structure
-5. Routing Design
-6. Layout Design
-7. Navigation Design
-8. Permission Model
-9. State Management
-10. Page Design
-11. Component Design
-12. SVG Rack Design
-13. Dashboard Design
-14. Theme Design
-15. Internationalization
-16. Performance Optimization
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | Complete route map, API modules, components, auth flow |
 
 ---
 
-# 1. Frontend Overview
+## 1. Overview
 
-RackDCIM Pro 前端采用现代化 SPA（Single Page Application）架构，提供统一的管理界面，实现：
+| Property | Value |
+| -------- | ----- |
+| Framework | Vue 3.5 Composition API |
+| Language | TypeScript ~6.0 |
+| Build | Vite 8 |
+| UI | Element Plus 2.13 |
+| State | Pinia 3 (auth only) |
+| HTTP | Axios 1.13 |
+| Charts | ECharts 6 (Dashboard) |
+| Dev port | 5173 |
+| API proxy | `/api`, `/health` → localhost:8000 |
 
-- 数据中心管理
-- 机房管理
-- 机柜管理
-- 设备管理
-- 自动布局
-- SVG 可视化
-- Dashboard
-- 用户权限管理
-
-设计目标：
-
-- 高性能
-- 高可维护性
-- 响应式布局
-- 模块化开发
-- AI Ready
+Config: `frontend/vite.config.ts`.
 
 ---
 
-# 2. Design Principles
-
-采用以下设计原则：
-
-- Component First
-- Responsive Design
-- Reusable Components
-- Lazy Loading
-- Permission Driven UI
-- SVG Native Rendering
-
-所有页面均支持：
-
-- 深色模式
-- 国际化
-- 响应式布局
-- 权限控制
-
----
-
-# 3. Technology Stack
-
-| Layer           | Technology   |
-| --------------- | ------------ |
-| Framework       | Vue3         |
-| Language        | TypeScript   |
-| Build Tool      | Vite         |
-| State           | Pinia        |
-| Router          | Vue Router   |
-| UI              | Element Plus |
-| Chart           | ECharts      |
-| SVG             | Native SVG   |
-| HTTP            | Axios        |
-| Form Validation | Element Plus |
-
----
-
-# 4. Project Structure
+## 2. Project Structure
 
 ```text
-frontend/
-├── public/
-├── src/
-│   ├── api/
-│   ├── assets/
-│   ├── components/
-│   ├── composables/
-│   ├── layouts/
-│   ├── locales/
-│   ├── router/
-│   ├── stores/
-│   ├── styles/
-│   ├── utils/
-│   ├── views/
-│   ├── App.vue
-│   └── main.ts
-├── package.json
-└── vite.config.ts
+frontend/src/
+├── api/
+│   ├── index.ts          # Axios instance + JWT refresh interceptor
+│   ├── auth.ts
+│   ├── dashboard.ts
+│   ├── datacenter.ts
+│   ├── room.ts
+│   ├── rack.ts
+│   ├── device.ts
+│   ├── ip.ts
+│   ├── contract.ts
+│   └── user.ts
+├── components/
+│   ├── RackCabinet.vue       # SVG rack visualization
+│   ├── BatchCreateDeviceDialog.vue
+│   └── RackRangePicker.vue   # IP rack range UI
+├── layouts/
+│   ├── MainLayout.vue        # Sidebar + header
+│   └── RoomSectionLayout.vue # Tabs: 机房管理 / 机柜模板
+├── router/index.ts
+├── stores/auth.ts
+├── styles/main.css
+├── types/api.ts
+├── views/
+│   ├── LoginView.vue
+│   ├── DashboardView.vue
+│   ├── DatacenterView.vue
+│   ├── RoomView.vue
+│   ├── RackView.vue
+│   ├── DeviceView.vue
+│   ├── ContractView.vue
+│   ├── UserView.vue
+│   ├── RoleView.vue
+│   └── PlaceholderView.vue   # Unused
+├── App.vue
+└── main.ts
 ```
 
 ---
 
-# 5. Routing Design
+## 3. Routing
 
-采用 Vue Router。
+### 3.1 Route Table
 
-主要路由：
+| Path | Name | Component | Permission | Status |
+| ---- | ---- | --------- | ---------- | ------ |
+| /login | login | LoginView | public | ✅ |
+| / | dashboard | DashboardView | auth | ✅ |
+| /datacenters | datacenters | DatacenterView | datacenter:view | ✅ |
+| /rooms/manage | rooms-manage | RoomView | datacenter:view | ✅ |
+| /rooms/templates | room-rack-templates | RackView | rack:view | ✅ |
+| /racks | — | redirect → /rooms/templates | — | ✅ |
+| /devices | devices | DeviceView | device:view | ✅ |
+| /devices/contracts | device-contracts | ContractView | device:view | ✅ |
+| /system/users | users | UserView | user:view | ✅ |
+| /system/roles | roles | RoleView | role:view | ✅ |
 
+### 3.2 Navigation Guard (`router/index.ts`)
+
+```mermaid
+flowchart TD
+  A[beforeEach] --> B{public route?}
+  B -->|yes + token| C[redirect /]
+  B -->|yes| D[allow]
+  B -->|no| E{has token?}
+  E -->|no| F[redirect /login]
+  E -->|yes| G[loadProfile if needed]
+  G --> H{has permission?}
+  H -->|no + rooms-manage + rack:view| I[redirect templates]
+  H -->|no| J[redirect /]
+  H -->|yes| K[allow]
 ```
-/
-├── dashboard
-├── datacenter
-├── building
-├── floor
-├── room
-├── rack
-├── device
-├── asset
-├── svg
-├── reports
-├── system
-│   ├── user
-│   ├── role
-│   └── permission
-└── settings
-```
-
-支持：
-
-- 动态路由
-- 路由守卫
-- Breadcrumb
-- KeepAlive
 
 ---
 
-# 6. Layout Design
+## 4. Layout & Menu
 
-整体布局：
+### 4.1 MainLayout Sidebar
 
-```
-+------------------------------------------------------+
-| Header                                               |
-+----------------+-------------------------------------+
-| Sidebar        | Main Content                        |
-|                |                                     |
-|                |                                     |
-|                |                                     |
-+----------------+-------------------------------------+
-| Footer                                              |
-+------------------------------------------------------+
-```
+| Menu Item | Route | Visibility |
+| --------- | ----- | ---------- |
+| Dashboard | / | Always |
+| 数据中心 | /datacenters | datacenter:view |
+| 机房管理 | /rooms/manage | datacenter:view OR rack:view |
+| 设备管理 ▸ 设备管理 | /devices | device:view |
+| 设备管理 ▸ 合同信息 | /devices/contracts | device:view |
+| 系统管理 ▸ 用户管理 | /system/users | user:view |
+| 系统管理 ▸ 角色管理 | /system/roles | role:view |
 
-Header：
+机柜模板通过 `RoomSectionLayout` Tab 或 `/rooms/templates` 访问。
 
-- Logo
-- 搜索
-- 消息通知
-- 用户菜单
-- 主题切换
+### 4.2 RoomSectionLayout
 
-Sidebar：
-
-- 折叠菜单
-- 图标
-- 权限过滤
+| Tab | Route | Permission |
+| --- | ----- | ---------- |
+| 机房管理 | /rooms/manage | datacenter:view |
+| 机柜模板 | /rooms/templates | rack:view |
 
 ---
 
-# 7. Navigation Design
+## 5. Authentication & HTTP
 
-菜单结构（V1 已实现）：
+### 5.1 Auth Store (`stores/auth.ts`)
 
-```
-Dashboard
+| State | Storage |
+| ----- | ------- |
+| accessToken | localStorage |
+| refreshToken | localStorage |
+| profile | memory (loaded on route enter) |
 
-Infrastructure
-├── Data Center   → /datacenters
-└── Room          → /rooms
+Methods: `login`, `logout`, `loadProfile`, `hasPermission`, `setTokens`, `clearAuth`.
 
-Rack              → /racks
+### 5.2 Axios Interceptor (`api/index.ts`)
 
-Device            → /devices
+1. Attach `Authorization: Bearer` on every request
+2. On 401 (non-login): attempt refresh via `/auth/refresh`
+3. Retry original request with new token
+4. On refresh failure: clear auth → redirect `/login`
 
-System
-├── User          → /system/users
-└── Role          → /system/roles
-```
-
-路由与权限（`frontend/src/router/index.ts`）：
-
-| Route | View | meta.permission |
-| ----- | ---- | --------------- |
-| /login | LoginView | 公开 |
-| / | DashboardView | — |
-| /datacenters | DatacenterView | datacenter:view |
-| /rooms | RoomView | datacenter:view |
-| /racks | RackView | rack:view |
-| /devices | DeviceView | device:view |
-| /system/users | UserView | user:view |
-| /system/roles | RoleView | role:view |
-
-守卫：无 Token → `/login`；无权限 → `/`。
+Helper: `unwrap<T>(response)` extracts `data` from envelope.
 
 ---
 
-# 8. Permission Model
+## 6. API Module Mapping
 
-前端权限采用 RBAC。
+| Module | File | Backend Prefix |
+| ------ | ---- | -------------- |
+| Auth | auth.ts | /auth |
+| Dashboard | dashboard.ts | /dashboard |
+| DataCenter | datacenter.ts | /datacenters |
+| Room/Floor | room.ts | /rooms, /floors |
+| Rack | rack.ts | /racks, /rack-templates |
+| Device | device.ts | /devices, catalogs, /layout |
+| IP | ip.ts | /ip-addresses |
+| Contract | contract.ts | /device-contracts |
+| User | user.ts | /users, /roles, /permissions |
 
-权限控制：
+---
 
-- 页面
-- 菜单
-- 按钮
-- API
+## 7. Page Specifications
 
-示例：
+### 7.1 LoginView ✅
 
-```
-admin:*
-datacenter:view|create|update|delete
-rack:view|create|update|delete
-device:view|create|update|delete|import|export
-user:view|create|update|delete
-role:view|create|update|delete
-audit:view
-dashboard:view
-```
+- Form: username + password
+- Calls `POST /auth/login`
+- Network error → 「无法连接后端」（非密码错误）
+- Success → redirect `/`
 
-持有 `admin:*` 的用户通过全部前端权限检查。
+### 7.2 DashboardView ✅
 
-按钮控制：
+- Fetches `GET /dashboard/summary`
+- Summary cards (DC, room, rack, device counts)
+- ECharts utilization display
+
+### 7.3 DatacenterView ✅
+
+- CRUD table for datacenters
+- Fields: code, name, location, description
+
+### 7.4 RoomView ✅
+
+- Quick create wizard → `POST /rooms/quick`
+- Layout drawer: grid from `row_layout` + `slot_codes`
+- Color-coded slot utilization
+
+### 7.5 RackView ✅
+
+- Template management + rack creation
+- Slot picker with row/col
+- SVG preview via `RackCabinet`
+- U-position mount drawer
+
+### 7.6 DeviceView ✅
+
+- Device CRUD table
+- Tabs: 设备 / 档案 catalog / IP 管理
+- Import/export buttons (permission-gated)
+- Batch create dialog
+- Mount/unmount integration
+
+### 7.7 ContractView ✅
+
+- Contract CRUD
+- Items import (Excel template)
+- Device bind/unbind
+
+### 7.8 UserView / RoleView ✅
+
+- User: multi-role assignment, password ≥12 chars
+- Role: permission multi-select
+- Admin user/role protected in UI + API
+
+---
+
+## 8. Components
+
+### 8.1 RackCabinet.vue ✅
+
+- Renders rack SVG from API or local layout data
+- U-slot grid, device blocks, labels
+- Used in RackView and Device mount flows
+
+### 8.2 BatchCreateDeviceDialog.vue ✅
+
+- Bulk device creation form
+- Validates model codes against catalog
+
+### 8.3 RackRangePicker.vue ✅
+
+- Select rack range for IP binding
+- Used in DeviceView IP tab
+
+---
+
+## 9. Permission-Driven UI
 
 ```vue
-<el-button v-if="hasPermission('rack:create')">
-新增机柜
+<el-button v-if="auth.hasPermission('device:import')">
+  导入
 </el-button>
 ```
 
----
-
-# 9. State Management
-
-采用 Pinia。
-
-Store 划分：
-
-```
-authStore
-userStore
-menuStore
-rackStore
-deviceStore
-dashboardStore
-themeStore
-```
-
-原则：
-
-- 页面状态与业务状态分离
-- API 数据统一管理
-- Token 持久化
+`hasPermission` checks exact code or `admin:*`.
 
 ---
 
-# 10. Page Design
+## 10. Planned Features 📋
 
-## V1 已实现页面
-
-| 页面 | 路由 | 功能要点 |
-| ---- | ---- | -------- |
-| Login | /login | 登录；后端不可达时提示「无法连接后端」而非笼统密码错误 |
-| Dashboard | / | 首页统计 |
-| DataCenter | /datacenters | 数据中心 CRUD（含地理位置） |
-| Room | /rooms | 快速创建 + 布局图 |
-| Rack | /racks | 模板/机柜位/SVG/U 位布局 |
-| Device | /devices | CRUD + Excel/PDF 导入导出 |
-| User | /system/users | 用户与多角色绑定 |
-| Role | /system/roles | 角色与权限多选 |
-
-## Room 页（RoomView）
-
-- 新建：选数据中心 → 楼号 / 机房编号 → 布局（auto 行列 / manual 每排数量）→ 编号（auto 前缀或 custom 逐格）
-- 调用 `POST /rooms/quick`
-- 创建成功后可打开「布局图」抽屉：按 `row_layout` + `slot_codes` 渲染网格，叠加机柜占用与利用率颜色（空闲 / 低 / 中 / 高）
-
-## Rack 页（RackView）
-
-- 模板单选：STD-42U / STD-48U / 自定义 U
-- 选机房后列出空闲机柜位；选中后回填 code/name，提交 `row_no`/`column_no`
-- 无空闲位时提示先扩展机房布局
-- 支持 SVG 预览与 U 位上架抽屉
-
-## Device 页
-
-- 导入/导出按钮分别受 `device:import` / `device:export` 控制
-
-## User / Role 页
-
-- 用户：用户名、邮箱、密码（≥12）、状态、多角色
-- 角色：权限多选；admin 角色不可删，且不开放权限清空编辑
-
-规划中（未在 V1 菜单落地）：Building/Floor 独立页、Reports、Settings。
+| Feature | Status |
+| ------- | ------ |
+| vue-i18n (zh/en) | 📋 |
+| Runtime theme toggle | 📋 |
+| Audit log page | 📋 |
+| Building/Floor standalone pages | 📋 |
+| Route lazy-loading audit | 🚧 partial (dynamic import) |
+| Dedicated Pinia stores per domain | 📋 |
 
 ---
 
-# 11. Component Design
+## 11. Performance Targets
 
-公共组件：
-
-```
-BaseTable
-BaseForm
-BaseSearch
-BaseDialog
-BaseCard
-BaseChart
-BaseUpload
-BasePagination
-```
-
-业务组件：
-
-```
-RackCard
-RackCanvas
-RackSVG
-DeviceCard
-DeviceEditor
-LayoutPreview
-DashboardWidget
-```
-
-组件原则：
-
-- 单一职责
-- 可复用
-- Props 驱动
-- Emits 通信
+| Metric | Target |
+| ------ | ------ |
+| First paint | <2s |
+| Route switch | <300ms |
+| SVG render | <500ms |
 
 ---
 
-# 12. SVG Rack Design
+## 12. Build & Quality
 
-SVG 采用原生绘制。
-
-一个 Rack：
-
-```
-Rack
-├── Frame
-├── U Slots
-├── Device Block
-├── Label
-└── Status Layer
+```bash
+npm run dev      # Development
+npm run build    # vue-tsc + vite build
+npm run lint     # ESLint
+npm run format   # Prettier
 ```
 
-支持：
-
-- 缩放
-- 拖拽
-- Hover
-- Tooltip
-- 设备点击
-- 多设备显示
-- 前后视图切换
-
-颜色规范：
-
-| 状态   | 颜色 |
-| ------ | ---- |
-| 空闲   | 绿色 |
-| 已占用 | 蓝色 |
-| 预留   | 黄色 |
-| 故障   | 红色 |
+CI runs `npm ci && npm run build` on Node 22.
 
 ---
 
-# 13. Dashboard Design
+## References
 
-首页模块：
-
-```
-Summary Card
-
-↓
-
-Capacity Chart
-
-↓
-
-Rack Utilization
-
-↓
-
-Power Consumption
-
-↓
-
-Top Device
-
-↓
-
-Recent Activity
-```
-
-图表：
-
-- 饼图
-- 柱状图
-- 折线图
-- 仪表盘
-- 热力图
-
----
-
-# 14. Theme Design
-
-支持：
-
-- Light Theme
-- Dark Theme
-
-主题变量：
-
-```
-Primary Color
-Background
-Border
-Success
-Warning
-Danger
-Info
-```
-
----
-
-# 15. Internationalization
-
-采用 vue-i18n。
-
-默认语言：
-
-- 中文（简体）
-- English
-
-目录：
-
-```
-locales/
-├── zh-CN.json
-└── en-US.json
-```
-
----
-
-# 16. Performance Optimization
-
-优化策略：
-
-- 路由懒加载
-- 图片懒加载
-- SVG 虚拟渲染
-- API 缓存
-- KeepAlive
-- Tree Shaking
-- Gzip/Brotli
-- HTTP/2
-
-性能目标：
-
-| 指标      | 目标   |
-| --------- | ------ |
-| 首屏加载  | <2s    |
-| 页面切换  | <300ms |
-| SVG 渲染  | <500ms |
-| Dashboard | <2s    |
-
----
-
-# References
-
-- docs/01-PRD.md
-- docs/02-System-Architecture.md
-- docs/05-API-Design.md
-- docs/07-Backend-Design.md
-
----
+- [05-API-Design.md](05-API-Design.md)
+- [06-Frontend-Design.md](06-Frontend-Design.md) — this doc
+- [09-SVG-Engine.md](09-SVG-Engine.md)

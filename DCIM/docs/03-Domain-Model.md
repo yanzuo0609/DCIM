@@ -1,539 +1,312 @@
 ---
 title: Domain Model Design
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Domain Model
 ---
 
 # Domain Model Design
 
-> RackDCIM Pro  
-> AI Native Data Center Infrastructure Management Platform
+> Bounded contexts, aggregates, entities — aligned with `backend/app/models/`
 
 ---
 
-# Revision History
+## Revision History
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 implementation: Room layout, rack numbering, RBAC |
-
----
-
-# Table of Contents
-
-1. Domain Overview
-2. Domain-Driven Design Principles
-3. Bounded Context
-4. Aggregate Design
-5. Entity Model
-6. Value Objects
-7. Domain Services
-8. Domain Events
-9. Repository Design
-10. Domain Relationships
-11. Business Rules
-12. Future Expansion
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | Full entity catalog with constraints & code paths |
 
 ---
 
-# 1. Domain Overview
+## 1. Bounded Contexts
 
-RackDCIM Pro 基于 Domain Driven Design（DDD）设计。
-
-系统将业务拆分为多个独立领域（Bounded Context），每个领域负责自己的业务逻辑和数据，不直接依赖数据库表结构。
-
-设计目标：
-
-- 高内聚
-- 低耦合
-- 易维护
-- 易扩展
-- 支持微服务拆分
-- 支持插件化扩展
+| Context | Aggregate Root | ORM Module | Status |
+| ------- | -------------- | ---------- | ------ |
+| Infrastructure | DataCenter | `infrastructure.py` | ✅ |
+| Rack | Rack | `rack.py` | ✅ |
+| Device | Device | `device.py` | ✅ |
+| IP Address | IpAddress | `ip_address.py` | ✅ |
+| Identity | User | `user.py` | ✅ |
+| Audit | AuditLog | `audit.py` | ✅ API |
+| Asset | Asset | — | 📋 |
 
 ---
 
-# 2. Domain-Driven Design Principles
+## 2. Entity Relationship (Core)
 
-采用以下设计原则：
-
-- Entity（实体）
-- Value Object（值对象）
-- Aggregate（聚合）
-- Aggregate Root（聚合根）
-- Repository（仓储）
-- Domain Service（领域服务）
-- Domain Event（领域事件）
-
-所有业务逻辑只能存在于 Domain 层，不允许写在 Controller 中。
-
----
-
-# 3. Bounded Context
-
-整个系统划分为以下业务域：
-
-| Domain         | Description      |
-| -------------- | ---------------- |
-| Infrastructure | 数据中心基础设施 |
-| Rack           | 机柜管理         |
-| Device         | 设备管理         |
-| Layout         | 自动布局         |
-| Visualization  | SVG 可视化       |
-| Dashboard      | 统计分析         |
-| Asset          | 资产管理         |
-| User           | 用户权限         |
-| Audit          | 审计日志         |
-| AI             | AI 服务          |
-
----
-
-# 4. Aggregate Design
-
-## Infrastructure Aggregate
-
-聚合根：
-
-- DataCenter
-
-实体：
-
-- Building
-- Floor
-- Room
-
-关系：
-
-```
-DataCenter
-    └── Building
-          └── Floor
-                └── Room
+```mermaid
+erDiagram
+  DataCenter ||--o{ Building : contains
+  Building ||--o{ Floor : contains
+  Floor ||--o{ Room : contains
+  Room ||--o{ Rack : contains
+  Rack ||--o{ RackPosition : has
+  RackPosition o--o| Device : occupies
+  Device }o--|| DeviceModel : references
+  DeviceModel }o--|| Manufacturer : references
+  Device }o--o| DeviceContract : optional
+  Device ||--o{ IpAddress : binds
+  User }o--o{ Role : via user_role
+  Role }o--o{ Permission : via role_permission
 ```
 
 ---
 
-## Rack Aggregate
+## 3. Base Model
 
-聚合根：
+All business entities inherit `BaseModel` (`models/base.py`):
 
-Rack
+| Column | Type | Purpose |
+| ------ | ---- | ------- |
+| id | UUID | Primary key |
+| created_at | datetime | Audit |
+| created_by | UUID? | Audit |
+| updated_at | datetime | Audit |
+| updated_by | UUID? | Audit |
+| deleted_at | datetime? | Soft delete |
+| deleted_by | UUID? | Soft delete |
+| version | int | Optimistic lock |
 
-实体：
-
-- RackTemplate
-- RackPosition
-
-说明：
-
-RackPosition 不允许单独存在。
-
-必须依赖 Rack。
-
----
-
-## Device Aggregate
-
-聚合根：
-
-Device
-
-实体：
-
-- DeviceModel
-- Manufacturer
-- DeviceCategory
+**Query convention:** `deleted_at IS NULL`.
 
 ---
 
-## User Aggregate
+## 4. Infrastructure Context
 
-聚合根：
+### 4.1 DataCenter
 
-User
+| Field | Type | Constraints |
+| ----- | ---- | ----------- |
+| code | string(50) | uk_datacenter_code |
+| name | string(100) | |
+| location | string(200)? | Geographic label |
+| description | text? | |
 
-实体：
+### 4.2 Building / Floor
 
-- Department
-- Role
-- Permission
+| Entity | Key Fields |
+| ------ | ---------- |
+| Building | datacenter_id, name (building_no in API) |
+| Floor | building_id, name (default `1F` on quick create) |
 
----
+### 4.3 Room
 
-## Asset Aggregate
+| Field | Type | Business Rule |
+| ----- | ---- | ------------- |
+| floor_id | UUID FK | Required |
+| name | string(100) | Unique per floor |
+| rack_rows | int | Default 4; synced with row_layout |
+| rack_columns | int | Default 6; uniform grid |
+| row_layout | JSON | e.g. `[6,6,8,4]`; sum = capacity |
+| code_mode | string | `auto` \| `custom` |
+| code_prefix | string? | `A`, `A-D`, `A-BZ` |
+| slot_codes | JSON | 2D label matrix |
 
-聚合根：
+**Quick create** (`InfrastructureService.quick_create_room`):
 
-Asset
+1. Require existing `datacenter_id`
+2. Find or create `Building` by `building_no`
+3. Find or create `Floor` named `1F`
+4. Generate `row_layout` + `slot_codes`
+5. Return enriched response (datacenter_name, rack_capacity, …)
 
-实体：
-
-- PurchaseInfo
-- Warranty
-- Vendor
-
----
-
-# 5. Entity Model
-
-## DataCenter
-
-属性：
-
-| Field       | Type   |
-| ----------- | ------ |
-| id          | UUID   |
-| code        | String |
-| name        | String |
-| location    | String |
-| description | String |
-
----
-
-## Building
-
-属性：
-
-| Field         | Type   |
-| ------------- | ------ |
-| id            | UUID   |
-| datacenter_id | UUID   |
-| name          | String |
+**Helpers:** `expand_row_prefixes`, `generate_slot_codes` in `schemas/infrastructure.py`.
 
 ---
 
-## Floor
+## 5. Rack Context
 
-属性：
+### 5.1 RackTemplate
 
-| Field       | Type   |
-| ----------- | ------ |
-| id          | UUID   |
-| building_id | UUID   |
-| name        | String |
+| Field | Type | Seed Values |
+| ----- | ---- | ----------- |
+| code | string | STD-42U, STD-48U |
+| total_u | int | 42, 48 |
+| width, depth | int mm | 600×1000, 600×1200 |
 
----
+### 5.2 Rack
 
-## Room
+| Field | Type | Constraint |
+| ----- | ---- | ---------- |
+| room_id | UUID | FK room |
+| code | string(50) | **Unique per room** (uk_rack_room_code) |
+| name | string(100) | Unique per room |
+| row_no, column_no | int | Within row_layout, not occupied |
+| total_u | int | 1–60; from template if set |
+| status | enum | active / inactive / maintenance |
 
-持久化属性：
+### 5.3 RackPosition
 
-| Field        | Type    | Description                                      |
-| ------------ | ------- | ------------------------------------------------ |
-| id           | UUID    | 主键                                             |
-| floor_id     | UUID    | 所属楼层                                         |
-| name         | String  | 机房编号（业务上等同 room_no）                   |
-| description  | Text    | 描述                                             |
-| rack_rows    | Integer | 机柜排数（冗余，等于 row_layout 长度）           |
-| rack_columns | Integer | 每排最大机柜数                                   |
-| row_layout   | JSON    | 每排机柜数，如 `[6,6,8,4]`；空则均匀网格         |
-| code_mode    | String  | `auto` / `custom` 机柜编号模式                   |
-| code_prefix  | String  | 自动编号前缀：单字母 `A` 或范围 `A-D` / `A-BZ` |
-| slot_codes   | JSON    | 机柜位编号矩阵，如 `[["A01","A02"],["B01"]]`     |
+| Field | Type | Rule |
+| ----- | ---- | ---- |
+| rack_id | UUID | Parent rack |
+| u_position | int | 1 = bottom |
+| occupied | bool | |
+| device_id | UUID? | Set when mounted |
 
-API 响应扩展字段（由层级关联推导）：
-
-| Field           | Description                                      |
-| --------------- | ------------------------------------------------ |
-| datacenter_id   | 所属数据中心                                     |
-| datacenter_name | 数据中心名称                                     |
-| location        | 地理位置（来自数据中心）                         |
-| building_no     | 机房楼号（Building.name）                        |
-| room_no         | 机房编号（= name）                               |
-| layout_mode     | `auto`（均匀）/ `manual`（不等宽排）             |
-| rack_capacity   | 机柜位总数 = sum(row_layout)                     |
-
-**快速创建（Quick Create）约定：**
-
-1. 必选已存在的 DataCenter（`datacenter_id`）
-2. 填写 `building_no`、`room_no`
-3. 若楼栋 / 默认楼层（`1F`）不存在则自动创建
-4. 布局：`layout_mode=auto` 用 `rack_rows × rack_columns`；`manual` 用 `row_layout`
-5. 编号：`code_mode=auto` 按排字母前缀 + 列序号生成；`custom` 使用完整 `slot_codes`
+**Invariant:** One device occupies contiguous U slots; no overlap (code 10004).
 
 ---
 
-## Rack
+## 6. Device Context
 
-属性：
+### 6.1 Catalog Entities
 
-| Field            | Type    | Description                    |
-| ---------------- | ------- | ------------------------------ |
-| id               | UUID    | 主键                           |
-| room_id          | UUID    | 所属机房                       |
-| rack_template_id | UUID?   | 模板（可空，自定义 U）         |
-| code             | String  | 机柜编码（全局唯一）           |
-| name             | String  | 机柜名称（机房内唯一）         |
-| row_no           | Integer | 所在排（1-based）              |
-| column_no        | Integer | 所在列（1-based）              |
-| total_u          | Integer | U 位数                         |
-| width            | Integer | 宽度 mm                        |
-| depth            | Integer | 深度 mm                        |
-| status           | Enum    | active / inactive / maintenance |
-| description      | Text    | 描述                           |
+| Entity | Table | Unique Key |
+| ------ | ----- | ---------- |
+| Manufacturer | manufacturer | code |
+| DeviceCategory | device_category | code |
+| DeviceType | device_type | code (system types protected) |
+| DeviceParamProfile | device_param_profile | code |
+| DeviceSystemProfile | device_system_profile | code |
+| DeviceBmcProfile | device_bmc_profile | code |
+| DeviceModel | device_model | code |
 
-约束：`(row_no, column_no)` 必须落在所属 Room 的 `row_layout` 内；同一位置不可重复占用。
+Seed types: `compute`, `storage`, `network`, `security`.
 
----
+Seed models: `R750-2U` (DELL), `SW-1U` (HPE).
 
-## RackPosition
+### 6.2 Device
 
-属性：
+| Field | Type | Constraint |
+| ----- | ---- | ---------- |
+| hostname | string(100) | uk_device_hostname |
+| serial_number | string(100) | uk_device_serial_number |
+| device_model_id | UUID | Required |
+| device_type_id | UUID? | |
+| param/system/bmc_profile_id | UUID? | |
+| contract_id | UUID? | |
+| rack_id, u_position | UUID?, int? | Set when mounted |
+| height_u | int | Default from model |
+| status | enum | stock / mounted / maintenance / retired |
 
-| Field      | Type    |
-| ---------- | ------- |
-| rack_id    | UUID    |
-| u_position | Integer |
-| occupied   | Boolean |
-| device_id  | UUID?   |
+### 6.3 DeviceContract
 
----
-
-## Device
-
-属性：
-
-| Field           | Type     |
-| --------------- | -------- |
-| id              | UUID     |
-| hostname        | String   |
-| serial_number   | String   |
-| device_model_id | UUID     |
-| rack_id         | UUID?    |
-| u_position      | Integer? |
-| height_u        | Integer  |
-| weight          | Decimal? |
-| power           | Decimal? |
-| status          | String   |
-| description     | Text?    |
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| contract_no | string(100) | uk_device_contract_no |
+| device_items | JSON? | Line items array |
+| device_names, device_model_names, manufacturer_names | JSON? | Search helpers |
+| quantity | int | Sum of items |
+| contract_total | decimal? | Total price |
+| price_unit | string | yuan / wan |
+| purchase_date | date? | |
 
 ---
 
-## User
+## 7. IP Address Context
 
-属性：
+| Field | Type | Rule |
+| ----- | ---- | ---- |
+| system_ip | string(64) | uk_ip_address_system_ip |
+| bmc_ip, vip | string? | |
+| netmask, gateway, dns, dns_secondary | string? | Added in 0010 |
+| status | enum | free / allocated / disabled |
+| bind_type | enum | none / device / rack / rack_range |
+| device_id, rack_id, room_id | UUID? | Per bind_type |
+| scope_rack_ids | JSON? | rack_range binding |
+| u_position | int? | Optional 1U spacing rule on allocate |
 
-| Field              | Type      |
-| ------------------ | --------- |
-| id                 | UUID      |
-| username           | String    |
-| password_hash      | String    |
-| email              | String    |
-| full_name          | String?   |
-| status             | Enum      |
-| failed_login_count | Integer   |
-| locked_until       | DateTime? |
-
-种子默认管理员：`admin` / `Admin@12345678`（生产环境必须修改）。
+Service: `app/services/ip_address.py` — batch create max 1024 per request.
 
 ---
 
-# 6. Value Objects
+## 8. Identity Context
 
-## RackSize
+### 8.1 User
 
-包含：Width、Height、Depth。不可修改。
+| Field | Notes |
+| ----- | ----- |
+| username | Unique; `admin` protected |
+| password_hash | bcrypt |
+| email | Unique |
+| status | active / inactive / locked |
+| failed_login_count, locked_until | Lockout fields |
 
-## RoomSlotCode
+Default seed: `admin` / `Admin@12345678` — **change in production**.
 
-机房内机柜位编号：
+### 8.2 Role & Permission
 
-- 自动：`{排字母前缀}{列序号}`，如 `A01`、`B02`（Excel 风格字母，支持 `AA` 等）
-- 自定义：任意唯一字符串（≤50）
+Many-to-many via `user_role`, `role_permission`.
 
-## RackLocation
+Permission codes: see [11-Security.md](11-Security.md). Wildcard: `admin:*`.
 
-包含：`room_id`、`row_no`、`column_no`。
-
-## DeviceSize
-
-包含：Height(U)、Depth、Weight。
-
-## DevicePower
-
-包含：Rated Power、Actual Power。
+**Protected:** role `code=admin` cannot be deleted or stripped of permissions via API.
 
 ---
 
-# 7. Domain Services
+## 9. Domain Services
 
-## LayoutService
+| Service | File | Responsibilities |
+| ------- | ---- | ---------------- |
+| InfrastructureService | `services/infrastructure.py` | DC/Building/Floor/Room, quick create |
+| RackService | `services/rack.py` | Rack CRUD, place-batch, templates |
+| DeviceService | `services/device.py` | Device + catalog CRUD |
+| LayoutService | `services/layout.py` | validate, auto, mount, unmount, batch |
+| IpAddressService | `services/ip_address.py` | IP lifecycle |
+| DeviceContractService | `services/device_contract.py` | Contract + bind |
+| DashboardService | `services/dashboard.py` | Aggregations |
+| SvgService | `services/svg.py` | Rack SVG string |
+| ExportService | `services/export.py` | Excel/PDF |
+| UserMgmtService | `services/user_mgmt.py` | Users, roles |
+| AuditService | `services/audit.py` | Log query |
 
-负责：
-
-- 自动布局
-- U位冲突检测
-- 空闲位置计算
-- 自动编号
-
----
-
-## DashboardService
-
-负责：
-
-- 利用率统计
-- 容量统计
-- 功耗统计
+Layout algorithm core: `domains/layout/engine.py`.
 
 ---
 
-## AssetService
+## 10. Business Rules Summary
 
-负责：
+| Rule ID | Domain | Description | Error Code |
+| ------- | ------ | ----------- | ---------- |
+| BR-R-01 | Rack | code unique within room | 10002 |
+| BR-R-02 | Rack | slot not occupied | 10002 |
+| BR-R-03 | Rack | row/col within layout | 10004 |
+| BR-D-01 | Device | hostname/SN unique | 10003 |
+| BR-D-02 | Device | U positions contiguous, no overlap | 10004 |
+| BR-D-03 | Device | system device_type not deletable | 10004 |
+| BR-RM-01 | Room | cannot shrink layout below existing racks | 10004 |
+| BR-RM-02 | Room | slot_codes unique case-insensitive | 10004 |
+| BR-IP-01 | IP | max 1024 batch create | 10004 |
+| BR-U-01 | User | admin user/role protected | 403 |
 
-- 生命周期
-- 保修
-- 采购信息
-
----
-
-## AIService
-
-负责：
-
-- AI问答
-- AI推荐
-- AI容量预测
-
----
-
-# 8. Domain Events
-
-采用事件驱动设计。
-
-事件如下：
-
-| Event           | Description |
-| --------------- | ----------- |
-| DeviceCreated   | 新增设备    |
-| DeviceRemoved   | 删除设备    |
-| RackCreated     | 新增机柜    |
-| RackUpdated     | 修改机柜    |
-| LayoutCompleted | 布局完成    |
-| ImportCompleted | 导入完成    |
-
-未来支持 Event Bus。
+Mapping: `core/handlers.py` → HTTP status for 10001–10005.
 
 ---
 
-# 9. Repository Design
+## 11. Repositories
 
-每个 Aggregate Root 对应一个 Repository。
-
-例如：
-
-```
-RackRepository
-
-DeviceRepository
-
-RoomRepository
-
-UserRepository
-
-AssetRepository
-```
-
-Repository 负责：
-
-- 查询
-- 保存
-- 删除
-- 分页
-
-不得包含业务逻辑。
+| Repository | File | Aggregate |
+| ---------- | ---- | --------- |
+| InfrastructureRepository | `repositories/infrastructure.py` | Room hierarchy |
+| RackRepository | `repositories/rack.py` | Rack |
+| DeviceRepository | `repositories/device.py` | Device |
+| DeviceContractRepository | `repositories/device_contract.py` | Contract |
+| IpAddressRepository | `repositories/ip_address.py` | IP |
+| UserRepository | `repositories/user.py` | User |
+| AuditRepository | `repositories/audit.py` | AuditLog |
+| BaseRepository | `repositories/base.py` | Shared pagination |
 
 ---
 
-# 10. Domain Relationships
+## 12. Future Expansion
 
-```
-DataCenter
-    └── Building
-          └── Floor
-                └── Room
-                      └── Rack
-                            └── RackPosition
-                                  └── Device
-```
-
-另一条关系：
-
-```
-User
-    ├── Role
-    └── Permission
-```
+| Context | Version | Notes |
+| ------- | ------- | ----- |
+| Asset / Warranty | V2 | purchase_order tables |
+| Cable | V2 | New bounded context |
+| Full IPAM | V2 | Subnet, VLAN |
+| AI | V3 | Tool calls over OpenAPI |
 
 ---
 
-# 11. Business Rules
+## References
 
-## Room
-
-- 快速创建必须关联已有 DataCenter
-- `row_layout` 每排机柜数 1–50，排数 1–50
-- 缩小布局不得小于已有机柜所在行列
-- `slot_codes` 在机房内全局唯一（大小写不敏感）
-- 自动编号：单字母从前缀起按排递增；范围（如 `A-D`、`A-BZ`）字母数必须 ≥ 排数
-
-## Rack
-
-- 属于一个 Room
-- `code` 全局唯一；`name` 在同一 Room 内唯一
-- `(row_no, column_no)` 必须在 Room 布局范围内且未被占用
-- 模板可选 STD-42U / STD-48U，或自定义 `total_u`（1–60）
-
-## Device
-
-- 只能放入一个 Rack
-- 占用多个连续 U 位
-- 不允许 U 位重叠（业务码 10004）
-
-## Layout（设备 U 位）
-
-自动布局必须保证：
-
-- 无冲突
-- 不越界
-- 支持预留 U 位
-
-## User
-
-- 可拥有多个角色
-- 一个角色可包含多个权限
-- 默认管理员账号不可删除
-- 管理员角色权限不可通过 API 随意清空
-
----
-
-# 12. Future Expansion
-
-未来可增加以下领域：
-
-- Cable Domain
-- PDU Domain
-- UPS Domain
-- IPAM Domain
-- CMDB Domain
-- Monitoring Domain
-- Digital Twin Domain
-
-所有新领域均采用独立 Bounded Context，不影响现有 Domain。
-
----
-
-# References
-
-- docs/00-Project.md
-- docs/01-PRD.md
-- docs/02-System-Architecture.md
-- docs/04-Database-Design.md
-
----
+- [04-Database-Design.md](04-Database-Design.md)
+- [05-API-Design.md](05-API-Design.md)
+- [08-Layout-Engine.md](08-Layout-Engine.md)

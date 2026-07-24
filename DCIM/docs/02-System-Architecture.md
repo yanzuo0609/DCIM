@@ -1,488 +1,288 @@
 ---
 title: System Architecture Design
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Architecture
 ---
 
 # System Architecture Design
 
-> RackDCIM Pro  
-> AI Native Data Center Infrastructure Management Platform
+> RackDCIM Pro — Layered Modular Monolith
 
 ---
 
-# Revision History
+## Revision History
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 modules: room layout, export, RBAC |
-
----
-
-# Table of Contents
-
-1. Architecture Overview
-2. Design Principles
-3. Overall Architecture
-4. Layered Architecture
-5. System Modules
-6. Technical Stack
-7. Core Business Flow
-8. Module Dependencies
-9. High Availability
-10. Security Architecture
-11. Scalability
-12. Deployment Architecture
-13. Performance Design
-14. Future Evolution
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.0.0 | 2026-07-16 | Enzo | Initial |
+| 1.2.0 | 2026-07-22 | Enzo | Sync V1 modules |
+| 1.3.0 | 2026-07-22 | Enzo | Professional architecture with diagrams & module map |
 
 ---
 
-# 1. Architecture Overview
+## 1. Architecture Overview
 
-RackDCIM Pro 采用现代企业级三层架构，并遵循 **API First、DDD（Domain Driven Design）** 和 **Documentation Driven Development（DDDoc）** 的设计理念。
+RackDCIM Pro 采用 **模块化单体（Modular Monolith）** 架构：
 
-系统目标：
+- **Presentation:** Vue 3 SPA
+- **API:** FastAPI REST `/api/v1`
+- **Business:** Service + Repository + Domain engine
+- **Data:** SQLAlchemy ORM → SQLite (dev) / PostgreSQL (prod)
 
-- 高内聚、低耦合
-- 模块化
-- 插件化
-- 云原生
-- AI Ready
-- 支持私有化部署
+设计原则：API First、DDD 边界、Documentation Driven Development、AI Ready（无 AI 运行时）。
 
 ---
 
-# 2. Design Principles
+## 2. Logical Architecture
 
-## 2.1 API First
+```mermaid
+flowchart TB
+  subgraph client [Client Tier]
+    Browser[Browser]
+  end
 
-所有业务能力均通过 REST API 对外提供。
+  subgraph presentation [Presentation Tier]
+    Vue[Vue3 + Element Plus + Pinia]
+    Axios[Axios /api/v1]
+  end
 
-前端、AI、第三方系统均通过统一 API 调用。
+  subgraph api [API Tier]
+    FastAPI[FastAPI Router]
+    Auth[JWT + RBAC Middleware]
+    OpenAPI[OpenAPI /docs]
+  end
 
----
+  subgraph business [Business Tier]
+    Svc[Services Layer]
+    Layout[Layout Engine]
+    SVG[SVG Service]
+  end
 
-## 2.2 Domain Driven Design
+  subgraph data [Data Tier]
+    Repo[Repositories]
+    ORM[SQLAlchemy Models]
+    DB[(SQLite / PostgreSQL)]
+  end
 
-系统按照业务领域划分，而不是按照数据库划分。
+  subgraph infra [Infrastructure - Optional]
+    Redis[(Redis)]
+    Celery[Celery - planned]
+  end
 
-例如：
-
-- Rack Domain
-- Device Domain
-- User Domain
-- Layout Domain
-- Dashboard Domain
-
----
-
-## 2.3 Configuration First
-
-所有业务规则均可配置：
-
-- Rack 模板
-- U 位规则
-- 颜色
-- 编号规则
-- 自动布局策略
-
----
-
-## 2.4 AI Native
-
-所有业务数据支持：
-
-- AI Assistant
-- RAG
-- Capacity Prediction
-- Smart Layout
-
----
-
-# 3. Overall Architecture
-
-```
-
-┌──────────────────────────────────────────────┐
-│                 Browser                      │
-└──────────────────────────────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────────┐
-│          Vue3 + Element Plus + SVG           │
-└──────────────────────────────────────────────┘
-                     │
-               REST API
-                     │
-                     ▼
-┌──────────────────────────────────────────────┐
-│                 FastAPI                      │
-├──────────────────────────────────────────────┤
-│ Authentication                               │
-│ User                                         │
-│ Rack                                         │
-│ Device                                       │
-│ Layout                                       │
-│ Dashboard                                    │
-│ AI Engine                                    │
-└──────────────────────────────────────────────┘
-                     │
-      ┌──────────────┴──────────────┐
-      ▼                             ▼
- PostgreSQL                      Redis
-      │                             │
-      ▼                             ▼
-   MinIO                       Celery
-
+  Browser --> Vue
+  Vue --> Axios
+  Axios --> FastAPI
+  FastAPI --> Auth
+  Auth --> Svc
+  Svc --> Layout
+  Svc --> SVG
+  Svc --> Repo
+  Repo --> ORM
+  ORM --> DB
+  Svc -.-> Redis
+  Celery -.-> Redis
 ```
 
 ---
 
-# 4. Layered Architecture
+## 3. Layered Responsibilities
 
-## Presentation Layer
-
-负责：
-
-- Vue3 页面
-- SVG 图形
-- Dashboard
-- 登录
-- 权限
-
----
-
-## API Layer
-
-FastAPI
-
-负责：
-
-- REST API
-- JWT
-- Swagger
-- 参数验证
+| Layer | Path | Responsibility | Must Not |
+| ----- | ---- | -------------- | -------- |
+| Endpoint | `app/api/v1/endpoints/` | HTTP binding, Depends injection | Business rules |
+| Schema | `app/schemas/` | Request/response validation | DB queries |
+| Service | `app/services/` | Orchestration, rules | Raw SQL in controllers |
+| Repository | `app/repositories/` | CRUD, pagination | Cross-aggregate rules |
+| Domain | `app/domains/` | Pure algorithms (layout) | HTTP / DB |
+| Model | `app/models/` | ORM mapping | Complex business logic |
 
 ---
 
-## Service Layer
+## 4. System Modules
 
-负责：
+### 4.1 Module Map
 
-- 业务逻辑
-- 权限校验
-- 数据转换
-- 调用算法
+| Module | Endpoint File | Service | Frontend |
+| ------ | ------------- | ------- | -------- |
+| Health | `health.py` | — | — |
+| Auth | `auth.py` | `auth.py` | LoginView |
+| Dashboard | `dashboard.py` | `dashboard.py` | DashboardView |
+| DataCenter | `datacenters.py` | `infrastructure.py` | DatacenterView |
+| Building | `buildings.py` | `infrastructure.py` | — |
+| Floor | `floors.py` | `infrastructure.py` | — |
+| Room | `rooms.py` | `infrastructure.py` | RoomView |
+| Rack | `racks.py` | `rack.py` | RackView |
+| RackTemplate | `rack_templates.py` | `rack.py` | RackView |
+| Device | `devices.py` | `device.py`, `export.py` | DeviceView |
+| Contract | `device_contracts.py` | `device_contract.py` | ContractView |
+| IP | `ip_addresses.py` | `ip_address.py` | DeviceView (Tab) |
+| Layout | `layout.py` | `layout.py` | Device/Rack drawers |
+| SVG/Audit | `svg_audit.py` | `svg.py`, `audit.py` | RackCabinet |
+| User/Role | `users.py` | `user_mgmt.py` | UserView, RoleView |
 
----
+Router aggregation: `app/api/v1/router.py`.
 
-## Domain Layer
+### 4.2 Cross-Cutting Concerns
 
-负责：
-
-- Rack
-- Device
-- User
-- Room
-- Dashboard
-
-所有业务规则均位于此层。
-
----
-
-## Infrastructure Layer
-
-负责：
-
-- PostgreSQL
-- Redis
-- MinIO
-- 日志
-- 文件上传
-- 第三方接口
-
----
-
-# 5. System Modules
-
-## Infrastructure
-
-- Data Center
-- Building / Floor（快速创建机房时可自动创建）
-- Room（布局、机柜位编号、容量）
-
-## Rack
-
-- Rack Template
-- Rack（机柜位绑定）
-- Rack Position（U 位）
-- SVG 视图
-
-## Device
-
-- Device CRUD
-- Import / Export（xlsx / pdf）
-- Mount to Rack
-
-## Identity
-
-- User / Role / Permission（RBAC）
-- JWT Auth
-
-## Dashboard
-
-- Summary / Utilization / Power / Device Count
-
-## Layout Engine
-
-- 机房机柜位编号
-- 自动布局 / U 位计算 / 冲突检测
-
-## SVG Engine
-
-- 机柜 SVG / 导出
-
-## AI Engine（规划）
-
-- AI 问答 / 布局建议 / 容量预测 / RAG
+| Concern | Implementation | File |
+| ------- | -------------- | ---- |
+| Config | Pydantic Settings | `core/config.py` |
+| DI | FastAPI Depends | `core/dependencies.py` |
+| AuthN | JWT | `core/security.py` |
+| AuthZ | RBAC `require_permissions` | `core/dependencies.py` |
+| Errors | Unified ErrorResponse | `core/handlers.py` |
+| Seed | Default admin, permissions | `core/seed.py` |
+| DB init | create_all + SQLite patches | `core/database.py` |
 
 ---
 
-# 6. Technology Stack
+## 5. Core Business Flows
 
-| Layer     | Technology   |
-| --------- | ------------ |
-| Frontend  | Vue3 + TS    |
-| UI        | Element Plus |
-| Chart     | ECharts      |
-| Graphics  | SVG          |
-| Backend   | FastAPI      |
-| ORM       | SQLAlchemy   |
-| Migration | Alembic      |
-| Database  | PostgreSQL   |
-| Cache     | Redis        |
-| Task      | Celery       |
-| Storage   | MinIO        |
-| Container | Docker       |
+### 5.1 Room Quick Create → Rack → Device Mount
 
----
+```mermaid
+sequenceDiagram
+  participant UI as RoomView
+  participant API as FastAPI
+  participant Inf as InfrastructureService
+  participant Rack as RackService
+  participant Lay as LayoutService
+  participant DB as Database
 
-# 7. Core Business Flow
-
-设备导入：
-
+  UI->>API: POST /rooms/quick
+  API->>Inf: quick_create_room()
+  Inf->>DB: Building/Floor/Room + slot_codes
+  UI->>API: POST /racks (slot pick)
+  API->>Rack: create_rack()
+  UI->>API: POST /layout/mount
+  API->>Lay: mount_device()
+  Lay->>DB: rack_position + device
 ```
 
-Excel
+### 5.2 Device Import Flow
 
-↓
-
-Import Service
-
-↓
-
-Device Validation
-
-↓
-
-Database
-
-↓
-
-Layout Engine
-
-↓
-
-Rack Position
-
-↓
-
-SVG Engine
-
-↓
-
-Dashboard
-
+```mermaid
+flowchart LR
+  A[Download template] --> B[Fill Excel]
+  B --> C[POST /devices/import]
+  C --> D[Validate model_code]
+  D --> E[Create stock devices]
+  E --> F[Optional mount via layout]
 ```
 
 ---
 
-# 8. Module Dependencies
+## 6. Technology Stack
 
-```
+| Layer | Technology | Version |
+| ----- | ---------- | ------- |
+| Frontend | Vue 3 + TS + Vite | 3.5 / 6.0 / 8.x |
+| UI | Element Plus | 2.13 |
+| Backend | FastAPI | ≥0.115 |
+| ORM | SQLAlchemy | ≥2.0 |
+| DB (prod) | PostgreSQL | 16 |
+| DB (dev) | SQLite + aiosqlite | — |
+| Cache | Redis | 7 (compose) |
+| Task | Celery | configured, no worker |
+| Deploy | Docker Compose + nginx | `deployment/` |
 
-User
-│
+---
 
-├── Permission
+## 7. Module Dependencies
 
-├── Audit
+```text
+User (RBAC)
+  └── all write endpoints
 
-└── Login
+Infrastructure (Room)
+  └── Rack
+        └── RackPosition
+              └── Device (mount)
+                    └── Layout Engine
+                          └── SVG Service
+                                └── Dashboard (stats)
 
-Rack
-│
-
-├── Device
-
-├── Layout
-
-└── Dashboard
-
-Layout
-│
-
-├── SVG
-
-└── Dashboard
-
-AI
-│
-
-├── Layout
-
-├── Dashboard
-
-└── Device
-
+Device Contract ──bind──> Device
+IpAddress ──bind──> Device | Rack | Room
 ```
 
 ---
 
-# 9. High Availability
+## 8. Deployment Architecture (V1)
 
-支持：
+### 8.1 Development
 
-- Docker Compose
-- PostgreSQL Backup
-- Redis Persistence
-- MinIO Replication
-
-未来支持：
-
-- Kubernetes
-- PostgreSQL Cluster
-- Redis Sentinel
-
----
-
-# 10. Security Architecture
-
-认证：
-
-JWT
-
-授权：
-
-RBAC
-
-日志：
-
-Audit Log
-
-密码：
-
-BCrypt
-
-接口：
-
-HTTPS
-
-上传：
-
-病毒扫描
-
----
-
-# 11. Scalability
-
-支持增加：
-
-- CMDB
-- IPAM
-- Cable
-- PDU
-- UPS
-- Monitoring
-- AI Plugin
-
-无需修改核心代码。
-
----
-
-# 12. Deployment Architecture
-
+```text
+Vite :5173  --proxy /api-->  Uvicorn :8000  -->  SQLite rackdcim.db
 ```
 
-Internet
+### 8.2 Docker Compose
 
-↓
-
-Nginx
-
-↓
-
-FastAPI
-
-↓
-
-PostgreSQL
-
-↓
-
-Redis
-
-↓
-
-MinIO
-
+```text
+Client :80 (nginx SPA)
+         ├── /api/* → backend:8000
+         └── /health → backend:8000
+backend → postgres:5432, redis:6379
 ```
 
-支持：
-
-- Linux
-- Docker
-- Kubernetes
+**Not in compose:** Celery worker, MinIO, AI gateway, alembic migration job.
 
 ---
 
-# 13. Performance Design
+## 9. Security Architecture (Summary)
 
-目标：
-
-| Item                | Target |
-| ------------------- | ------ |
-| API Response        | <200ms |
-| SVG Render          | <500ms |
-| Dashboard           | <2s    |
-| Import 1000 Devices | <10s   |
-
----
-
-# 14. Future Evolution
-
-未来增加：
-
-- AI Agent
-- MCP Server
-- Digital Twin
-- Graph Database
-- Multi Region
-- Multi Tenant
+| Control | Status | Detail Doc |
+| ------- | ------ | ---------- |
+| JWT access + refresh | ✅ | [11-Security.md](11-Security.md) |
+| RBAC permissions | ✅ | seed + require_permissions |
+| bcrypt passwords | ✅ | cost default |
+| CORS whitelist | ✅ | config cors_origins |
+| Rate limiting | 📋 | — |
+| Audit API | ✅ | GET /audit/logs |
 
 ---
 
-# References
+## 10. Scalability & HA
 
-- 00-Project.md
-- 01-PRD.md
-- 03-Domain-Model.md
-- 04-Database-Design.md
+| Capability | V1 | Future |
+| ---------- | -- | ------ |
+| Horizontal API | 📋 stateless JWT ready | K8s replicas |
+| DB HA | 📋 | PG primary/standby |
+| Redis Sentinel | 📋 | — |
+| Multi-tenant | 📋 | schema-per-tenant |
 
 ---
+
+## 11. Performance Targets
+
+| Metric | Target | Measurement |
+| ------ | ------ | ----------- |
+| CRUD API | <200ms P95 | 📋 Locust pending |
+| SVG generation | <500ms | manual |
+| Dashboard | <2s | manual |
+| Import 1000 devices | <10s | 📋 sync today |
+
+---
+
+## 12. Future Evolution
+
+| Direction | Description |
+| --------- | ----------- |
+| AI Agent | MCP tools over OpenAPI ([10-AI-Platform.md](10-AI-Platform.md)) |
+| Event Bus | Domain events → Kafka |
+| Graph DB | Network topology |
+| Microservices | Split by bounded context when scale demands |
+
+---
+
+## References
+
+- [03-Domain-Model.md](03-Domain-Model.md)
+- [05-API-Design.md](05-API-Design.md)
+- [07-Backend-Design.md](07-Backend-Design.md)
+- [12-Deployment.md](12-Deployment.md)

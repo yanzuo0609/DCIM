@@ -35,6 +35,10 @@ DEFAULT_PERMISSIONS = [
     ("role:delete", "Delete Roles", "Delete roles"),
     ("device:import", "Import Devices", "Import devices from Excel"),
     ("device:export", "Export Devices", "Export devices to Excel/PDF"),
+    ("network:view", "View Network Design", "View network topology designs"),
+    ("network:create", "Create Network Design", "Create network topology designs"),
+    ("network:update", "Update Network Design", "Update network topology designs"),
+    ("network:delete", "Delete Network Design", "Delete network topology designs"),
 ]
 
 DEFAULT_DEVICE_CATALOG = [

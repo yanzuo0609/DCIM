@@ -13,6 +13,7 @@ from app.models.device import (
 )
 from app.models.ip_address import IpAddress
 from app.models.infrastructure import Building, DataCenter, Floor, Room
+from app.models.network import NetworkLink, NetworkNode, NetworkTopology
 from app.models.rack import Rack, RackPosition, RackTemplate
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 
@@ -41,5 +42,8 @@ __all__ = [
     "DeviceContract",
     "Device",
     "IpAddress",
+    "NetworkTopology",
+    "NetworkNode",
+    "NetworkLink",
     "AuditLog",
 ]

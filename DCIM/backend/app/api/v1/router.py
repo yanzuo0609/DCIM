@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     health,
     ip_addresses,
     layout,
+    network,
     rack_templates,
     racks,
     rooms,
@@ -30,6 +31,7 @@ api_router.include_router(racks.router, tags=["racks"])
 api_router.include_router(rack_templates.router, tags=["rack-templates"])
 api_router.include_router(devices.router, tags=["devices"])
 api_router.include_router(device_contracts.router, tags=["device-contracts"])
+api_router.include_router(network.router, tags=["network"])
 api_router.include_router(ip_addresses.router)
 api_router.include_router(layout.router, tags=["layout"])
 api_router.include_router(svg_audit.router, tags=["svg", "audit"])

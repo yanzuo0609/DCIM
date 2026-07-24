@@ -1,9 +1,10 @@
 ---
 title: RackDCIM Pro Project Overview
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 type: Project Overview
 ---
 
@@ -13,480 +14,363 @@ type: Project Overview
 
 ---
 
-# Revision History
+## Document Conventions
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 scope: room layout, RBAC UI, import/export |
+| Symbol | Meaning |
+| ------ | ------- |
+| ✅ | Implemented in V1 codebase |
+| 🚧 | Partially implemented |
+| 📋 | Planned (design only) |
 
----
-
-# Table of Contents
-
-1. Project Introduction
-2. Vision
-3. Objectives
-4. Product Scope
-5. Technology Stack
-6. Repository Structure
-7. Documentation Structure
-8. Development Workflow
-9. Coding Standards
-10. Version Strategy
-11. Branch Strategy
-12. Milestones
-13. Future Planning
-14. License
+**Single Source of Truth:** All implementation must align with `docs/`. When code and docs diverge, update docs first (Documentation Driven Development), then code.
 
 ---
 
-# 1 Project Introduction
+## Revision History
 
-## 1.1 Background
-
-随着数字化建设的发展，企业数据中心规模不断扩大。
-
-越来越多的企业拥有：
-
-- 数据中心
-- GPU服务器
-- AI训练集群
-- Kubernetes平台
-- OpenStack私有云
-- VMware集群
-- 网络设备
-- 存储设备
-
-然而大量企业仍然依赖Excel维护设备信息。
-
-导致：
-
-- 数据重复
-- 更新困难
-- 无法多人协同
-- 无法容量规划
-- 无法统计利用率
-- 无法自动生成机柜图
-- 无法进行智能分析
-
-因此需要建设一套轻量、高性能、可扩展的数据中心基础设施管理平台。
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.0.0 | 2026-07-16 | Enzo | Initial version |
+| 1.1.0 | 2026-07-17 | Enzo | V1 scope: room layout, RBAC UI, import/export |
+| 1.2.0 | 2026-07-22 | Enzo | Sync IP, contracts, profiles, layout mount, Docker/CI |
+| 1.3.0 | 2026-07-22 | Enzo | Professional rewrite: full structure, status matrix, code paths |
 
 ---
 
-## 1.2 Project Positioning
+## Table of Contents
 
-RackDCIM Pro 是一款 AI Native 的 DCIM 平台。
-
-定位：
-
-- 企业级
-- 私有化部署
-- 模块化设计
-- AI驱动
-- 开放API
-- 可持续演进
-
----
-
-# 2 Vision
-
-打造一套现代化的数据中心基础设施管理平台。
-
-帮助企业实现：
-
-- 数据可视化
-- 资源数字化
-- 自动化运维
-- 智能容量规划
-- AI辅助管理
+1. [Project Introduction](#1-project-introduction)
+2. [Vision & Objectives](#2-vision--objectives)
+3. [Product Scope](#3-product-scope)
+4. [V1 Implementation Matrix](#4-v1-implementation-matrix)
+5. [Technology Stack](#5-technology-stack)
+6. [Repository Structure](#6-repository-structure)
+7. [Documentation Index](#7-documentation-index)
+8. [Development Workflow](#8-development-workflow)
+9. [Coding Standards](#9-coding-standards)
+10. [Version & Branch Strategy](#10-version--branch-strategy)
+11. [Milestones](#11-milestones)
+12. [Future Planning](#12-future-planning)
+13. [License](#13-license)
 
 ---
 
-# 3 Objectives
+## 1. Project Introduction
 
-Version 1.0
+### 1.1 Background
 
-完成：
+企业数据中心规模持续扩大，资产类型涵盖服务器、网络、存储、GPU 集群等。大量团队仍依赖 Excel 维护机柜与设备信息，导致数据分散、协作困难、无法容量规划与可视化。
 
-- 数据中心管理（含地理位置）
-- 机房快速创建（布局 + 机柜位编号 + 布局图）
-- 机柜管理（模板 42U/48U、机柜位选位、SVG）
-- 设备管理
-- 自动上架（U 位）
-- SVG 机柜图
-- Dashboard
-- Excel / PDF 导入导出
-- RBAC 与用户/角色管理 UI
+RackDCIM Pro 提供轻量、可私有化部署的 DCIM 平台，以统一数据模型与 REST API 替代手工表格。
 
-Version 2.0
+### 1.2 Positioning
 
-增加：
-
-- PDU
-- UPS
-- 配线管理
-- CMDB
-- LDAP
-- Webhook
-
-Version 3.0
-
-增加：
-
-- AI助手
-- AI容量预测
-- AI自动布局
-- Digital Twin
+| Dimension | Description |
+| --------- | ----------- |
+| Target | 企业 IT、IDC、运维团队 |
+| Deployment | 私有化 / Docker Compose |
+| Architecture | Modular monolith (FastAPI + Vue3) |
+| API | REST `/api/v1`, OpenAPI 3.x |
+| AI | Native-ready（V1 无 AI 运行时） |
 
 ---
 
-# 4 Product Scope
+## 2. Vision & Objectives
 
-## Included
+### 2.1 Vision
 
-- Rack Management
-- Device Management
-- Room Management
-- Dashboard
-- SVG Engine
-- Layout Engine
-- User Management
-- Role Management
-- Import & Export
-- Audit Log
+打造现代化数据中心基础设施管理平台：数据可视化、资源数字化、自动化上架、容量统计。
 
-## Excluded
+### 2.2 Version 1.0 Objectives
 
-V1 不包括：
+| Objective | Status |
+| --------- | ------ |
+| 数据中心 / 楼栋 / 楼层 / 机房层级 | ✅ |
+| 机房快速创建（布局 + 机柜位编号 + 布局图） | ✅ |
+| 机柜模板、机柜位选位、批量放置 | ✅ |
+| 设备 CRUD、档案 catalog、导入导出 | ✅ |
+| U 位自动/手动上架（layout engine） | ✅ |
+| 机柜 SVG | ✅ |
+| Dashboard（summary / utilization） | ✅ |
+| RBAC 用户/角色 UI | ✅ |
+| IP 地址管理 | ✅ |
+| 设备采购合同 | ✅ |
+| 审计日志 API | ✅（无前端 UI） |
+| AI 助手 | 📋 |
 
-- 实时监控
-- 温湿度采集
-- 自动控制UPS
-- 自动控制PDU
-- 视频监控
+### 2.3 Version 2.0+ (Planned)
 
----
+PDU、UPS、配线、CMDB、LDAP、完整 IPAM、Webhook。
 
-# 5 Technology Stack
+### 2.4 Version 3.0+ (Planned)
 
-## Backend
-
-Python 3.12
-
-FastAPI
-
-SQLAlchemy
-
-Alembic
-
-Pydantic v2
-
-Celery
-
-Redis
+AI 助手、容量预测、自动布局建议、Digital Twin。
 
 ---
 
-## Frontend
+## 3. Product Scope
 
-Vue3
+### 3.1 In Scope (V1)
 
-TypeScript
+- Infrastructure: DataCenter → Building → Floor → Room
+- Rack: Template, placement, SVG, batch ops
+- Device: Catalog, mount, import/export
+- IP: CRUD, batch, allocate, bind
+- Contract: CRUD, items import, device bind
+- Identity: JWT + RBAC
+- Dashboard & Layout & SVG engines
 
-Vite
+### 3.2 Out of Scope (V1)
 
-Pinia
-
-Element Plus
-
-SVG
-
-ECharts
-
----
-
-## Database
-
-Development
-
-SQLite
-
-Production
-
-PostgreSQL 16
+实时监控、温湿度、UPS/PDU 自动控制、视频监控、AI 运行时、MinIO 文件服务、Celery Worker。
 
 ---
 
-## Deployment
+## 4. V1 Implementation Matrix
 
-Docker
+| Module | Backend | Frontend | Tests | Doc |
+| ------ | ------- | -------- | ----- | --- |
+| Auth | ✅ `endpoints/auth.py` | ✅ `LoginView` | ✅ integration | 05, 11 |
+| Infrastructure | ✅ | ✅ Datacenter/Room | ✅ integration | 03, 04, 05 |
+| Rack | ✅ | ✅ RackView | ✅ integration | 08, 09 |
+| Device | ✅ | ✅ DeviceView | ✅ integration | 05, 07 |
+| IP | ✅ | ✅ DeviceView Tab | 📋 | 05 |
+| Contract | ✅ | ✅ ContractView | 📋 | 05 |
+| Layout | ✅ `domains/layout/` | ✅ mount UI | ✅ integration | 08 |
+| SVG | ✅ `services/svg.py` | ✅ RackCabinet | ✅ integration | 09 |
+| Dashboard | ✅ | ✅ DashboardView | ✅ integration | 05, 06 |
+| User/Role | ✅ | ✅ User/Role View | ✅ integration | 11 |
+| Audit | ✅ API only | 📋 | 📋 | 05 |
+| AI | 📋 | 📋 | 📋 | 10 |
+| Celery/MinIO | 📋 config only | — | — | 12 |
 
-Docker Compose
-
-Nginx
+**API surface:** ~95 route handlers under `/api/v1` (see `docs/05-API-Design.md`).
 
 ---
 
-## Authentication
+## 5. Technology Stack
 
-JWT
+### 5.1 Backend
 
-RBAC
+| Component | Version / Library | Config Path |
+| --------- | ----------------- | ----------- |
+| Python | ≥3.12 | `backend/pyproject.toml` |
+| FastAPI | ≥0.115 | `app/main.py` |
+| SQLAlchemy | ≥2.0 | `app/models/` |
+| Alembic | ≥1.14 | `alembic/versions/` |
+| Pydantic | v2 | `app/schemas/` |
+| JWT | python-jose + bcrypt | `app/core/security.py` |
+| Excel/PDF | openpyxl, reportlab | `app/services/export.py` |
+| Celery | ≥5.4 (configured, no tasks) | `app/core/celery_app.py` |
 
-OAuth2（Future）
+### 5.2 Frontend
+
+| Component | Version | Path |
+| --------- | ------- | ---- |
+| Vue | 3.5.x | `frontend/package.json` |
+| TypeScript | ~6.0 | `frontend/tsconfig.*` |
+| Vite | 8.x | `frontend/vite.config.ts` |
+| Pinia | 3.x | `frontend/src/stores/` |
+| Element Plus | 2.13.x | views/components |
+| Axios | 1.13.x | `frontend/src/api/index.ts` |
+| ECharts | 6.x | Dashboard |
+
+### 5.3 Data & Deploy
+
+| Environment | Database | Deploy |
+| ----------- | -------- | ------ |
+| Development | SQLite (`sqlite+aiosqlite`) | `scripts/dev.ps1` / manual uvicorn + vite |
+| Production-like | PostgreSQL 16 | `deployment/docker-compose.yml` |
+| Cache | Redis 7 (compose / optional dev) | — |
+
+### 5.4 Default URLs (Development)
+
+| Service | URL |
+| ------- | --- |
+| Frontend | http://localhost:5173 |
+| Backend | http://localhost:8000 |
+| OpenAPI | http://localhost:8000/api/v1/docs |
+| Health | http://localhost:8000/health |
 
 ---
 
-# 6 Repository Structure
+## 6. Repository Structure
 
 ```text
-rackdcim-pro
-
-backend/
-
-frontend/
-
-deployment/
-
-docs/
-
-tests/
-
-scripts/
-
-.cursor/
-
-.github/
-
-README.md
-
-LICENSE
+DCIM/
+├── backend/
+│   ├── app/
+│   │   ├── api/v1/endpoints/    # 15 router modules
+│   │   ├── core/                # config, db, security, seed
+│   │   ├── domains/layout/      # U-position engine
+│   │   ├── models/              # SQLAlchemy ORM
+│   │   ├── repositories/
+│   │   ├── schemas/             # Pydantic DTOs
+│   │   ├── services/            # Business logic
+│   │   └── main.py
+│   ├── alembic/versions/        # 0001–0016
+│   ├── requirements.txt
+│   └── .env.example
+├── frontend/
+│   └── src/
+│       ├── api/                 # Axios modules
+│       ├── components/
+│       ├── layouts/
+│       ├── router/
+│       ├── stores/
+│       └── views/
+├── deployment/                  # Docker + nginx
+├── docs/                        # This folder (SSOT)
+├── scripts/                     # dev.ps1, dev.sh, seed.py
+├── tests/                       # unit + integration
+├── .github/workflows/ci.yml
+├── README.md
+└── LICENSE
 ```
 
 ---
 
-# 7 Documentation Structure
+## 7. Documentation Index
 
-```text
-docs
+| Doc | Title | Audience |
+| --- | ----- | -------- |
+| [00-Project.md](00-Project.md) | Project overview | All |
+| [01-PRD.md](01-PRD.md) | Product requirements | PM, Dev |
+| [02-System-Architecture.md](02-System-Architecture.md) | Architecture | Architect |
+| [03-Domain-Model.md](03-Domain-Model.md) | Domain model | Backend |
+| [04-Database-Design.md](04-Database-Design.md) | Database DDL & migrations | DBA, Backend |
+| [05-API-Design.md](05-API-Design.md) | REST API specification | Full-stack |
+| [postman/README.md](postman/README.md) | Postman Collection 导入与同步 | QA, Dev |
+| [06-Frontend-Design.md](06-Frontend-Design.md) | Frontend FDS | Frontend |
+| [07-Backend-Design.md](07-Backend-Design.md) | Backend BSD | Backend |
+| [08-Layout-Engine.md](08-Layout-Engine.md) | Layout algorithm | Backend |
+| [09-SVG-Engine.md](09-SVG-Engine.md) | SVG rendering | Full-stack |
+| [10-AI-Platform.md](10-AI-Platform.md) | AI platform (planned) | Future |
+| [11-Security.md](11-Security.md) | Security architecture | SecOps |
+| [12-Deployment.md](12-Deployment.md) | Deployment | DevOps |
+| [13-Test-Plan.md](13-Test-Plan.md) | Testing strategy | QA |
+| [14-Roadmap.md](14-Roadmap.md) | Operations guide | Ops |
 
-00-Project.md
+---
 
-01-PRD.md
+## 8. Development Workflow
 
-02-System-Architecture.md
-
-03-Domain-Model.md
-
-04-Database-Design.md
-
-05-API-Design.md
-
-06-Frontend-Design.md
-
-07-Backend-Design.md
-
-08-Layout-Engine.md
-
-09-SVG-Engine.md
-
-10-AI-Platform.md
-
-11-Security.md
-
-12-Deployment.md
-
-13-Test-Plan.md
-
-14-Roadmap.md（内容为运维操作指南 Operations Guide）
+```mermaid
+flowchart LR
+  A[Project/PRD] --> B[Architecture]
+  B --> C[Database]
+  C --> D[API Design]
+  D --> E[Backend]
+  E --> F[Frontend]
+  F --> G[Algorithm]
+  G --> H[Testing]
+  H --> I[Release]
 ```
 
-所有开发均以 docs 为唯一事实来源（Single Source of Truth）。文档版本 **1.1.0** 起与 V1 实现（机房布局/编号、导入导出、RBAC UI）对齐。
+1. Update the relevant doc in `docs/`.
+2. Implement backend service + endpoint + schema.
+3. Add frontend API module + view.
+4. Add tests; extend CI when stable.
+5. Update `14-Roadmap.md` implementation status.
+
+**Quick start:**
+
+```powershell
+# Windows
+.\scripts\dev.ps1
+
+# Or manually
+cd backend && .\.venv\Scripts\Activate.ps1 && uvicorn app.main:app --reload --port 8000
+cd frontend && npm run dev
+```
 
 ---
 
-# 8 Development Workflow
+## 9. Coding Standards
 
-项目采用 Documentation Driven Development（DDD）。
+### 9.1 Python
 
-开发流程如下：
+- Python 3.12+, type hints required
+- Format: Black; Lint: Ruff
+- Business logic in `services/`, not in endpoints
+- Repository pattern for data access
+- Exceptions: `AppError` hierarchy (`app/core/exceptions.py`)
 
-Project
+### 9.2 TypeScript / Vue
 
-↓
+- Composition API + `<script setup>`
+- ESLint + Prettier
+- API calls via `src/api/*`, unwrap with `unwrap<T>()`
+- Permission checks via `authStore.hasPermission()`
 
-PRD
+### 9.3 API
 
-↓
+- Prefix: `/api/v1`
+- Envelope: `{ code, message, data, timestamp }`
+- Pagination: `{ items, pagination: { page, page_size, total, pages } }`
+- Auth: `Authorization: Bearer <access_token>`
 
-Architecture
+### 9.4 Database
 
-↓
-
-Database
-
-↓
-
-API
-
-↓
-
-Backend
-
-↓
-
-Frontend
-
-↓
-
-Algorithm
-
-↓
-
-Testing
-
-↓
-
-Release
-
-任何代码开发必须基于对应文档。
+- UUID primary keys, snake_case columns
+- Soft delete: `deleted_at IS NULL`
+- Audit columns on `BaseModel`: created/updated/deleted + version
 
 ---
 
-# 9 Coding Standards
+## 10. Version & Branch Strategy
 
-## Python
+**Semantic Versioning:** `MAJOR.MINOR.PATCH` (app version `1.0.0` in `config.py`).
 
-- Python 3.12
-- PEP8
-- Type Hint
-- Black
-- Ruff
+**Git Flow:**
 
-## Frontend
-
-- Vue3
-- Composition API
-- TypeScript
-- ESLint
-- Prettier
-
-## API
-
-- RESTful
-- OpenAPI 3.1
-- JSON Response
-- Versioning
-
-## Database
-
-- Snake Case
-- Primary Key：UUID
-- Foreign Key
-- Soft Delete
-- Audit Fields
+| Branch | Purpose |
+| ------ | ------- |
+| `main` | Production-ready |
+| `develop` | Integration |
+| `feature/*` | Features |
+| `bugfix/*` | Fixes |
+| `hotfix/*` | Urgent production fixes |
 
 ---
 
-# 10 Version Strategy
+## 11. Milestones
 
-采用 Semantic Versioning。
-
-格式：
-
-MAJOR.MINOR.PATCH
-
-例如：
-
-1.0.0
-
-1.1.0
-
-2.0.0
-
----
-
-# 11 Branch Strategy
-
-Git Flow
-
-main
-
-release
-
-develop
-
-feature/*
-
-bugfix/*
-
-hotfix/*
+| ID | Milestone | Status | Evidence |
+| -- | --------- | ------ | -------- |
+| M1 | Project init | ✅ Done | Repo structure |
+| M2 | PRD | ✅ Done | `01-PRD.md` |
+| M3 | Architecture | ✅ Done | `02-System-Architecture.md` |
+| M4 | Database | ✅ Done | Alembic 0001–0016 |
+| M5 | Backend | ✅ Done | 15 endpoint modules |
+| M6 | Frontend | ✅ Done | 8 views + 2 layouts |
+| M7 | Layout Engine | ✅ Done | mount/unmount/batch |
+| M8 | SVG Engine | ✅ Done | svg service + RackCabinet |
+| M9 | Testing | 🚧 In progress | 6 test files; CI unit only |
+| M10 | Release | 🚧 In progress | Docker compose ready |
 
 ---
 
-# 12 Milestones
+## 12. Future Planning
 
-| Milestone | Description            | V1 状态 |
-| --------- | ---------------------- | ------- |
-| M1        | Project Initialization | Done    |
-| M2        | PRD                    | Done    |
-| M3        | Architecture           | Done    |
-| M4        | Database               | Done（含 room 布局迁移 0003–0005） |
-| M5        | Backend                | Done（quick room、export、users） |
-| M6        | Frontend               | Done（Room/Rack/Users/Roles） |
-| M7        | Layout Engine          | Partial（U 位 + Room 编号） |
-| M8        | SVG Engine             | Partial（机柜 SVG） |
-| M9        | Testing                | In progress |
-| M10       | Release                | Pending |
+| Area | Priority | Doc |
+| ---- | -------- | --- |
+| Audit log UI | High | 06, 14 |
+| Integration tests in CI | High | 13, 12 |
+| Celery async import | Medium | 07, 12 |
+| AI Assistant | Low (V3) | 10 |
+| CMDB / Cable / PDU | V2 | 01, 03 |
 
 ---
 
-# 13 Future Planning
+## 13. License
 
-未来计划增加：
-
-- AI Assistant
-- CMDB
-- IPAM
-- Cable Management
-- Power Management
-- Network Topology
-- Monitoring Integration
-- Digital Twin
+Apache License 2.0 — see [LICENSE](../LICENSE).
 
 ---
 
-# 14 License
+## References
 
-推荐采用：
-
-Apache License 2.0
-
-理由：
-
-- 商业友好
-- 支持闭源商业发行
-- 社区成熟
-- 企业接受度高
-
----
-
-# References
-
-- docs/01-PRD.md
-- docs/02-System-Architecture.md
-- docs/03-Domain-Model.md
-- docs/04-Database-Design.md
-
----
-
-# Approval
-
-| Role               | Name | Status  |
-| ------------------ | ---- | ------- |
-| Product Owner      | Enzo | Pending |
-| Solution Architect | TBD  | Pending |
-| Technical Lead     | TBD  | Pending |
-
----
+- [01-PRD.md](01-PRD.md)
+- [05-API-Design.md](05-API-Design.md)
+- [14-Roadmap.md](14-Roadmap.md)

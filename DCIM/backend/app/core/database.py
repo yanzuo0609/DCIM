@@ -17,6 +17,9 @@ from app.models import (  # noqa: F401
     DeviceSystemProfile,
     DeviceType,
     IpAddress,
+    NetworkLink,
+    NetworkNode,
+    NetworkTopology,
     Floor,
     Manufacturer,
     Permission,
@@ -404,6 +407,15 @@ async def _ensure_sqlite_ip_address_columns(connection) -> None:
     )
 
 
+async def _ensure_sqlite_network_node_columns(connection) -> None:
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    result = await connection.exec_driver_sql("PRAGMA table_info(network_node)")
+    columns = {row[1] for row in result.fetchall()}
+    if "port_layout" not in columns:
+        await connection.exec_driver_sql("ALTER TABLE network_node ADD COLUMN port_layout JSON")
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -412,6 +424,7 @@ async def init_db() -> None:
         await _ensure_sqlite_device_columns(conn)
         await _ensure_sqlite_device_contract_columns(conn)
         await _ensure_sqlite_ip_address_columns(conn)
+        await _ensure_sqlite_network_node_columns(conn)
 
     async with async_session_factory() as session:
         await seed_defaults(session)

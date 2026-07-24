@@ -1,499 +1,280 @@
 ---
 title: Backend Design Specification
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-16
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Backend
 tech_stack: FastAPI + SQLAlchemy + PostgreSQL
 ---
 
-# Backend Design Specification
+# Backend Software Design Specification (BSD)
 
-> RackDCIM Pro
->
-> Backend Software Design Specification (BSD)
+> `backend/app/` — Clean architecture with service/repository layers
 
 ---
 
-# Revision History
+## Revision History
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-16 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 services: room quick, export, user_mgmt |
-
----
-
-# Table of Contents
-
-1. Backend Overview
-2. Architecture Principles
-3. Technology Stack
-4. Project Structure
-5. Layered Architecture
-6. Dependency Injection
-7. Configuration Management
-8. Authentication & Authorization
-9. Exception Handling
-10. Logging
-11. ORM Design
-12. Repository Pattern
-13. Service Layer
-14. Task Queue
-15. File Management
-16. Cache Design
-17. Event Mechanism
-18. Testing Strategy
-19. Performance Optimization
-20. Future Evolution
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | Full module map, DI, lifecycle, error handling |
 
 ---
 
-# 1. Backend Overview
+## 1. Application Entry
 
-Backend 基于 **Python 3.12 + FastAPI** 构建，遵循：
+| File | Role |
+| ---- | ---- |
+| `app/main.py` | FastAPI factory, CORS, lifespan, `/health` |
+| `app/api/v1/router.py` | Aggregates 15 endpoint routers |
+| `app/core/config.py` | Pydantic Settings from `.env` |
+| `app/core/database.py` | Async engine, init_db, SQLite patches |
+| `app/core/handlers.py` | Global exception handlers |
+| `app/core/dependencies.py` | DI + RBAC |
+| `app/core/security.py` | bcrypt + JWT |
+| `app/core/seed.py` | Default data |
 
-- API First
-- DDD（Domain Driven Design）
-- SOLID
-- Clean Architecture
-- Repository Pattern
-- Dependency Injection
+### 1.1 Lifespan
 
-系统目标：
-
-- 高性能
-- 高可维护性
-- 高扩展性
-- AI Ready
-- 支持容器化部署
-
----
-
-# 2. Architecture Principles
-
-遵循以下原则：
-
-- Single Responsibility
-- Open/Closed
-- Dependency Inversion
-- Separation of Concerns
-- Domain First
-- Interface Driven
-
-禁止：
-
-- Controller 写业务逻辑
-- ORM 泄漏到 View
-- SQL 出现在 Controller
+```python
+@asynccontextmanager
+async def lifespan(app):
+    await init_db()  # create_all + seed + sqlite patches
+    yield
+```
 
 ---
 
-# 3. Technology Stack
+## 2. Configuration
 
-| Layer          | Technology        |
-| -------------- | ----------------- |
-| Language       | Python 3.12       |
-| Framework      | FastAPI           |
-| ORM            | SQLAlchemy 2.x    |
-| Migration      | Alembic           |
-| Validation     | Pydantic v2       |
-| Database       | PostgreSQL 16     |
-| Cache          | Redis             |
-| Task Queue     | Celery            |
-| Storage        | MinIO             |
-| Authentication | JWT               |
-| Password Hash  | BCrypt            |
-| Configuration  | Pydantic Settings |
+Environment file: `backend/.env` (from `.env.example`).
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| DATABASE_URL | sqlite+aiosqlite:///./rackdcim.db | DB connection |
+| SECRET_KEY | change-me | JWT signing |
+| ACCESS_TOKEN_EXPIRE_MINUTES | 15 | Access TTL |
+| REFRESH_TOKEN_EXPIRE_DAYS | 7 | Refresh TTL |
+| REDIS_URL | redis://localhost:6379/0 | Cache (future) |
+| CELERY_BROKER_URL | redis://.../1 | Celery broker |
+| CORS_ORIGINS | localhost:5173 | JSON list |
+| DEBUG | true | SQL echo in dev |
 
 ---
 
-# 4. Project Structure
+## 3. Layered Architecture
 
 ```text
-backend/
-├── app/
-│   ├── api/v1/endpoints/   # auth, rooms, racks, devices, users, …
-│   ├── core/               # config, database, seed, dependencies
-│   ├── models/
-│   ├── schemas/            # 含编号辅助：expand_row_prefixes 等
-│   ├── repositories/
-│   ├── services/           # infrastructure, rack, export, user_mgmt, …
-│   ├── middleware/
-│   ├── utils/
-│   └── main.py
-├── alembic/versions/       # 0001…0005（含 room 布局迁移）
-├── tests/
-├── requirements.txt
-└── pyproject.toml
-```
-
-### V1 关键服务
-
-| Service | 职责 |
-| ------- | ---- |
-| infrastructure | DataCenter / Building / Floor / Room；`quick_create_room` |
-| rack | 机柜 CRUD、机柜位解析、U 位布局、SVG |
-| export | 设备 Excel/PDF 导出、导入模板与导入 |
-| user_mgmt | 用户 / 角色 / 权限 |
-| seed | 默认权限、admin、机柜模板、样例型号 |
-
-开发库（SQLite）：`database.py` 在 `create_all` 后 `_ensure_sqlite_room_columns`，再 `seed_defaults`。
-
----
-
-# 5. Layered Architecture
-
-```
-API Layer
-     │
-Service Layer
-     │
-Domain Layer
-     │
-Repository Layer
-     │
+Endpoint (api/v1/endpoints/*.py)
+    ↓ Depends(get_*_service), require_permissions
+Service (services/*.py)
+    ↓ business rules, orchestration
+Repository (repositories/*.py)
+    ↓ SQLAlchemy queries
+Model (models/*.py)
+    ↓ ORM mapping
 Database
 ```
 
-职责：
-
-- API：接收请求、参数校验、返回响应
-- Service：业务编排
-- Domain：核心业务规则
-- Repository：数据访问
-- Database：持久化
+**Domain engine:** `domains/layout/engine.py` — pure U-position logic, called by `LayoutService`.
 
 ---
 
-# 6. Dependency Injection
+## 4. Endpoint Modules
 
-采用 FastAPI Depends。
+| # | Module | File | Prefix / Notes |
+| - | ------ | ---- | -------------- |
+| 1 | health | health.py | /health |
+| 2 | auth | auth.py | /auth |
+| 3 | dashboard | dashboard.py | /dashboard |
+| 4 | datacenters | datacenters.py | /datacenters |
+| 5 | buildings | buildings.py | /buildings |
+| 6 | floors | floors.py | /floors |
+| 7 | rooms | rooms.py | /rooms |
+| 8 | racks | racks.py | /racks |
+| 9 | rack_templates | rack_templates.py | /rack-templates |
+| 10 | devices | devices.py | /devices + catalogs |
+| 11 | device_contracts | device_contracts.py | /device-contracts |
+| 12 | ip_addresses | ip_addresses.py | /ip-addresses |
+| 13 | layout | layout.py | /layout |
+| 14 | svg_audit | svg_audit.py | /svg, /audit |
+| 15 | users | users.py | /users, /roles, /permissions |
 
-示例：
+---
+
+## 5. Service Layer
+
+| Service | File | Key Methods |
+| ------- | ---- | ----------- |
+| AuthService | auth.py | login, refresh, profile |
+| InfrastructureService | infrastructure.py | CRUD, quick_create_room |
+| RackService | rack.py | CRUD, place_batch, template apply |
+| DeviceService | device.py | CRUD, catalog CRUD |
+| ExportService | export.py | export_xlsx/pdf, import_devices |
+| LayoutService | layout.py | validate, auto, mount, unmount, batch |
+| SvgService | svg.py | render_rack_svg |
+| DashboardService | dashboard.py | summary, utilization |
+| IpAddressService | ip_address.py | CRUD, batch, allocate, bind |
+| DeviceContractService | device_contract.py | CRUD, bind, summary |
+| ContractExportService | contract_export.py | items template/import |
+| UserMgmtService | user_mgmt.py | users, roles |
+| AuditService | audit.py | list_logs |
+
+---
+
+## 6. Repository Layer
+
+| Repository | Aggregate roots |
+| ---------- | --------------- |
+| InfrastructureRepository | DC, Building, Floor, Room |
+| RackRepository | Rack, RackTemplate, RackPosition |
+| DeviceRepository | Device, catalogs |
+| DeviceContractRepository | DeviceContract |
+| IpAddressRepository | IpAddress |
+| UserRepository | User, Role, Permission |
+| AuditRepository | AuditLog |
+
+Base pagination in `repositories/base.py`: soft-delete filter, keyword search hooks.
+
+---
+
+## 7. Schema Layer (Pydantic v2)
+
+| Module | DTOs |
+| ------ | ---- |
+| common.py | ApiResponse, PaginatedResponse, ErrorResponse, PaginationParams |
+| auth.py | LoginRequest, TokenResponse, UserProfile |
+| infrastructure.py | RoomQuickCreate, slot code helpers |
+| rack.py | RackCreate, RackLayout, PlaceBatch |
+| device.py | DeviceCreate, catalog schemas |
+| layout.py | MountRequest, ValidateLayoutResponse |
+| ip_address.py | IpCreate, batch results |
+| device_contract.py | ContractCreate, items import |
+| user_mgmt.py | UserCreate, RoleCreate |
+| export.py | ImportResult |
+
+---
+
+## 8. Dependency Injection
+
+Pattern in `core/dependencies.py`:
 
 ```python
-@app.get("/racks")
-def list_racks(service: RackService = Depends(get_rack_service)):
-    return service.list()
-```
+async def get_rack_service(session: AsyncSession = Depends(get_db)) -> RackService:
+    return RackService(RackRepository(session), ...)
 
-依赖统一在 `core/dependencies.py` 中管理。
-
----
-
-# 7. Configuration Management
-
-采用环境变量 + `.env`。
-
-主要配置：
-
-```
-DATABASE_URL
-REDIS_URL
-SECRET_KEY
-MINIO_ENDPOINT
-JWT_EXPIRE_MINUTES
-LOG_LEVEL
-```
-
-开发、测试、生产环境分别维护配置文件。
-
----
-
-# 8. Authentication & Authorization
-
-认证：
-
-- JWT Access Token
-- Refresh Token
-
-授权：
-
-- RBAC
-- Resource Permission
-- Action Permission
-
-示例权限：
-
-```
-admin:*
-datacenter:view|create|update|delete
-rack:view|create|update|delete
-device:view|create|update|delete|import|export
-user:view|create|update|delete
-role:view|create|update|delete
-dashboard:view
-audit:view
-```
-
-实现：`core/dependencies.py` 的 `require_permissions`；`admin:*` 短路放行。
-
----
-
-# 9. Exception Handling
-
-统一异常结构：
-
-```json
-{
-  "code": 10002,
-  "message": "Rack Conflict",
-  "details": {}
-}
-```
-
-异常分类：
-
-- ValidationError
-- BusinessError
-- PermissionError
-- DatabaseError
-- SystemError
-
----
-
-# 10. Logging
-
-采用结构化日志（JSON）。
-
-日志级别：
-
-- DEBUG
-- INFO
-- WARNING
-- ERROR
-- CRITICAL
-
-记录内容：
-
-- Request ID
-- User ID
-- API
-- Duration
-- Status Code
-
----
-
-# 11. ORM Design
-
-所有模型继承：
-
-```python
-BaseModel
-```
-
-公共字段：
-
-- id
-- created_at
-- updated_at
-- deleted_at
-- version
-
-关系：
-
-- One-to-One
-- One-to-Many
-- Many-to-Many
-
-禁止在 ORM 中编写复杂业务逻辑。
-
----
-
-# 12. Repository Pattern
-
-每个聚合根对应一个 Repository：
-
-```
-RackRepository
-DeviceRepository
-UserRepository
-RoomRepository
-```
-
-职责：
-
-- CRUD
-- Query
-- Pagination
-- Transaction
-
----
-
-# 13. Service Layer
-
-Service 负责业务编排。
-
-示例：
-
-```
-RackService
-DeviceService
-LayoutService
-DashboardService
-AIService
-```
-
-原则：
-
-- 调用多个 Repository
-- 执行业务规则
-- 发布领域事件
-
----
-
-# 14. Task Queue
-
-采用 Celery。
-
-异步任务：
-
-- Excel 导入
-- PDF 导出
-- SVG 渲染
-- 邮件通知
-- AI 分析
-
-Broker：
-
-```
-Redis
+def require_permissions(*codes: str):
+    async def checker(user: User = Depends(get_current_user)):
+        if user.has_permission("admin:*"):
+            return user
+        if not all(user.has_permission(c) for c in codes):
+            raise ForbiddenError()
+        return user
+    return checker
 ```
 
 ---
 
-# 15. File Management
+## 9. Exception Handling
 
-对象存储：
+Hierarchy (`core/exceptions.py`):
 
-MinIO
+- `AppError` (base, carries `code`, `message`, `details`)
+- `NotFoundError`, `ConflictError`, `UnauthorizedError`, `ForbiddenError`, `ValidationError`
 
-目录：
+Handlers (`core/handlers.py`):
 
-```
-uploads/
-exports/
-templates/
-reports/
-```
-
-支持：
-
-- Excel
-- PDF
-- SVG
-- PNG
-- ZIP
+- `AppError` → JSON ErrorResponse + mapped HTTP status
+- `RequestValidationError` → 422 with Pydantic errors
+- Unhandled → 500 (includes detail in dev)
 
 ---
 
-# 16. Cache Design
+## 10. Security Implementation
 
-Redis 缓存：
+| Feature | Implementation |
+| ------- | -------------- |
+| Password hash | bcrypt via `hash_password()` |
+| JWT | HS256, python-jose |
+| Token payload | sub=user_id, exp, type=access\|refresh |
+| RBAC | Permission codes on Role, checked per endpoint |
+| Login lockout fields | failed_login_count, locked_until on User |
+| Credential profiles | `credential_crypto.py` for profile payloads |
 
-- Dashboard
-- 系统配置
-- 用户权限
-- Token 黑名单
-
-缓存策略：
-
-- TTL
-- 主动失效
-- 写后更新
+See [11-Security.md](11-Security.md) for full policy.
 
 ---
 
-# 17. Event Mechanism
+## 11. Database Initialization
 
-采用领域事件。
+### 11.1 PostgreSQL (Production)
 
-示例：
-
-```
-DeviceCreated
-RackUpdated
-LayoutCompleted
-ImportFinished
+```bash
+alembic upgrade head
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-后续可扩展：
+### 11.2 SQLite (Development)
 
-- Kafka
-- RabbitMQ
+1. `create_all()` from all models
+2. SQLite column patches (mirror Alembic 0003–0016)
+3. `seed_defaults()` if empty
+
+Seed creates: permissions, admin role/user, rack templates, device types/models.
 
 ---
 
-# 18. Testing Strategy
+## 12. Celery 📋
 
-测试分类：
+`core/celery_app.py` configures broker/backend URLs. **No tasks defined, no worker in compose.**
 
-- Unit Test
-- Integration Test
-- API Test
-- Performance Test
+Planned tasks: async import, report generation, email.
 
-工具：
+---
 
-- Pytest
-- HTTPX
-- Faker
+## 13. File Handling
 
-目标覆盖率：
+| Format | Library | Service |
+| ------ | ------- | ------- |
+| Excel | openpyxl | export.py, contract_export.py |
+| PDF | reportlab | export.py |
 
+No MinIO; files streamed in HTTP response or multipart upload.
+
+---
+
+## 14. Testing
+
+| Type | Path | CI |
+| ---- | ---- | -- |
+| Unit | tests/unit/ | ✅ |
+| Integration | tests/integration/ | 📋 local only |
+
+Run:
+
+```bash
+cd backend && pytest ../tests/unit -v
+cd backend && pytest ../tests/integration -v
 ```
->90%
+
+---
+
+## 15. Code Quality
+
+```bash
+black app
+ruff check app
 ```
 
----
-
-# 19. Performance Optimization
-
-优化措施：
-
-- SQL 优化
-- Redis 缓存
-- 异步任务
-- 数据分页
-- 批量写入
-- 连接池
-
-性能目标：
-
-| 指标                      | 目标   |
-| ------------------------- | ------ |
-| API 响应                  | <200ms |
-| 数据库查询                | <100ms |
-| Excel 导入（1000 台设备） | <10s   |
-| SVG 渲染                  | <500ms |
+Enforced in CI on push to main/develop.
 
 ---
 
-# 20. Future Evolution
+## References
 
-规划：
-
-- GraphQL
-- gRPC
-- Event Bus
-- Multi-Tenant
-- Plugin System
-- AI Agent Service
-- MCP Server
-
-Backend 保持向后兼容。
-
----
-
-# References
-
-- docs/02-System-Architecture.md
-- docs/03-Domain-Model.md
-- docs/04-Database-Design.md
-- docs/05-API-Design.md
-- docs/06-Frontend-Design.md
-
----
+- [05-API-Design.md](05-API-Design.md)
+- [08-Layout-Engine.md](08-Layout-Engine.md)
+- [04-Database-Design.md](04-Database-Design.md)

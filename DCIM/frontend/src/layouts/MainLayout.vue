@@ -9,11 +9,15 @@ const auth = useAuthStore()
 
 const activeMenu = computed(() => {
   if (route.path.startsWith('/rooms')) return '/rooms/manage'
+  if (route.path.startsWith('/network')) return route.path
   return route.path
 })
-const openedMenus = computed(() =>
-  route.path.startsWith('/devices') ? ['device-menu'] : [],
-)
+const openedMenus = computed(() => {
+  const menus: string[] = []
+  if (route.path.startsWith('/devices')) menus.push('device-menu')
+  if (route.path.startsWith('/network')) menus.push('network-menu')
+  return menus
+})
 const displayName = computed(() => auth.profile?.full_name || auth.profile?.username || 'User')
 
 function handleMenuSelect(index: string) {
@@ -55,6 +59,12 @@ async function handleLogout() {
         >
           <span>机房管理</span>
         </el-menu-item>
+        <el-sub-menu v-if="auth.hasPermission('network:view')" index="network-menu">
+          <template #title><span>网络设计</span></template>
+          <el-menu-item index="/network/devices">设备定义</el-menu-item>
+          <el-menu-item index="/network/topology">拓扑设计</el-menu-item>
+          <el-menu-item index="/network/interfaces">接口设计</el-menu-item>
+        </el-sub-menu>
         <el-sub-menu v-if="auth.hasPermission('device:view')" index="device-menu">
           <template #title><span>设备管理</span></template>
           <el-menu-item index="/devices">设备管理</el-menu-item>

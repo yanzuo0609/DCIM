@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   batchDeleteDevices,
@@ -18,9 +19,9 @@ import {
   deleteDeviceType,
   deleteParamProfile,
   deleteSystemProfile,
-  downloadImportTemplate,
   exportDevicesExcel,
   exportDevicesPdf,
+  getDevice,
   importDevices,
   listBmcProfiles,
   listDeviceModels,
@@ -83,6 +84,7 @@ import RackRangePicker from '@/components/RackRangePicker.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const route = useRoute()
 const activeTab = ref<'devices' | 'profiles' | 'ips'>('devices')
 const profileSubTab = ref<'param' | 'bmc' | 'system' | 'type' | 'model'>('param')
 
@@ -966,6 +968,7 @@ const canUpdate = auth.hasPermission('device:update')
 const canDelete = auth.hasPermission('device:delete')
 const canImport = auth.hasPermission('device:import')
 const canExport = auth.hasPermission('device:export')
+const canIoMenu = computed(() => canImport || canExport)
 const importInput = ref<HTMLInputElement | null>(null)
 const batchBusy = ref(false)
 
@@ -1297,6 +1300,17 @@ function openEdit(row: Device) {
   }
   editVisible.value = true
   if (form.rack_id) void loadFormRackLayout(form.rack_id)
+}
+
+async function openDeviceFromQuery() {
+  const deviceId = route.query.device_id
+  if (!deviceId || typeof deviceId !== 'string') return
+  try {
+    const device = await getDevice(deviceId)
+    openEdit(device)
+  } catch {
+    ElMessage.warning('未找到指定设备')
+  }
 }
 
 watch(
@@ -2254,12 +2268,18 @@ async function handleExportPdf() {
   ElMessage.success('PDF 导出成功')
 }
 
-async function handleDownloadTemplate() {
-  await downloadImportTemplate()
-}
-
 function triggerImport() {
   importInput.value?.click()
+}
+
+async function handleIoCommand(command: string) {
+  if (command === 'export-excel') {
+    await handleExportExcel()
+  } else if (command === 'export-pdf') {
+    await handleExportPdf()
+  } else if (command === 'import-excel') {
+    triggerImport()
+  }
 }
 
 async function handleImportFile(event: Event) {
@@ -2291,8 +2311,18 @@ watch(activeTab, (tab) => {
 
 onMounted(() => {
   loading.value = true
-  void Promise.all([loadCatalog(), loadData()])
+  void Promise.all([loadCatalog(), loadData()]).finally(() => {
+    loading.value = false
+    void openDeviceFromQuery()
+  })
 })
+
+watch(
+  () => route.query.device_id,
+  () => {
+    void openDeviceFromQuery()
+  },
+)
 </script>
 
 <template>
@@ -2310,10 +2340,21 @@ onMounted(() => {
                 @keyup.enter="loadData"
               />
               <el-button @click="loadData">搜索</el-button>
-              <el-button v-if="canExport" @click="handleExportExcel">导出 Excel</el-button>
-              <el-button v-if="canExport" @click="handleExportPdf">导出 PDF</el-button>
-              <el-button v-if="canImport" @click="handleDownloadTemplate">导入模板</el-button>
-              <el-button v-if="canImport" @click="triggerImport">导入 Excel</el-button>
+              <el-dropdown v-if="canIoMenu" trigger="click" @command="handleIoCommand">
+                <el-button>
+                  导入/导出
+                  <span class="dropdown-caret">▾</span>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="canExport" command="export-excel">导出 Excel</el-dropdown-item>
+                    <el-dropdown-item v-if="canExport" command="export-pdf">导出 PDF</el-dropdown-item>
+                    <el-dropdown-item v-if="canImport" command="import-excel" :divided="canExport">
+                      导入 Excel
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <input
                 ref="importInput"
                 type="file"

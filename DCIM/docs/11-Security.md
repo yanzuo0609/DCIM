@@ -1,570 +1,249 @@
 ---
 title: Security Architecture Specification
 project: RackDCIM Pro
-version: 1.0.0
-status: Draft
+version: 1.3.0
+status: Active
 author: Enzo
-date: 2026-07-17
+date: 2026-07-22
+last_code_sync: 2026-07-22
 category: Security
 classification: Internal
 ---
 
 # Security Architecture Specification
 
-> RackDCIM Pro
->
-> Enterprise Security Architecture
+> Defense in depth — JWT + RBAC + bcrypt + audit API
 
 ---
 
-# Revision History
+## Revision History
 
-| Version | Date       | Author | Description     |
-| ------- | ---------- | ------ | --------------- |
-| 1.0.0   | 2026-07-17 | Enzo   | Initial Version |
-| 1.1.0   | 2026-07-17 | Enzo   | Sync V1 permission codes and default admin |
-
----
-
-# Table of Contents
-
-1. Security Overview
-2. Security Objectives
-3. Security Architecture
-4. Authentication
-5. Authorization
-6. Password Security
-7. Session & Token Security
-8. API Security
-9. Data Security
-10. Database Security
-11. File Security
-12. Audit & Logging
-13. AI Security
-14. Network Security
-15. Deployment Security
-16. Compliance
-17. Incident Response
-18. Security Checklist
+| Version | Date | Author | Description |
+| ------- | ---- | ------ | ----------- |
+| 1.3.0 | 2026-07-22 | Enzo | V1 implemented vs planned controls |
 
 ---
 
-# 1. Security Overview
+## 1. Security Objectives
 
-RackDCIM Pro 采用“纵深防御（Defense in Depth）”安全模型。
-
-安全控制覆盖：
-
-- 身份认证
-- 权限控制
-- 数据保护
-- API 防护
-- 文件安全
-- AI 安全
-- 审计追踪
-- 部署安全
-
-目标：
-
-- 机密性（Confidentiality）
-- 完整性（Integrity）
-- 可用性（Availability）
-- 可审计性（Auditability）
+| Objective | V1 Status |
+| --------- | --------- |
+| Authenticate all API calls (except health/login) | ✅ |
+| Least privilege RBAC | ✅ |
+| Secure password storage | ✅ bcrypt |
+| Input validation | ✅ Pydantic |
+| Audit trail API | ✅ |
+| HTTPS in production | 📋 deploy responsibility |
+| Rate limiting | 📋 |
+| MFA | 📋 |
 
 ---
 
-# 2. Security Objectives
-
-必须满足：
-
-✓ 所有接口鉴权
-
-✓ 最小权限原则
-
-✓ 敏感数据加密
-
-✓ 全量审计日志
-
-✓ 防止越权访问
-
-✓ 防止注入攻击
-
-✓ 防止 Prompt Injection
-
-✓ 支持企业合规
-
----
-
-# 3. Security Architecture
+## 2. Architecture
 
 ```text
-User
-  │
-  ▼
-HTTPS
-  │
-  ▼
-Nginx/WAF
-  │
-  ▼
-FastAPI Gateway
-  │
-  ├── JWT Authentication
-  ├── RBAC Authorization
-  ├── Rate Limiter
-  ├── Audit Middleware
-  └── Input Validation
-  │
-  ▼
-Business Services
-  │
-  ▼
-PostgreSQL / Redis / MinIO
+Client
+  → HTTPS (production)
+  → FastAPI
+       ├── CORS middleware (whitelist)
+       ├── JWT validation (get_current_user)
+       ├── RBAC (require_permissions)
+       ├── Pydantic validation
+       └── Exception handlers (no stack leak in prod)
+  → PostgreSQL / SQLite
 ```
 
 ---
 
-# 4. Authentication
+## 3. Authentication
 
-采用：
+### 3.1 JWT Configuration
 
-- JWT Access Token
-- Refresh Token
+| Token | TTL | Config Key |
+| ----- | --- | ---------- |
+| Access | 15 min | ACCESS_TOKEN_EXPIRE_MINUTES |
+| Refresh | 7 days | REFRESH_TOKEN_EXPIRE_DAYS |
+| Algorithm | HS256 | JWT_ALGORITHM |
+| Secret | env | SECRET_KEY |
 
-Access Token：
-
-- 有效期：15 分钟
-- 用于 API 调用
-
-Refresh Token：
-
-- 有效期：7 天
-- 用于刷新 Access Token
-
-Header：
+Header:
 
 ```http
-Authorization: Bearer <token>
+Authorization: Bearer <access_token>
 ```
 
----
+Implementation: `app/core/security.py`, `app/services/auth.py`.
 
-## 4.1 Login Security
+### 3.2 Login Flow
 
-登录必须：
+1. POST `/auth/login` with username/password
+2. Verify bcrypt hash
+3. Increment `failed_login_count` on failure; set `locked_until` per policy fields
+4. Return access + refresh tokens
+5. Frontend stores in localStorage; attaches to requests
 
-- BCrypt 哈希
-- 登录失败计数
-- 账户锁定
-- IP 记录
-- MFA 预留
+### 3.3 Token Refresh
 
-账户锁定：
-
-| 条件           | 动作         |
-| -------------- | ------------ |
-| 连续失败 5 次  | 锁定 15 分钟 |
-| 连续失败 10 次 | 锁定 1 小时  |
+Frontend interceptor (`api/index.ts`) calls `/auth/refresh` on 401, retries once.
 
 ---
 
-# 5. Authorization
+## 4. Authorization (RBAC)
 
-采用 RBAC。
-
-权限模型：
+### 4.1 Model
 
 ```text
-User
-  ↓
-Role
-  ↓
-Permission
+User ──M:N── Role ──M:N── Permission
 ```
 
-权限粒度（种子 `DEFAULT_PERMISSIONS`）：
+### 4.2 Permission Catalog
 
-```text
-admin:*
-datacenter:view|create|update|delete
-rack:view|create|update|delete
-device:view|create|update|delete
-device:import
-device:export
-audit:view
-dashboard:view
-user:view|create|update|delete
-role:view|create|update|delete
+| Code | Description |
+| ---- | ----------- |
+| admin:* | Full access (bypass) |
+| datacenter:view\|create\|update\|delete | Infrastructure |
+| rack:view\|create\|update\|delete | Racks & templates |
+| device:view\|create\|update\|delete | Devices, IP, contracts |
+| device:import | Excel import |
+| device:export | Excel/PDF export |
+| dashboard:view | Dashboard |
+| audit:view | Audit logs |
+| user:view\|create\|update\|delete | User admin |
+| role:view\|create\|update\|delete | Role admin |
+
+Source: `DEFAULT_PERMISSIONS` in `core/seed.py`.
+
+### 4.3 Protected Resources
+
+| Resource | Rule |
+| -------- | ---- |
+| User `admin` | Cannot delete |
+| Role `admin` | Cannot delete; cannot modify permission_ids via API |
+| System device types | Cannot delete if is_system |
+
+Enforcement: `UserMgmtService`, `DeviceService`, `require_permissions`.
+
+---
+
+## 5. Password Policy
+
+| Rule | Enforcement |
+| ---- | ----------- |
+| Minimum 12 characters | API schema validation |
+| Storage | bcrypt hash only |
+| Default seed password | `Admin@12345678` — **must change in production** |
+
+Recommended production policy (📋 not all enforced in code):
+
+- Mixed case, digit, special character
+- Rotation on compromise
+
+---
+
+## 6. API Security
+
+### 6.1 Input Validation ✅
+
+- Pydantic models on all request bodies
+- UUID format validation
+- Enum constraints on status fields
+- File upload: extension + size checks on import endpoints
+
+### 6.2 SQL Injection ✅
+
+- SQLAlchemy ORM / parameterized queries only
+- No raw SQL string concatenation in services
+
+### 6.3 CORS ✅
+
+`CORS_ORIGINS` in settings — default localhost dev origins. Production must set explicit domains; never `*`.
+
+### 6.4 Rate Limiting 📋
+
+Planned limits documented in [05-API-Design.md](05-API-Design.md). Not implemented in middleware.
+
+---
+
+## 7. Data Security
+
+| Data | Protection |
+| ---- | ---------- |
+| password_hash | bcrypt |
+| JWT secret | env var, not in git |
+| Profile credentials (BMC) | `credential_crypto.py` encryption helper |
+| serial_number, IP | Access controlled by RBAC |
+| Logs | Avoid password/token in log output |
+
+---
+
+## 8. Audit & Logging
+
+### 8.1 Audit API ✅
+
+```http
+GET /api/v1/audit/logs?page=1&page_size=20
 ```
 
-规则：
+Permission: `audit:view`.
 
-- 默认拒绝（Deny by Default）
-- 用户持有 `admin:*` 时，`require_permissions` 全部放行
-- 不可删除用户名 `admin`；不可删除角色 `code=admin`
-- 不可通过 API 修改 admin 角色的 `permission_ids`
-- 后续启动由 `ensure_permissions` 将缺失权限补齐到 admin 角色
+### 8.2 Planned Audit Events
 
-### 默认管理员（仅空库首次种子）
+Login, logout, CRUD, import/export, permission changes, future AI actions.
 
-| Field | Value |
-| ----- | ----- |
-| username | `admin` |
-| password | `Admin@12345678` |
-| email | `admin@rackdcim.example.com` |
-| role | `admin`（全部权限） |
-
-生产环境发布前必须修改密码；见清单「默认账号密码已修改」。
+Retention target: ≥180 days (operational policy).
 
 ---
 
-# 6. Password Security
+## 9. File Upload Security
 
-密码要求：
+Import endpoints accept `.xlsx`:
 
-- 最少 12 位
-- 必须包含大小写
-- 必须包含数字
-- 必须包含特殊字符
-
-存储：
-
-```text
-BCrypt
-Cost Factor: 12
-```
-
-禁止：
-
-- 明文存储
-- 可逆加密
-- SHA1/MD5
+| Control | Status |
+| ------- | ------ |
+| MIME / extension check | ✅ basic |
+| Size limit | ✅ service-level |
+| Virus scan | 📋 |
+| Random storage name | N/A (in-memory parse) |
 
 ---
 
-# 7. Session & Token Security
+## 10. Deployment Security
 
-Token 必须：
-
-- 使用 HS256/RS256
-- 包含 exp
-- 包含 jti
-- 包含 user_id
-- 包含 role
-
-支持：
-
-- Token Blacklist
-- 强制注销
-- 密码修改后失效
+| Control | Docker | Production checklist |
+| ------- | ------ | -------------------- |
+| Non-root container | 📋 partial | Review Dockerfiles |
+| SECRET_KEY rotation | — | Required |
+| HTTPS termination | nginx | Required |
+| DB credentials | compose env | Change defaults |
 
 ---
 
-# 8. API Security
+## 11. AI Security 📋
 
-## 8.1 Input Validation
+When AI module is implemented (see [10-AI-Platform.md](10-AI-Platform.md)):
 
-所有输入必须：
-
-- 类型校验
-- 长度校验
-- 枚举校验
-- UUID 校验
-- 文件类型校验
-
-禁止直接拼接 SQL。
-
-统一使用 ORM 或参数化查询。
+- Tool calls inherit user RBAC
+- Prompt injection filtering
+- Human confirmation for write/delete tools
+- Full audit of AI actions
 
 ---
 
-## 8.2 Rate Limiting
+## 12. Pre-Release Checklist
 
-默认：
-
-```text
-100 req/min
-```
-
-登录：
-
-```text
-10 req/min
-```
-
-AI 接口：
-
-```text
-20 req/min
-```
-
-导入接口：
-
-```text
-5 req/min
-```
+- [ ] HTTPS enabled
+- [ ] SECRET_KEY changed from default
+- [ ] Admin password changed from `Admin@12345678`
+- [ ] PostgreSQL credentials rotated
+- [ ] CORS restricted to production domain
+- [ ] `.env` not committed
+- [ ] Backup verified
+- [ ] Dependency scan (pip-audit / npm audit)
 
 ---
 
-## 8.3 CORS
-
-仅允许配置白名单：
-
-```text
-https://dcim.example.com
-https://admin.example.com
-```
-
-禁止：
-
-```text
-*
-```
-
----
-
-# 9. Data Security
-
-敏感字段：
-
-- serial_number
-- ip_address
-- purchase_price
-- vendor_contract
-- access_token
-
-保护方式：
-
-- 静态加密（AES-256）
-- 传输加密（TLS 1.3）
-- 日志脱敏
-
----
-
-# 10. Database Security
-
-数据库账户：
-
-- app_user（业务）
-- migration_user（迁移）
-- readonly_user（只读）
-
-原则：
-
-- 最小权限
-- 禁止使用 superuser
-- 禁止共享账号
-
----
-
-## 10.1 Backup Security
-
-备份必须：
-
-- 加密
-- 校验
-- 异地保存
-- 定期恢复演练
-
----
-
-# 11. File Security
-
-上传文件：
-
-支持：
-
-- .xlsx
-- .csv
-- .pdf
-- .svg
-
-必须：
-
-- MIME 校验
-- 扩展名校验
-- 大小限制
-- 病毒扫描
-- 随机文件名
-
-默认限制：
-
-```text
-100 MB
-```
-
----
-
-# 12. Audit & Logging
-
-必须记录：
-
-- 登录
-- 登出
-- 新增
-- 修改
-- 删除
-- 导入
-- 导出
-- 权限变更
-- AI 操作
-
-日志字段：
-
-```text
-timestamp
-user_id
-ip
-action
-resource
-result
-request_id
-```
-
-日志保留：
-
-```text
-≥ 180 days
-```
-
----
-
-# 13. AI Security
-
-AI 是高风险模块。
-
-必须：
-
-- Tool 权限校验
-- Prompt Injection 防护
-- 敏感信息过滤
-- 输出校验
-- 操作确认机制
-
-禁止 AI：
-
-- 未授权删除数据
-- 未授权修改配置
-- 越权查询资产
-- 执行系统命令
-
----
-
-## 13.1 Prompt Injection Defense
-
-检查：
-
-- ignore previous instructions
-- reveal secrets
-- dump database
-- system prompt
-- token
-
-发现后：
-
-```text
-BLOCK + AUDIT
-```
-
----
-
-# 14. Network Security
-
-要求：
-
-- TLS 1.3
-- HSTS
-- Secure Cookie
-- X-Frame-Options
-- CSP
-- X-Content-Type-Options
-
-管理端口仅允许内网访问。
-
----
-
-# 15. Deployment Security
-
-Docker：
-
-- 非 root 用户
-- 只读文件系统（可选）
-- 最小镜像
-- 定期漏洞扫描
-
-Kubernetes：
-
-- NetworkPolicy
-- PodSecurity
-- Secret 管理
-- 镜像签名
-
----
-
-# 16. Compliance
-
-参考：
-
-- ISO 27001
-- SOC 2
-- NIST CSF
-- OWASP ASVS
-- OWASP Top 10
-
----
-
-# 17. Incident Response
-
-流程：
-
-```text
-Detect
-  ↓
-Contain
-  ↓
-Investigate
-  ↓
-Eradicate
-  ↓
-Recover
-  ↓
-Review
-```
-
-严重事件：
-
-- 数据泄露
-- 权限绕过
-- RCE
-- 供应链攻击
-- AI 越权执行
-
-必须在 24 小时内完成初步分析。
-
----
-
-# 18. Security Checklist
-
-发布前必须确认：
-
-- [ ] HTTPS 已启用
-- [ ] JWT 密钥已更换
-- [ ] 默认管理员密码已修改（勿使用 `Admin@12345678`）
-- [ ] 数据库密码已修改
-- [ ] CORS 已配置
-- [ ] Rate Limit 已启用
-- [ ] 审计日志正常
-- [ ] 备份已验证
-- [ ] 漏洞扫描通过
-- [ ] AI 安全规则已启用（启用 AI 模块时）
-
----
-
-# References
-
-- docs/02-System-Architecture.md
-- docs/05-API-Design.md
-- docs/07-Backend-Design.md
-- docs/10-AI-Platform.md
-
----
+## References
+
+- [05-API-Design.md](05-API-Design.md)
+- [07-Backend-Design.md](07-Backend-Design.md)
+- [12-Deployment.md](12-Deployment.md)
