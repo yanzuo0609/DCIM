@@ -1,24 +1,30 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import {
   CORE_CARD_TYPE_LABELS,
   NODE_KIND_LABELS,
   PORT_TYPE_COLORS,
   PORT_TYPE_LABELS,
+  PORT_TYPE_SHORT,
   SERVER_ORIENTATION_LABELS,
   SERVER_SLOT_KIND_LABELS,
+  SECURITY_ZONE_LAYOUT_LABELS,
   SWITCH_SUBTYPE_DEFAULTS,
   SWITCH_SUBTYPE_LABELS,
   UPLINK_POSITION_LABELS,
   formatNodeLocation,
   listNodePortOptions,
   newCoreLineCard,
+  serverSlotDefaultPortType,
   type CoreCardType,
   type CoreLineCard,
   type FramePort,
+  type LayoutSlotDef,
   type NetworkNode,
   type PortLayout,
   type PortType,
+  type SecurityZoneLayout,
   type ServerFormFactor,
   type ServerPanelSide,
   type ServerSlotKind,
@@ -38,6 +44,7 @@ import {
   addServerSlot,
   addSlotWithGroup,
   applyHeightU,
+  applySecurityLayoutConfig,
   applySwitchLayoutConfig,
   defaultPortLayout,
   formatDeviceFrameLabel,
@@ -52,6 +59,9 @@ import {
   slotBandRects,
   moveServerPortInPanel,
   moveServerSlotInPanel,
+  moveSecurityZoneInPanel,
+  resizeSecurityZoneInPanel,
+  resetSecurityZonePositions,
   syncLegacyFromPortLayout,
   syncPortsFromSlotsDef,
 } from '@/utils/networkPortLayout'
@@ -69,6 +79,16 @@ import {
 } from '@/utils/serverRearPanel'
 import { layoutServerFrontPanel, type ServerFrontPanelView } from '@/utils/serverFrontPanel'
 import { SERVER_CARD_PALETTE } from '@/utils/serverPanelCommon'
+import {
+  SEC_EAR,
+  SEC_FRAME_HEIGHT_BY_U,
+  SEC_RESIZE_HANDLE,
+  layoutSecurityFrontPanel,
+  normalizeSecurityHeightU,
+  newSecurityZoneSlot,
+  patchSecurityZoneSlot,
+  type SecurityPanelView,
+} from '@/utils/securityFrontPanel'
 
 const props = defineProps<{
   node: NetworkNode
@@ -79,43 +99,77 @@ const props = defineProps<{
   layoutEditable?: boolean
 }>()
 
-const layoutCanEdit = computed(() =>
-  props.layoutEditable ?? props.editable ?? false,
-)
+/**
+ * 布局结构是否可改（添加/编辑/删除扩展卡、拖动等）。
+ * 保存后 layout_locked=true，须点「编辑布局」才可改。
+ */
+const layoutCanEdit = computed(() => {
+  if (!(props.editable ?? false)) return false
+  if (props.node.port_layout?.layout_locked === true) return false
+  if (typeof props.layoutEditable === 'boolean') return props.layoutEditable
+  return true
+})
 const portsCanEdit = computed(() => props.editable ?? false)
 
-const layout = computed(() => {
-  if (!props.node.port_layout) {
-    props.node.port_layout = defaultPortLayout(props.node.kind)
-    if (props.node.kind === 'switch') {
-      applySwitchLayoutConfig(props.node.port_layout, {
+/** 每个节点只做一次布局归一化，避免 computed 反复副作用拖慢渲染 */
+const layoutReadyNodeId = ref<string | null>(null)
+
+function ensureNodePortLayout() {
+  const node = props.node
+  if (!node.port_layout) {
+    node.port_layout = defaultPortLayout(node.kind)
+    if (node.kind === 'switch') {
+      applySwitchLayoutConfig(node.port_layout, {
         subtype: 'gigabit',
         mainPortCount: 48,
         uplinkPortCount: 4,
         uplinkPosition: 'right',
       })
-    } else if (props.node.kind === 'server') {
-      applyServerFormFactor(props.node.port_layout, 1)
-      syncPortsFromSlotsDef(props.node.port_layout, false)
-    } else {
-      syncPortsFromSlotsDef(props.node.port_layout, false)
-    }
-  } else {
-    normalizePortLayout(props.node.port_layout)
-    if (props.node.kind === 'switch' && !props.node.port_layout.switch_subtype) {
-      applySwitchLayoutConfig(props.node.port_layout, {
-        subtype: 'gigabit',
-        mainPortCount: props.node.port_layout.main_port_count ?? 48,
-        uplinkPortCount: props.node.port_layout.uplink_port_count ?? 4,
-        uplinkPosition: props.node.port_layout.uplink_position ?? 'right',
+    } else if (node.kind === 'server') {
+      applyServerFormFactor(node.port_layout, 1)
+      syncPortsFromSlotsDef(node.port_layout, false)
+    } else if (node.kind === 'security') {
+      applySecurityLayoutConfig(node.port_layout, {
+        heightU: node.port_layout.height_u ?? 1,
+        preservePeers: false,
       })
-    } else if (props.node.kind === 'server' && props.node.port_layout.server_form_factor == null) {
-      applyServerFormFactor(props.node.port_layout, normalizeServerFormFactor(props.node.port_layout.height_u ?? 1))
-      syncPortsFromSlotsDef(props.node.port_layout, true)
-    } else if (!props.node.port_layout.ports.length) {
-      syncPortsFromSlotsDef(props.node.port_layout, false)
+    } else {
+      syncPortsFromSlotsDef(node.port_layout, false)
+    }
+  } else if (layoutReadyNodeId.value !== node.id) {
+    normalizePortLayout(node.port_layout)
+    if (node.kind === 'switch' && !node.port_layout.switch_subtype) {
+      applySwitchLayoutConfig(node.port_layout, {
+        subtype: 'gigabit',
+        mainPortCount: node.port_layout.main_port_count ?? 48,
+        uplinkPortCount: node.port_layout.uplink_port_count ?? 4,
+        uplinkPosition: node.port_layout.uplink_position ?? 'right',
+      })
+    } else if (node.kind === 'server' && node.port_layout.server_form_factor == null) {
+      applyServerFormFactor(
+        node.port_layout,
+        normalizeServerFormFactor(node.port_layout.height_u ?? 1),
+      )
+      syncPortsFromSlotsDef(node.port_layout, true)
+    } else if (node.kind === 'security') {
+      const h = normalizeSecurityHeightU(node.port_layout.height_u)
+      const expectedH = SEC_FRAME_HEIGHT_BY_U[h]
+      if (
+        !node.port_layout.security_panel
+        || Math.round(node.port_layout.frame_height) !== expectedH
+        || node.port_layout.height_u !== h
+      ) {
+        applySecurityLayoutConfig(node.port_layout, { heightU: h, preservePeers: true })
+      }
+    } else if (!node.port_layout.ports.length) {
+      syncPortsFromSlotsDef(node.port_layout, false)
     }
   }
+  layoutReadyNodeId.value = node.id
+}
+
+const layout = computed(() => {
+  ensureNodePortLayout()
   return props.node.port_layout as PortLayout
 })
 
@@ -133,9 +187,13 @@ const portEditVisible = ref(false)
 const addSlotVisible = ref(false)
 const addGroupVisible = ref(false)
 const addGroupSlotIdx = ref(0)
+const regionEditorVisible = ref(false)
+const regionEditorMode = ref<'add' | 'edit'>('add')
+const regionEditorIndex = ref<number | null>(null)
 const panelView = ref<ReturnType<typeof layoutSwitchFrontPanel> | null>(null)
 const serverPanelView = ref<ServerPanelView | null>(null)
 const serverFrontPanelView = ref<ServerFrontPanelView | null>(null)
+const securityPanelView = ref<SecurityPanelView | null>(null)
 
 const serverPanelSide = computed({
   get: () => (layout.value.server_panel_side ?? 'rear') as ServerPanelSide,
@@ -150,6 +208,18 @@ const addForm = reactive({
   port_type: '1g' as PortType,
   count: 1,
   server_slot_kind: 'nic_10g' as ServerSlotKind,
+})
+
+/** 扩展卡 / 接口区统一编辑表单 */
+const regionForm = reactive({
+  server_slot_kind: 'nic_10g' as ServerSlotKind,
+  orientation: 'horizontal' as ServerSlotOrientation,
+  layout_w: 120,
+  layout_h: 40,
+  count: 2,
+  zone_label: '',
+  port_type: '1g' as PortType,
+  zone_layout: 'auto' as SecurityZoneLayout,
 })
 
 const switchForm = reactive({
@@ -177,14 +247,19 @@ const portForm = reactive({
 
 const isSwitch = computed(() => props.node.kind === 'switch')
 const isServer = computed(() => props.node.kind === 'server')
+const isSecurity = computed(() => props.node.kind === 'security')
 const isCoreSwitch = computed(() => isSwitch.value && switchForm.subtype === 'core')
 const isGigabitSwitch = computed(() => isSwitch.value && switchForm.subtype === 'gigabit')
 const isTenGigabitSwitch = computed(() => isSwitch.value && switchForm.subtype === 'ten_gigabit')
 
-const slotBands = computed(() => (isSwitch.value || isServer.value ? [] : slotBandRects(layout.value)))
-const groupLayouts = computed(() => (isSwitch.value || isServer.value ? [] : groupVisualLayouts(layout.value)))
+const slotBands = computed(() =>
+  isSwitch.value || isServer.value || isSecurity.value ? [] : slotBandRects(layout.value),
+)
+const groupLayouts = computed(() =>
+  isSwitch.value || isServer.value || isSecurity.value ? [] : groupVisualLayouts(layout.value),
+)
 const svgOffset = computed(() =>
-  isSwitch.value || isServer.value ? PANEL_EAR + 6 : EAR_WIDTH_PX + 6,
+  isSwitch.value || isServer.value || isSecurity.value ? (isSecurity.value ? SEC_EAR + 6 : PANEL_EAR + 6) : EAR_WIDTH_PX + 6,
 )
 const svgRef = ref<SVGSVGElement | null>(null)
 
@@ -197,6 +272,7 @@ const svgViewBox = computed(() => `0 0 ${svgNaturalWidth.value} ${svgNaturalHeig
 function defaultViewZoomForKind() {
   if (isServer.value) return 55
   if (isSwitch.value) return 80
+  if (isSecurity.value) return 90
   return 100
 }
 
@@ -241,6 +317,72 @@ function refreshServerPanel() {
     serverPanelView.value = layoutServerRearPanel(layout.value)
     serverFrontPanelView.value = null
   }
+}
+
+function refreshSecurityPanel() {
+  if (!isSecurity.value) {
+    securityPanelView.value = null
+    return
+  }
+  layout.value.security_panel = true
+  if (!layout.value.slots_def?.length) {
+    applySecurityLayoutConfig(layout.value, { preservePeers: false })
+  } else {
+    syncPortsFromSlotsDef(layout.value, true)
+    securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+    return
+  }
+  securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+}
+
+function onSecurityHeightChange(val: number | string | undefined) {
+  if (val == null || !layoutCanEdit.value) return
+  const next = normalizeSecurityHeightU(val)
+  layout.value.height_u = next
+  layout.value.security_panel = true
+  applySecurityLayoutConfig(layout.value, { heightU: next, preservePeers: true })
+  securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+  syncLegacyFromPortLayout(props.node)
+}
+
+function onSecurityZoneChange(
+  slotIdx: number,
+  patch: Partial<{
+    label: string
+    port_type: PortType
+    count: number
+    zone_layout: SecurityZoneLayout
+    layout_w: number
+    layout_h: number
+  }>,
+) {
+  if (!layoutCanEdit.value) return
+  const slot = layout.value.slots_def?.[slotIdx]
+  if (!slot) return
+  patchSecurityZoneSlot(slot, slotIdx, patch)
+  ;(layout.value.ports || [])
+    .filter((p) => p.slot_index === slotIdx + 1)
+    .forEach((p) => { p.layout_locked = false })
+  syncPortsFromSlotsDef(layout.value, true)
+  securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+  syncLegacyFromPortLayout(props.node)
+}
+
+function onResetSecurityZoneLayout() {
+  if (!layoutCanEdit.value) return
+  resetSecurityZonePositions(layout.value)
+  securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+  syncLegacyFromPortLayout(props.node)
+}
+
+function onRemoveSecurityZone(slotIdx: number) {
+  if (!layoutCanEdit.value || !layout.value.slots_def) return
+  if (layout.value.slots_def.length <= 1) return
+  layout.value.slots_def.splice(slotIdx, 1)
+  layout.value.slot_count = layout.value.slots_def.length
+  syncPortsFromSlotsDef(layout.value, true)
+  securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+  syncLegacyFromPortLayout(props.node)
 }
 
 function syncServerFormFromLayout() {
@@ -342,6 +484,7 @@ const resizingServerSlot = ref<{
   originH: number
 } | null>(null)
 const selectedServerSlotIdx = ref<number | null>(null)
+const selectedSecurityZoneIdx = ref<number | null>(null)
 const draggingGroup = ref<{
   slotIndex: number
   groupId: string
@@ -378,6 +521,7 @@ function applyLayout() {
   displayScale.value = frameDisplayScalePercent(layout.value)
   refreshSwitchPanel()
   refreshServerPanel()
+  refreshSecurityPanel()
 }
 
 function syncSwitchFormFromLayout() {
@@ -416,6 +560,12 @@ function removeEditorLineCard(idx: number) {
   switchForm.line_cards.splice(idx, 1)
 }
 
+function onEditorLineCardTypeChange(card: CoreLineCard) {
+  if (card.card_type === 'blank') card.port_count = 0
+  else if (!card.port_count || card.port_count < 1) card.port_count = 48
+  onSwitchFormChange()
+}
+
 function applySwitchTemplate() {
   applySwitchLayoutConfig(layout.value, {
     subtype: switchForm.subtype,
@@ -442,15 +592,155 @@ function isPortlessServerSlot(kind: ServerSlotKind | null | undefined) {
   return kind === 'raid' || kind === 'blank'
 }
 
-function onServerSlotKindChange(slotIdx: number, kind: ServerSlotKind) {
+const regionItemLabel = computed(() => (isSecurity.value ? '接口区' : '扩展卡'))
+
+const regionEditorTitle = computed(() => {
+  const label = regionItemLabel.value
+  return regionEditorMode.value === 'add' ? `添加${label}` : `编辑${label}`
+})
+
+const regionListItems = computed(() => {
+  const slots = layout.value.slots_def || []
+  return slots.map((slot, idx) => {
+    if (isSecurity.value) {
+      const type = (slot.groups?.[0]?.port_type || '1g') as PortType
+      const count = slot.groups?.[0]?.count || 1
+      const layoutMode = slot.zone_layout || 'auto'
+      return {
+        index: idx,
+        title: slot.zone_label || `接口区 ${idx + 1}`,
+        summary: [
+          PORT_TYPE_LABELS[type],
+          `${count} 口`,
+          SECURITY_ZONE_LAYOUT_LABELS[layoutMode],
+          `${Math.round(slot.layout_w ?? 80)}×${Math.round(slot.layout_h ?? 80)}`,
+        ].join(' · '),
+        active: selectedSecurityZoneIdx.value === idx,
+      }
+    }
+    const kind = (slot.server_slot_kind || 'nic_10g') as ServerSlotKind
+    const ori = (serverForm.form_factor === 1
+      ? 'horizontal'
+      : (slot.orientation || 'horizontal')) as ServerSlotOrientation
+    const count = slot.groups?.[0]?.count || 0
+    const portType = (slot.groups?.[0]?.port_type || serverSlotDefaultPortType(kind)) as PortType
+    const size = resolveSlotSize(slot, serverForm.form_factor)
+    return {
+      index: idx,
+      title: `扩展卡 ${idx + 1}`,
+      summary: [
+        SERVER_SLOT_KIND_LABELS[kind],
+        SERVER_ORIENTATION_LABELS[ori],
+        isPortlessServerSlot(kind) ? '无接口' : `${PORT_TYPE_LABELS[portType]} ×${count}`,
+        `${Math.round(size.w)}×${Math.round(size.h)}`,
+      ].join(' · '),
+      active: selectedServerSlotIdx.value === idx,
+    }
+  })
+})
+
+function selectRegionItem(idx: number) {
+  if (isServer.value) selectedServerSlotIdx.value = idx
+  if (isSecurity.value) selectedSecurityZoneIdx.value = idx
+}
+
+/** 列表单击：可编辑时直接打开对话框，锁定时仅选中 */
+function onRegionListItemClick(idx: number) {
+  selectRegionItem(idx)
+  if (layoutCanEdit.value) {
+    openRegionEditor('edit', idx)
+  }
+}
+
+function fillRegionFormFromSlot(slotIdx: number) {
   const slot = layout.value.slots_def?.[slotIdx]
   if (!slot) return
+  if (isSecurity.value) {
+    regionForm.zone_label = slot.zone_label || `接口区${slotIdx + 1}`
+    regionForm.port_type = (slot.groups?.[0]?.port_type || '1g') as PortType
+    regionForm.count = slot.groups?.[0]?.count || 1
+    regionForm.zone_layout = (slot.zone_layout || 'auto') as SecurityZoneLayout
+    regionForm.layout_w = Math.round(slot.layout_w ?? 80)
+    regionForm.layout_h = Math.round(slot.layout_h ?? 80)
+    return
+  }
+  const kind = (slot.server_slot_kind || 'nic_10g') as ServerSlotKind
+  const size = resolveSlotSize(slot, serverForm.form_factor)
+  regionForm.server_slot_kind = kind
+  regionForm.orientation = (serverForm.form_factor === 1
+    ? 'horizontal'
+    : (slot.orientation || 'horizontal')) as ServerSlotOrientation
+  regionForm.port_type = (slot.groups?.[0]?.port_type || serverSlotDefaultPortType(kind)) as PortType
+  regionForm.layout_w = Math.round(size.w)
+  regionForm.layout_h = Math.round(size.h)
+  regionForm.count = isPortlessServerSlot(kind) ? 0 : (slot.groups?.[0]?.count || 2)
+}
+
+function openRegionEditor(mode: 'add' | 'edit', slotIdx?: number) {
+  if (!layoutCanEdit.value) {
+    ElMessage.warning('布局已锁定，请先点击「编辑布局」')
+    return
+  }
+  regionEditorMode.value = mode
+  if (mode === 'edit' && slotIdx !== undefined && slotIdx !== null) {
+    const slot = layout.value.slots_def?.[slotIdx]
+    if (!slot) {
+      ElMessage.warning('未找到该扩展卡/接口区')
+      return
+    }
+    regionEditorIndex.value = slotIdx
+    selectRegionItem(slotIdx)
+    fillRegionFormFromSlot(slotIdx)
+  } else {
+    regionEditorIndex.value = null
+    if (isSecurity.value) {
+      const n = (layout.value.slots_def?.length ?? 0) + 1
+      regionForm.zone_label = `接口区${n}`
+      regionForm.port_type = '1g'
+      regionForm.count = 2
+      regionForm.zone_layout = 'auto'
+      regionForm.layout_w = 120
+      regionForm.layout_h = 80
+    } else {
+      regionForm.server_slot_kind = 'nic_10g'
+      regionForm.orientation = 'horizontal'
+      regionForm.port_type = '10g'
+      regionForm.count = 2
+      try {
+        const size = resolveSlotSize(
+          {
+            orientation: 'horizontal',
+            groups: [],
+            layout_w: null,
+            layout_h: null,
+          } as LayoutSlotDef,
+          serverForm.form_factor,
+        )
+        regionForm.layout_w = Math.round(size.w)
+        regionForm.layout_h = Math.round(size.h)
+      } catch {
+        regionForm.layout_w = 120
+        regionForm.layout_h = 40
+      }
+    }
+  }
+  regionEditorVisible.value = true
+}
+
+function closeRegionEditor() {
+  regionEditorVisible.value = false
+}
+
+function applyServerSlotFields(slotIdx: number, opts: { useGridDefaultSize?: boolean } = {}) {
+  const slot = layout.value.slots_def?.[slotIdx]
+  if (!slot) return
+  const kind = regionForm.server_slot_kind
   slot.server_slot_kind = kind
   if (isPortlessServerSlot(kind)) {
     slot.groups = []
   } else {
-    const portType = kind === 'nic_1g' ? '1g' : kind === 'nic_10g' ? '10g' : 'other'
-    const count = slot.groups?.[0]?.count || 2
+    const count = normalizeServerSlotPortCount(regionForm.count || 1)
+    const portType = regionForm.port_type || serverSlotDefaultPortType(kind)
     slot.groups = [{
       id: slot.groups?.[0]?.id || crypto.randomUUID().slice(0, 8),
       port_type: portType,
@@ -459,69 +749,136 @@ function onServerSlotKindChange(slotIdx: number, kind: ServerSlotKind) {
       layout_y: null,
     }]
   }
-  applyLayout()
-}
 
-function onServerSlotPortCountChange(slotIdx: number, count: number | undefined) {
-  if (count == null) return
-  const slot = layout.value.slots_def?.[slotIdx]
-  if (!slot || isPortlessServerSlot(slot.server_slot_kind)) return
-  const n = normalizeServerSlotPortCount(count)
-  if (!slot.groups.length) {
-    const portType = slot.server_slot_kind === 'nic_1g' ? '1g' : slot.server_slot_kind === 'hba' ? 'other' : '10g'
-    slot.groups = [{
-      id: crypto.randomUUID().slice(0, 8),
-      port_type: portType as PortType,
-      count: n,
-      layout_x: null,
-      layout_y: null,
-    }]
-  } else {
-    slot.groups[0].count = n
-    ;(layout.value.ports || [])
-      .filter((p) => p.slot_index === slotIdx + 1)
-      .forEach((p) => { p.layout_locked = false })
-  }
-  applyLayout()
-}
-
-function onServerSlotOrientationChange(slotIdx: number, orientation: ServerSlotOrientation) {
-  const slot = layout.value.slots_def?.[slotIdx]
-  if (!slot) return
-  // 1U 仅允许横向；2U/4U 可自由选择横/竖放
-  const nextOri = serverForm.form_factor === 1 ? 'horizontal' : orientation
-  const prevOri = slot.orientation || (serverForm.form_factor === 1 ? 'horizontal' : 'vertical')
+  const nextOri: ServerSlotOrientation =
+    serverForm.form_factor === 1 ? 'horizontal' : regionForm.orientation
+  const prevOri = (slot.orientation || 'horizontal') as ServerSlotOrientation
   slot.orientation = nextOri
-  const size = resolveSlotSize(
-    { ...slot, orientation: nextOri, layout_w: null, layout_h: null },
-    serverForm.form_factor,
-  )
-  slot.layout_w = size.w
-  slot.layout_h = size.h
-  // 方向变化时重新落位，避免竖卡坐标套用到横卡导致越界/重叠
-  if (prevOri !== nextOri) {
+
+  if (opts.useGridDefaultSize) {
+    // 新建：与默认扩展卡一致，交给布局引擎按网格赋尺寸
+    slot.layout_w = null
+    slot.layout_h = null
     slot.layout_x = null
     slot.layout_y = null
+  } else if (prevOri !== nextOri) {
+    // 改放置方向：清空尺寸与坐标，重新按网格/竖卡规则排布
+    slot.layout_w = null
+    slot.layout_h = null
+    slot.layout_x = null
+    slot.layout_y = null
+    if (nextOri === 'vertical') {
+      ;(layout.value.slots_def || []).forEach((s) => {
+        if ((s.orientation || 'horizontal') === 'vertical') {
+          s.layout_x = null
+          s.layout_y = null
+        }
+      })
+    }
   }
+  // 编辑且方向未变：保留已有 layout_w/h（含用户拖拽缩放后的尺寸）
+
   ;(layout.value.ports || [])
     .filter((p) => p.slot_index === slotIdx + 1)
     .forEach((p) => { p.layout_locked = false })
-  applyLayout()
 }
 
-function onServerSlotSizeChange(slotIdx: number, dim: 'w' | 'h', value: number | undefined) {
-  if (value == null) return
-  const slot = layout.value.slots_def?.[slotIdx]
-  if (!slot) return
-  const cur = resolveSlotSize(slot, serverForm.form_factor)
-  resizeServerSlotInPanel(
-    layout.value,
-    slotIdx,
-    dim === 'w' ? value : cur.w,
-    dim === 'h' ? value : cur.h,
-  )
-  refreshServerPanel()
-  syncLegacyFromPortLayout(props.node)
+function onRegionServerKindChange(kind: ServerSlotKind | string) {
+  const next = kind as ServerSlotKind
+  regionForm.server_slot_kind = next
+  if (isPortlessServerSlot(next)) {
+    regionForm.count = 0
+    return
+  }
+  regionForm.port_type = serverSlotDefaultPortType(next)
+  if (!regionForm.count || regionForm.count < 1) regionForm.count = 2
+}
+
+function onRegionPortCountChange(val: number | undefined) {
+  if (val != null) regionForm.count = normalizeServerSlotPortCount(val)
+}
+
+function onSecurityZoneCountChange(val: number | undefined) {
+  if (val == null) return
+  regionForm.count = Math.max(1, Math.min(128, Math.round(val)))
+  // 满 8 口自动切换为双行
+  if (regionForm.count >= 8 && regionForm.zone_layout === 'single_row') {
+    regionForm.zone_layout = 'two_row'
+  }
+}
+
+function confirmRegionEditor() {
+  if (!layoutCanEdit.value) {
+    ElMessage.warning('布局已锁定，请先点击「编辑布局」')
+    return
+  }
+  if (isSecurity.value) {
+    if (regionEditorMode.value === 'add') {
+      if ((layout.value.slots_def?.length ?? 0) >= 16) return
+      if (!layout.value.slots_def) layout.value.slots_def = []
+      const slot = newSecurityZoneSlot(
+        regionForm.zone_label.trim() || `接口区${layout.value.slots_def.length + 1}`,
+        regionForm.port_type,
+        regionForm.count,
+        regionForm.zone_layout,
+      )
+      slot.layout_w = regionForm.layout_w
+      slot.layout_h = regionForm.layout_h
+      layout.value.slots_def.push(slot)
+      layout.value.slot_count = layout.value.slots_def.length
+      const idx = layout.value.slots_def.length - 1
+      syncPortsFromSlotsDef(layout.value, true)
+      securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+      syncLegacyFromPortLayout(props.node)
+      selectedSecurityZoneIdx.value = idx
+    } else if (regionEditorIndex.value != null) {
+      const idx = regionEditorIndex.value
+      onSecurityZoneChange(idx, {
+        label: regionForm.zone_label.trim(),
+        port_type: regionForm.port_type,
+        count: regionForm.count,
+        zone_layout: regionForm.zone_layout,
+        layout_w: regionForm.layout_w,
+        layout_h: regionForm.layout_h,
+      })
+      selectedSecurityZoneIdx.value = idx
+    }
+  } else if (isServer.value) {
+    if (regionEditorMode.value === 'add') {
+      addServerSlot(
+        layout.value,
+        regionForm.server_slot_kind,
+        isPortlessServerSlot(regionForm.server_slot_kind) ? 1 : Math.max(1, regionForm.count),
+      )
+      const idx = (layout.value.slots_def?.length ?? 1) - 1
+      applyServerSlotFields(idx, { useGridDefaultSize: true })
+      applyLayout()
+      selectedServerSlotIdx.value = idx
+    } else if (regionEditorIndex.value != null) {
+      const idx = regionEditorIndex.value
+      applyServerSlotFields(idx)
+      applyLayout()
+      selectedServerSlotIdx.value = idx
+    }
+  }
+  closeRegionEditor()
+}
+
+function removeRegionItem(idx: number) {
+  if (!layoutCanEdit.value) return
+  if (isSecurity.value) {
+    onRemoveSecurityZone(idx)
+    if (selectedSecurityZoneIdx.value === idx) selectedSecurityZoneIdx.value = null
+    else if (selectedSecurityZoneIdx.value != null && selectedSecurityZoneIdx.value > idx) {
+      selectedSecurityZoneIdx.value -= 1
+    }
+    return
+  }
+  onRemoveSlot(idx)
+  if (selectedServerSlotIdx.value === idx) selectedServerSlotIdx.value = null
+  else if (selectedServerSlotIdx.value != null && selectedServerSlotIdx.value > idx) {
+    selectedServerSlotIdx.value -= 1
+  }
 }
 
 function onServerOnboard1gChange(count: number | undefined) {
@@ -541,37 +898,37 @@ function onSwitchFormChange() {
 
 function onGigabitUplinkChange(val: number | undefined) {
   if (val == null) return
-  switchForm.uplink_port_count = normalizeGigabitUplinkCount(val)
+  // layout 中为上次已应用值；v-model 可能已写成中间非法值（如 5）
+  const prev = layout.value.uplink_port_count ?? 4
+  const next = normalizeGigabitUplinkCount(val, prev)
+  switchForm.uplink_port_count = next
+  if (!layoutCanEdit.value) return
   onSwitchFormChange()
 }
 
 function onTenGigabitUplinkChange(val: number | undefined) {
   if (val == null) return
-  switchForm.uplink_port_count = normalizeTenGigabitUplinkCount(val)
+  const prev = layout.value.uplink_port_count ?? 4
+  const next = normalizeTenGigabitUplinkCount(val, prev)
+  switchForm.uplink_port_count = next
+  if (!layoutCanEdit.value) return
   onSwitchFormChange()
 }
 
 function openAddSlot() {
   if (isServer.value) {
-    addForm.server_slot_kind = 'nic_10g'
-    addForm.count = 2
-  } else {
-    addForm.port_type = '1g'
-    addForm.count = 2
+    openRegionEditor('add')
+    return
   }
+  addForm.port_type = '1g'
+  addForm.count = 2
   addSlotVisible.value = true
 }
 
 function confirmAddSlot() {
-  if (isServer.value) {
-    addServerSlot(layout.value, addForm.server_slot_kind, addForm.count)
-  } else {
-    if ((layout.value.slots_def?.length ?? 0) >= MAX_SLOT_COUNT) return
-    addSlotWithGroup(layout.value, addForm.port_type, addForm.count)
-  }
-  syncPortsFromSlotsDef(layout.value)
-  displayScale.value = frameDisplayScalePercent(layout.value)
-  refreshServerPanel()
+  if ((layout.value.slots_def?.length ?? 0) >= MAX_SLOT_COUNT) return
+  addSlotWithGroup(layout.value, addForm.port_type, addForm.count)
+  applyLayout()
   addSlotVisible.value = false
 }
 
@@ -591,8 +948,8 @@ function confirmAddGroup() {
 
 function onRemoveSlot(slotIdx: number) {
   removeSlot(layout.value, slotIdx)
-  syncPortsFromSlotsDef(layout.value)
-  displayScale.value = frameDisplayScalePercent(layout.value)
+  // 服务器：按 slots_def 重建端口并刷新面板，保证列表与图形同步
+  applyLayout()
 }
 
 function openPeerDialog(port: FramePort) {
@@ -647,19 +1004,23 @@ function clearPeer() {
 }
 
 function portHitPad(port: FramePort) {
-  const pad = Math.max(5, Math.min(8, Math.round(Math.min(port.w, port.h) * 0.35)))
+  const pad = Math.max(5, Math.min(9, Math.round(Math.min(port.w, port.h) * 0.35)))
+  const tabExtra =
+    !port.port_type || port.port_type === '1g' || port.port_type === 'bmc' || port.port_type === 'other'
+      ? Math.max(2.5, port.h * 0.26)
+      : 0
   return {
     x: port.x - pad,
-    y: port.y - pad,
+    y: port.y - pad - tabExtra,
     w: port.w + pad * 2,
-    h: port.h + pad * 2 + 10,
+    h: port.h + pad * 2 + tabExtra + 4,
   }
 }
 
 function portJackPath(port: FramePort): string {
   const { x, y, w, h } = port
   if (port.port_type === '40_100g') {
-    const r = Math.min(2, w * 0.08)
+    const r = Math.min(2.2, w * 0.1)
     return [
       `M ${x + r} ${y}`,
       `L ${x + w - r} ${y}`,
@@ -674,8 +1035,8 @@ function portJackPath(port: FramePort): string {
     ].join(' ')
   }
   if (port.port_type === '10g') {
-    const inset = Math.max(1.5, w * 0.12)
-    const r = Math.min(1.5, w * 0.08)
+    const inset = Math.max(1.8, Math.min(3.2, w * 0.14))
+    const r = Math.min(1.8, w * 0.1)
     return [
       `M ${x + r} ${y}`,
       `L ${x + w - r} ${y}`,
@@ -694,10 +1055,11 @@ function portJackPath(port: FramePort): string {
       'Z',
     ].join(' ')
   }
-  const tabW = Math.min(w * 0.55, w - 2)
-  const tabH = Math.max(2, h * 0.22)
+  // RJ45：上方钥匙扣 + 圆角壳体，比例更接近真实网口
+  const tabW = Math.min(w * 0.58, w - 2.5)
+  const tabH = Math.max(2.2, Math.min(4.5, h * 0.26))
   const tabX = x + (w - tabW) / 2
-  const r = Math.min(2, w * 0.12)
+  const r = Math.min(2.2, w * 0.14)
   return [
     `M ${x + r} ${y}`,
     `L ${tabX} ${y}`,
@@ -714,6 +1076,22 @@ function portJackPath(port: FramePort): string {
     `Q ${x} ${y} ${x + r} ${y}`,
     'Z',
   ].join(' ')
+}
+
+function serverPortCavity(port: FramePort) {
+  const insetX = Math.max(2, port.w * 0.16)
+  const insetTop = Math.max(2.2, port.h * 0.22)
+  const insetBot = Math.max(2, port.h * 0.18)
+  return {
+    x: port.x + insetX,
+    y: port.y + insetTop,
+    w: Math.max(4, port.w - insetX * 2),
+    h: Math.max(3, port.h - insetTop - insetBot),
+  }
+}
+
+function serverPortNumFontSize(port: FramePort) {
+  return Math.max(7, Math.min(11, Math.round(Math.min(port.w, port.h) * 0.48)))
 }
 
 function svgPoint(event: MouseEvent) {
@@ -776,6 +1154,51 @@ function onServerSlotResizeMouseDown(
   }
 }
 
+function onSecurityZoneMouseDown(
+  event: MouseEvent,
+  zone: NonNullable<typeof securityPanelView.value>['zones'][0],
+) {
+  if (!layoutCanEdit.value || !isSecurity.value) return
+  event.stopPropagation()
+  selectedPortId.value = null
+  selectedGroupId.value = null
+  selectedSecurityZoneIdx.value = zone.slotIndex - 1
+  const cursor = svgPoint(event)
+  if (!cursor) return
+  const frameX = cursor.x - svgOffset.value
+  const frameY = cursor.y - 14
+  draggingSlot.value = {
+    slotIndex: zone.slotIndex - 1,
+    offsetX: frameX - zone.x,
+    offsetY: frameY - zone.y,
+  }
+}
+
+function onSecurityZoneResizeMouseDown(
+  event: MouseEvent,
+  zone: NonNullable<typeof securityPanelView.value>['zones'][0],
+) {
+  if (!layoutCanEdit.value || !isSecurity.value) return
+  event.stopPropagation()
+  selectedSecurityZoneIdx.value = zone.slotIndex - 1
+  const cursor = svgPoint(event)
+  if (!cursor) return
+  resizingServerSlot.value = {
+    slotIndex: zone.slotIndex - 1,
+    startX: cursor.x - svgOffset.value,
+    startY: cursor.y - 14,
+    originW: zone.w,
+    originH: zone.h,
+  }
+}
+
+function onSecurityPortMouseDown(event: MouseEvent, port: FramePort) {
+  if (!layoutCanEdit.value || !isSecurity.value || port.slot_index == null) return
+  const zone = securityPanelView.value?.zones.find((z) => z.slotIndex === port.slot_index)
+  if (!zone) return
+  onSecurityZoneMouseDown(event, zone)
+}
+
 function onServerPortMouseDown(event: MouseEvent, port: FramePort) {
   event.stopPropagation()
   selectedPortId.value = port.id
@@ -796,53 +1219,55 @@ function serverCardPalette(kind: ServerSlotKind) {
   return SERVER_CARD_PALETTE[kind] || SERVER_CARD_PALETTE.blank
 }
 
-function serverCardBracketRects(slot: NonNullable<typeof serverPanelView.value>['slots'][0]) {
-  if (slot.orientation === 'vertical') {
-    return {
-      x: slot.x,
-      y: slot.y,
-      w: 7,
-      h: slot.h,
-      rivets: [
-        { cx: slot.x + 3.5, cy: slot.y + 8 },
-        { cx: slot.x + 3.5, cy: slot.y + slot.h - 8 },
-      ],
-    }
-  }
-  return {
-    x: slot.x,
-    y: slot.y,
-    w: slot.w,
-    h: 6,
-    rivets: [
-      { cx: slot.x + 8, cy: slot.y + 3 },
-      { cx: slot.x + slot.w - 8, cy: slot.y + 3 },
-    ],
-  }
-}
-
-function serverCardFaceRect(slot: NonNullable<typeof serverPanelView.value>['slots'][0]) {
-  if (slot.orientation === 'vertical') {
-    return { x: slot.x + 7, y: slot.y, w: Math.max(8, slot.w - 7), h: slot.h }
-  }
-  return { x: slot.x, y: slot.y + 6, w: slot.w, h: Math.max(8, slot.h - 6) }
-}
-
-function serverBlankFillerMarks(slot: NonNullable<typeof serverPanelView.value>['slots'][0]) {
-  const face = serverCardFaceRect(slot)
+/** 参考图横置 Slot 内平行散热线（稀疏绘制，降低 SVG 节点数） */
+function serverSlotHatchLines(slot: NonNullable<typeof serverPanelView.value>['slots'][0]) {
   const marks: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
-  if (slot.orientation === 'vertical') {
-    for (let i = 1; i <= 4; i += 1) {
-      const y = face.y + (face.h * i) / 5
-      marks.push({ x1: face.x + 4, y1: y, x2: face.x + face.w - 4, y2: y })
-    }
-  } else {
-    for (let i = 1; i <= 3; i += 1) {
-      const x = face.x + (face.w * i) / 4
-      marks.push({ x1: x, y1: face.y + 4, x2: x, y2: face.y + face.h - 4 })
-    }
+  const pad = 6
+  const step = Math.max(7, slot.h / 4)
+  const top = slot.y + pad
+  const bottom = slot.y + slot.h - pad
+  for (let y = top; y <= bottom + 0.1; y += step) {
+    marks.push({
+      x1: slot.x + pad,
+      y1: y,
+      x2: slot.x + slot.w - pad,
+      y2: y,
+    })
   }
   return marks
+}
+
+/** 拖拽/缩放时只更新当前卡视觉坐标，避免整板重算 */
+function patchServerSlotVisual(slotIndex: number) {
+  const view = serverPanelView.value
+  const slot = layout.value.slots_def?.[slotIndex]
+  if (!view || !slot) return
+  const visual = view.slots.find((s) => s.slotIndex === slotIndex + 1)
+  if (!visual) return
+  if (slot.layout_x != null) visual.x = slot.layout_x
+  if (slot.layout_y != null) visual.y = slot.layout_y
+  if (slot.layout_w != null) visual.w = slot.layout_w
+  if (slot.layout_h != null) visual.h = slot.layout_h
+  if (slot.server_slot_kind) {
+    visual.kind = slot.server_slot_kind
+    visual.label = SERVER_SLOT_KIND_LABELS[slot.server_slot_kind]
+    visual.shortLabel = shortKindLabel(slot.server_slot_kind)
+  }
+}
+
+function shortKindLabel(kind: ServerSlotKind): string {
+  if (kind === 'nic_1g') return '1G'
+  if (kind === 'nic_10g') return '10G'
+  if (kind === 'hba') return 'HBA'
+  if (kind === 'raid') return 'RAID'
+  return 'BLANK'
+}
+
+function serverPsuFanPath(psu: { x: number; y: number; w: number; h: number }) {
+  const cx = psu.x + psu.w * 0.32
+  const cy = psu.y + psu.h * 0.5
+  const r = Math.min(psu.w, psu.h) * 0.28
+  return { cx, cy, r }
 }
 
 function onGroupMouseDown(event: MouseEvent, group: (typeof groupLayouts.value)[0]) {
@@ -867,6 +1292,19 @@ function onMouseMove(event: MouseEvent) {
   const frameX = cursor.x - svgOffset.value
   const frameY = cursor.y - 14
 
+  if (resizingServerSlot.value && isSecurity.value) {
+    const dx = frameX - resizingServerSlot.value.startX
+    const dy = frameY - resizingServerSlot.value.startY
+    resizeSecurityZoneInPanel(
+      layout.value,
+      resizingServerSlot.value.slotIndex,
+      resizingServerSlot.value.originW + dx,
+      resizingServerSlot.value.originH + dy,
+    )
+    securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+    return
+  }
+
   if (resizingServerSlot.value) {
     const dx = frameX - resizingServerSlot.value.startX
     const dy = frameY - resizingServerSlot.value.startY
@@ -876,7 +1314,7 @@ function onMouseMove(event: MouseEvent) {
       resizingServerSlot.value.originW + dx,
       resizingServerSlot.value.originH + dy,
     )
-    refreshServerPanel()
+    patchServerSlotVisual(resizingServerSlot.value.slotIndex)
     return
   }
 
@@ -890,6 +1328,17 @@ function onMouseMove(event: MouseEvent) {
     return
   }
 
+  if (draggingSlot.value && isSecurity.value) {
+    moveSecurityZoneInPanel(
+      layout.value,
+      draggingSlot.value.slotIndex,
+      frameX - draggingSlot.value.offsetX,
+      frameY - draggingSlot.value.offsetY,
+    )
+    securityPanelView.value = layoutSecurityFrontPanel(layout.value)
+    return
+  }
+
   if (draggingSlot.value && isServer.value) {
     moveServerSlotInPanel(
       layout.value,
@@ -897,7 +1346,7 @@ function onMouseMove(event: MouseEvent) {
       frameX - draggingSlot.value.offsetX,
       frameY - draggingSlot.value.offsetY,
     )
-    refreshServerPanel()
+    patchServerSlotVisual(draggingSlot.value.slotIndex)
     return
   }
 
@@ -916,7 +1365,15 @@ function onMouseMove(event: MouseEvent) {
 }
 
 function onMouseUp() {
-  if (resizingServerSlot.value || draggingServerPort.value || (draggingSlot.value && isServer.value)) {
+  const wasServerDrag =
+    !!resizingServerSlot.value
+    || !!draggingServerPort.value
+    || (!!draggingSlot.value && isServer.value)
+  if (
+    resizingServerSlot.value
+    || draggingServerPort.value
+    || (draggingSlot.value && (isServer.value || isSecurity.value))
+  ) {
     syncLegacyFromPortLayout(props.node)
   }
   resizingServerSlot.value = null
@@ -932,6 +1389,8 @@ function onMouseUp() {
   draggingGroup.value = null
   draggingSlot.value = null
   pendingDragCenterY.value = null
+  // 拖拽结束后做一次完整重算，校正端口位置
+  if (wasServerDrag) refreshServerPanel()
 }
 
 watch(
@@ -942,9 +1401,14 @@ watch(
     syncServerFormFromLayout()
     refreshSwitchPanel()
     refreshServerPanel()
+    refreshSecurityPanel()
     viewZoom.value = defaultViewZoomForKind()
   },
 )
+
+watch(layoutCanEdit, (can) => {
+  if (!can) regionEditorVisible.value = false
+})
 
 watch(
   () => props.node.kind,
@@ -982,11 +1446,12 @@ syncSwitchFormFromLayout()
 syncServerFormFromLayout()
 refreshSwitchPanel()
 refreshServerPanel()
+refreshSecurityPanel()
 </script>
 
 <template>
   <div class="frame-editor" @mousemove="onMouseMove" @mouseup="onMouseUp" @mouseleave="onMouseUp">
-    <div v-if="layoutCanEdit" class="config-panel">
+    <div v-if="layoutCanEdit || isServer || isSecurity" class="config-panel">
       <div v-if="isSwitch" class="switch-config">
         <div class="config-row">
           <label>设备类型</label>
@@ -1017,7 +1482,7 @@ refreshServerPanel()
               size="small"
               @change="onGigabitUplinkChange"
             />
-            <span class="field-hint">≤8，&gt;4 须为偶数</span>
+            <span class="field-hint">≤8；&gt;4 为 6/8（点加号 4→6）</span>
             <label>上联位置</label>
             <el-radio-group v-model="switchForm.uplink_position" size="small" @change="onSwitchFormChange">
               <el-radio-button v-for="(label, key) in UPLINK_POSITION_LABELS" :key="key" :value="key">
@@ -1057,7 +1522,7 @@ refreshServerPanel()
         <div v-if="isCoreSwitch" class="card-editor">
           <div v-for="(card, idx) in switchForm.line_cards" :key="card.id" class="card-editor-row">
             <span>板卡 {{ idx + 1 }}</span>
-            <el-select v-model="card.card_type" size="small" style="width: 120px" @change="onSwitchFormChange">
+            <el-select v-model="card.card_type" size="small" style="width: 120px" @change="onEditorLineCardTypeChange(card)">
               <el-option
                 v-for="(label, key) in CORE_CARD_TYPE_LABELS"
                 :key="key"
@@ -1068,9 +1533,10 @@ refreshServerPanel()
             <label>接口数</label>
             <el-input-number
               v-model="card.port_count"
-              :min="1"
+              :min="card.card_type === 'blank' ? 0 : 1"
               :max="128"
               size="small"
+              :disabled="card.card_type === 'blank'"
               @change="onSwitchFormChange"
             />
             <el-button
@@ -1109,6 +1575,7 @@ refreshServerPanel()
           <el-radio-group
             v-model="serverForm.form_factor"
             size="small"
+            :disabled="!layoutCanEdit"
             @change="onServerFormFactorChange"
           >
             <el-radio-button :value="1">1U</el-radio-button>
@@ -1122,104 +1589,137 @@ refreshServerPanel()
               :min="0"
               :max="8"
               size="small"
+              :disabled="!layoutCanEdit"
               @change="onServerOnboard1gChange"
             />
             <el-button
+              v-if="layoutCanEdit"
               type="primary"
               size="small"
-              @click="openAddSlot"
+              @click.stop.prevent="openRegionEditor('add')"
             >
               + 添加扩展卡
             </el-button>
           </template>
         </div>
 
-        <div v-if="serverPanelSide === 'rear'" class="slot-config-scroll">
-          <div class="slot-config">
-            <div v-for="(slot, idx) in layout.slots_def" :key="idx" class="slot-block server-slot-block">
-              <div class="slot-header">
-                <span class="slot-label">扩展卡 {{ idx + 1 }}</span>
-                <el-button
-                  v-if="(layout.slots_def?.length ?? 0) > 1"
-                  size="small"
-                  type="danger"
-                  link
-                  @click="onRemoveSlot(idx); refreshServerPanel()"
-                >
-                  删除
-                </el-button>
-              </div>
-              <el-select
-                :model-value="slot.server_slot_kind || 'nic_10g'"
+        <div v-if="serverPanelSide === 'rear'" class="region-list">
+          <div
+            v-for="item in regionListItems"
+            :key="item.index"
+            class="region-list-item"
+            :class="{ active: item.active }"
+            @click="onRegionListItemClick(item.index)"
+          >
+            <div class="region-list-main">
+              <div class="region-list-title">{{ item.title }}</div>
+              <div class="region-list-summary">{{ item.summary }}</div>
+            </div>
+            <div v-if="layoutCanEdit" class="region-list-actions" @click.stop>
+              <el-button
                 size="small"
-                style="width: 100%"
-                @change="(v: string) => onServerSlotKindChange(idx, v as ServerSlotKind)"
+                link
+                type="primary"
+                @click.stop.prevent="openRegionEditor('edit', item.index)"
               >
-                <el-option
-                  v-for="(label, key) in SERVER_SLOT_KIND_LABELS"
-                  :key="key"
-                  :label="label"
-                  :value="key"
-                />
-              </el-select>
-              <div class="group-row">
-                <span>放置</span>
-                <el-select
-                  :model-value="serverForm.form_factor === 1 ? 'horizontal' : (slot.orientation || 'vertical')"
-                  size="small"
-                  style="flex: 1"
-                  :disabled="serverForm.form_factor === 1"
-                  @change="(v: string) => onServerSlotOrientationChange(idx, v as ServerSlotOrientation)"
-                >
-                  <el-option
-                    v-for="(label, key) in SERVER_ORIENTATION_LABELS"
-                    :key="key"
-                    :label="label"
-                    :value="key"
-                  />
-                </el-select>
-                <span v-if="serverForm.form_factor === 1" class="field-hint">1U 固定横向</span>
-                <span v-else class="field-hint">横放贴底 / 竖放靠右</span>
-              </div>
-              <div class="group-row">
-                <span>宽</span>
-                <el-input-number
-                  :model-value="Math.round(slot.layout_w || resolveSlotSize(slot, serverForm.form_factor).w)"
-                  :min="28"
-                  :max="320"
-                  :step="2"
-                  size="small"
-                  @change="(val: number | undefined) => onServerSlotSizeChange(idx, 'w', val)"
-                />
-                <span>高</span>
-                <el-input-number
-                  :model-value="Math.round(slot.layout_h || resolveSlotSize(slot, serverForm.form_factor).h)"
-                  :min="28"
-                  :max="320"
-                  :step="2"
-                  size="small"
-                  @change="(val: number | undefined) => onServerSlotSizeChange(idx, 'h', val)"
-                />
-              </div>
-              <div v-if="!isPortlessServerSlot(slot.server_slot_kind)" class="group-row">
-                <span>接口数</span>
-                <el-input-number
-                  :model-value="slot.groups?.[0]?.count || 1"
-                  :min="1"
-                  :max="SERVER_SLOT_PORT_MAX"
-                  size="small"
-                  @change="(val: number | undefined) => onServerSlotPortCountChange(idx, val)"
-                />
-              </div>
-              <div v-if="!isPortlessServerSlot(slot.server_slot_kind) && (slot.groups?.[0]?.count || 0) > 5" class="raid-hint">
-                超过 5 个接口须为偶数（6/8/10），两列或两行均匀排列
-              </div>
-              <div v-else class="raid-hint">
-                {{ slot.server_slot_kind === 'blank' ? '预留挡板，无接口' : 'RAID 卡无对外网络接口' }}
-              </div>
-              <p v-if="layoutCanEdit" class="drag-hint">拖动卡体移动；拖右下角手柄缩放</p>
+                编辑
+              </el-button>
+              <el-button
+                v-if="regionListItems.length > 1"
+                size="small"
+                link
+                type="danger"
+                @click.stop.prevent="removeRegionItem(item.index)"
+              >
+                删除
+              </el-button>
             </div>
           </div>
+          <el-empty v-if="!regionListItems.length" description="暂无扩展卡" :image-size="48" />
+          <p v-if="layoutCanEdit && regionListItems.length" class="drag-hint">
+            单击列表项或「编辑」打开对话框；面板上可拖动扩展卡，选中后点蓝色「编辑」角标也可编辑
+          </p>
+          <p v-else-if="!layoutCanEdit && regionListItems.length" class="drag-hint">
+            布局已锁定，不可添加/编辑扩展卡；点击「编辑布局」后可修改
+          </p>
+        </div>
+      </template>
+
+      <template v-else-if="isSecurity">
+        <div class="config-row">
+          <label>设备高度 (U)</label>
+          <el-button-group>
+            <el-button
+              size="small"
+              :type="normalizeSecurityHeightU(layout.height_u) === 1 ? 'primary' : 'default'"
+              :disabled="!layoutCanEdit"
+              @click="onSecurityHeightChange(1)"
+            >
+              1U
+            </el-button>
+            <el-button
+              size="small"
+              :type="normalizeSecurityHeightU(layout.height_u) === 2 ? 'primary' : 'default'"
+              :disabled="!layoutCanEdit"
+              @click="onSecurityHeightChange(2)"
+            >
+              2U
+            </el-button>
+          </el-button-group>
+          <span class="frame-size">
+            {{ normalizeSecurityHeightU(layout.height_u) }}U ·
+            {{ Math.round(layout.frame_width) }}×{{ Math.round(layout.frame_height) }}px
+          </span>
+          <el-button
+            v-if="layoutCanEdit"
+            type="primary"
+            size="small"
+            :disabled="(layout.slots_def?.length ?? 0) >= 16"
+            @click.stop.prevent="openRegionEditor('add')"
+          >
+            + 添加接口区
+          </el-button>
+          <el-button v-if="layoutCanEdit" size="small" @click="onResetSecurityZoneLayout">自动排列</el-button>
+        </div>
+        <div class="region-list">
+          <div
+            v-for="item in regionListItems"
+            :key="item.index"
+            class="region-list-item"
+            :class="{ active: item.active }"
+            @click="onRegionListItemClick(item.index)"
+          >
+            <div class="region-list-main">
+              <div class="region-list-title">{{ item.title }}</div>
+              <div class="region-list-summary">{{ item.summary }}</div>
+            </div>
+            <div v-if="layoutCanEdit" class="region-list-actions" @click.stop>
+              <el-button
+                size="small"
+                link
+                type="primary"
+                @click.stop.prevent="openRegionEditor('edit', item.index)"
+              >
+                编辑
+              </el-button>
+              <el-button
+                v-if="regionListItems.length > 1"
+                size="small"
+                link
+                type="danger"
+                @click.stop.prevent="removeRegionItem(item.index)"
+              >
+                删除
+              </el-button>
+            </div>
+          </div>
+          <el-empty v-if="!regionListItems.length" description="暂无接口区" :image-size="48" />
+          <p v-if="layoutCanEdit && regionListItems.length" class="drag-hint">
+            单击列表项或「编辑」打开对话框；面板上可拖动接口区移动/缩放
+          </p>
+          <p v-else-if="!layoutCanEdit && regionListItems.length" class="drag-hint">
+            布局已锁定，不可添加/编辑接口区；点击「编辑布局」后可修改
+          </p>
         </div>
       </template>
 
@@ -1300,7 +1800,7 @@ refreshServerPanel()
       <el-button size="small" :disabled="viewZoom >= VIEW_ZOOM_MAX" @click="bumpViewZoom(VIEW_ZOOM_STEP)">+</el-button>
       <span class="frame-scale">{{ viewZoom }}%</span>
       <el-button size="small" link type="primary" @click="resetViewZoom">复位</el-button>
-      <el-button v-if="layoutCanEdit && !isSwitch && !isServer" size="small" @click="applyLayout">自动适配设备框架</el-button>
+      <el-button v-if="layoutCanEdit && !isSwitch && !isServer && !isSecurity" size="small" @click="applyLayout">自动适配设备框架</el-button>
       <span v-if="!layoutCanEdit && portsCanEdit" class="toolbar-hint">布局已锁定 · 可点击接口配置对端</span>
     </div>
 
@@ -1381,7 +1881,7 @@ refreshServerPanel()
               :height="zone.h"
               rx="2"
               class="panel-zone"
-              :class="zone.kind"
+              :class="[zone.kind, { blank: zone.blank }]"
             />
             <text
               v-if="zone.kind === 'uplink' || zone.kind === 'card'"
@@ -1391,6 +1891,15 @@ refreshServerPanel()
               class="zone-label"
             >
               {{ zone.label }}
+            </text>
+            <text
+              v-if="zone.kind === 'card' && zone.blank"
+              :x="zone.x + zone.w / 2"
+              :y="zone.y + zone.h / 2 + 4"
+              text-anchor="middle"
+              class="blank-card-mark"
+            >
+              BLANK
             </text>
 
             <!-- Management block -->
@@ -1469,38 +1978,84 @@ refreshServerPanel()
       >
         <defs>
           <linearGradient id="serverFrontChassis" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stop-color="#eceff3" />
-            <stop offset="100%" stop-color="#d5dbe3" />
+            <stop offset="0%" stop-color="#f4f6f8" />
+            <stop offset="100%" stop-color="#d8dee6" />
           </linearGradient>
-          <linearGradient id="serverEar" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="#6b7380" />
-            <stop offset="50%" stop-color="#9aa3b0" />
-            <stop offset="100%" stop-color="#5c6572" />
+          <linearGradient id="serverFrontEar" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#b8bfc9" />
+            <stop offset="50%" stop-color="#e8ebf0" />
+            <stop offset="100%" stop-color="#a8b0bc" />
           </linearGradient>
           <pattern id="ventMesh" width="6" height="6" patternUnits="userSpaceOnUse">
             <path d="M0 3 H6 M3 0 V6" stroke="#b0b8c4" stroke-width="0.5" />
           </pattern>
         </defs>
-        <rect :x="0" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#serverEar)" stroke="#8a929e" />
-        <rect :x="layout.frame_width + svgOffset + 2" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#serverEar)" stroke="#8a929e" />
+        <rect :x="0" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#serverFrontEar)" stroke="#8a929e" />
+        <circle :cx="svgOffset / 2 - 1" :cy="28" r="2.5" fill="none" stroke="#606266" />
+        <circle :cx="svgOffset / 2 - 1" :cy="14 + layout.frame_height - 14" r="2.5" fill="none" stroke="#606266" />
+        <rect :x="layout.frame_width + svgOffset + 2" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#serverFrontEar)" stroke="#8a929e" />
+        <circle :cx="layout.frame_width + svgOffset + svgOffset / 2 + 1" :cy="28" r="2.5" fill="none" stroke="#606266" />
+        <circle
+          :cx="layout.frame_width + svgOffset + svgOffset / 2 + 1"
+          :cy="14 + layout.frame_height - 14"
+          r="2.5"
+          fill="none"
+          stroke="#606266"
+        />
         <g :transform="`translate(${svgOffset}, 14)`">
-          <rect :width="layout.frame_width" :height="layout.frame_height" rx="3" fill="url(#serverFrontChassis)" stroke="#9aa3b0" stroke-width="1.5" />
-          <rect :width="layout.frame_width" height="26" fill="#2d3744" />
-          <text :x="12" y="17" class="server-title">{{ node.name }} · 前面板 · {{ serverFrontPanelView.title }}</text>
-          <!-- Left I/O bezel -->
-          <rect x="8" y="32" :width="serverFrontPanelView.formFactor === 1 ? 64 : 80" :height="layout.frame_height - 40" rx="2" fill="#252d38" stroke="#4a5562" />
-          <circle :cx="22" :cy="52" r="5" fill="#1a2030" stroke="#606266" />
-          <rect x="14" y="64" width="4" height="4" rx="1" fill="#67c23a" />
-          <rect x="22" y="64" width="4" height="4" rx="1" fill="#409eff" />
-          <rect x="30" y="64" width="4" height="4" rx="1" fill="#e6a23c" />
-          <rect v-if="serverFrontPanelView.formFactor !== 1" x="16" y="76" width="10" height="6" rx="1" fill="#303848" stroke="#606266" />
-          <rect v-if="serverFrontPanelView.formFactor !== 1" x="28" y="76" width="10" height="6" rx="1" fill="#303848" stroke="#606266" />
+          <rect
+            :width="layout.frame_width"
+            :height="layout.frame_height"
+            rx="3"
+            fill="url(#serverFrontChassis)"
+            stroke="#4a5562"
+            stroke-width="1.5"
+          />
+          <text :x="12" y="16" class="panel-brand">{{ node.name }}</text>
+          <text :x="layout.frame_width - 12" y="16" text-anchor="end" class="panel-model">
+            前面板 · {{ serverFrontPanelView.title }}
+          </text>
+          <!-- Left I/O bezel（与交换机 MGMT 区同风格） -->
+          <rect
+            x="8"
+            y="24"
+            :width="serverFrontPanelView.formFactor === 1 ? 64 : 80"
+            :height="layout.frame_height - 32"
+            rx="2"
+            class="panel-zone"
+          />
+          <text x="16" y="40" class="panel-brand">DCIM</text>
+          <text x="16" y="52" class="panel-model">Server</text>
+          <circle :cx="22" :cy="66" r="5" fill="#ecf5ff" stroke="#409eff" />
+          <rect x="14" y="78" width="4" height="4" rx="1" fill="#67c23a" />
+          <rect x="22" y="78" width="4" height="4" rx="1" fill="#409eff" />
+          <rect x="30" y="78" width="4" height="4" rx="1" fill="#e6a23c" />
+          <rect
+            v-if="serverFrontPanelView.formFactor !== 1"
+            x="16"
+            y="90"
+            width="10"
+            height="6"
+            rx="1"
+            fill="#ecf5ff"
+            stroke="#409eff"
+          />
+          <rect
+            v-if="serverFrontPanelView.formFactor !== 1"
+            x="28"
+            y="90"
+            width="10"
+            height="6"
+            rx="1"
+            fill="#f0f9eb"
+            stroke="#67c23a"
+          />
           <!-- Side vents -->
-          <rect :x="layout.frame_width - 28" y="32" width="20" :height="layout.frame_height - 40" fill="url(#ventMesh)" opacity="0.6" />
+          <rect :x="layout.frame_width - 28" y="24" width="20" :height="layout.frame_height - 32" fill="url(#ventMesh)" opacity="0.55" />
           <!-- Drive bays -->
           <g v-for="bay in serverFrontPanelView.driveBays" :key="`${bay.row}-${bay.col}`">
-            <rect :x="bay.x" :y="bay.y" :width="bay.w" :height="bay.h" rx="1" fill="#303848" stroke="#606266" stroke-width="1" />
-            <rect :x="bay.x + 3" :y="bay.y + bay.h - 8" :width="bay.w - 6" height="4" rx="1" fill="#1a2030" />
+            <rect :x="bay.x" :y="bay.y" :width="bay.w" :height="bay.h" rx="2" class="panel-zone card" />
+            <rect :x="bay.x + 3" :y="bay.y + bay.h - 8" :width="bay.w - 6" height="4" rx="1" fill="#e4e7ed" stroke="#c0c4cc" />
             <circle :cx="bay.x + bay.w - 6" :cy="bay.y + 6" r="1.5" fill="#409eff" />
           </g>
         </g>
@@ -1517,82 +2072,174 @@ refreshServerPanel()
       >
         <defs>
           <linearGradient id="serverChassis" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stop-color="#3a414c" />
-            <stop offset="100%" stop-color="#2a3038" />
+            <stop offset="0%" stop-color="#f4f6f8" />
+            <stop offset="100%" stop-color="#d8dee6" />
           </linearGradient>
           <linearGradient id="serverEar" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="#6b7380" />
-            <stop offset="50%" stop-color="#9aa3b0" />
-            <stop offset="100%" stop-color="#5c6572" />
+            <stop offset="0%" stop-color="#b8bfc9" />
+            <stop offset="50%" stop-color="#e8ebf0" />
+            <stop offset="100%" stop-color="#a8b0bc" />
           </linearGradient>
           <pattern id="rearVentHex" width="8" height="8" patternUnits="userSpaceOnUse">
-            <path d="M4 1 L7 4 L4 7 L1 4 Z" fill="none" stroke="#4a5562" stroke-width="0.6" />
+            <path d="M4 1 L7 4 L4 7 L1 4 Z" fill="none" stroke="#b0b8c4" stroke-width="0.6" />
           </pattern>
         </defs>
         <rect :x="0" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#serverEar)" stroke="#8a929e" />
+        <circle :cx="svgOffset / 2 - 1" :cy="28" r="2.5" fill="none" stroke="#606266" />
+        <circle :cx="svgOffset / 2 - 1" :cy="14 + layout.frame_height - 14" r="2.5" fill="none" stroke="#606266" />
         <rect :x="layout.frame_width + svgOffset + 2" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#serverEar)" stroke="#8a929e" />
+        <circle :cx="layout.frame_width + svgOffset + svgOffset / 2 + 1" :cy="28" r="2.5" fill="none" stroke="#606266" />
+        <circle
+          :cx="layout.frame_width + svgOffset + svgOffset / 2 + 1"
+          :cy="14 + layout.frame_height - 14"
+          r="2.5"
+          fill="none"
+          stroke="#606266"
+        />
         <g :transform="`translate(${svgOffset}, 14)`">
-          <rect :width="layout.frame_width" :height="layout.frame_height" rx="3" fill="url(#serverChassis)" stroke="#1f2430" stroke-width="1.5" />
-          <rect :width="layout.frame_width" height="26" fill="#1b212a" />
-          <text :x="12" y="17" class="server-title">{{ node.name }} · 后面板 · {{ serverPanelView.title }}</text>
-          <text :x="layout.frame_width - 12" y="17" text-anchor="end" class="server-sub">扩展卡 {{ serverPanelView.slots.length }}</text>
-
-          <!-- Ventilation -->
           <rect
-            :x="serverPanelView.vent.x"
-            :y="serverPanelView.vent.y"
-            :width="serverPanelView.vent.w"
-            :height="serverPanelView.vent.h"
-            fill="url(#rearVentHex)"
-            opacity="0.55"
+            :width="layout.frame_width"
+            :height="layout.frame_height"
+            rx="3"
+            fill="url(#serverChassis)"
+            stroke="#4a5562"
+            stroke-width="1.5"
           />
+          <text :x="12" y="14" class="panel-brand">{{ node.name }}</text>
+          <text :x="layout.frame_width - 12" y="14" text-anchor="end" class="panel-model">
+            后面板 · {{ serverPanelView.title }} · Slot {{ serverPanelView.slots.length }}
+          </text>
 
-          <!-- PSU -->
-          <g v-for="psu in serverPanelView.psus" :key="psu.id">
-            <rect :x="psu.x" :y="psu.y" :width="psu.w" :height="psu.h" rx="2" class="psu-block" />
-            <text :x="psu.x + psu.w / 2" :y="psu.y + psu.h / 2 + 3" text-anchor="middle" class="psu-label">{{ psu.label }}</text>
-          </g>
+          <!-- OCP -->
+          <rect
+            :x="serverPanelView.ioRegions.ocp.x"
+            :y="serverPanelView.ioRegions.ocp.y"
+            :width="serverPanelView.ioRegions.ocp.w"
+            :height="serverPanelView.ioRegions.ocp.h"
+            rx="2"
+            class="panel-zone"
+          />
+          <text
+            :x="serverPanelView.ioRegions.ocp.x + 8"
+            :y="serverPanelView.ioRegions.ocp.y + 12"
+            class="zone-label"
+          >
+            OCP
+          </text>
 
-          <!-- Fixed I/O: mgmt / USB / VGA -->
+          <!-- Mid fixed I/O band -->
           <rect
             :x="serverPanelView.fixedIo.x"
             :y="serverPanelView.fixedIo.y"
             :width="serverPanelView.fixedIo.w"
             :height="serverPanelView.fixedIo.h"
             rx="2"
-            class="fixed-io-block"
+            class="panel-zone"
           />
-          <text :x="serverPanelView.fixedIo.x + 6" :y="serverPanelView.fixedIo.y + 12" class="fixed-io-label">管理口</text>
-          <rect :x="serverPanelView.fixedIo.x + 6" :y="serverPanelView.fixedIo.y + 16" width="12" height="10" rx="1" fill="#303848" stroke="#67c23a" />
-          <rect :x="serverPanelView.fixedIo.x + 6" :y="serverPanelView.fixedIo.y + 30" width="8" height="5" rx="1" fill="#303848" stroke="#909399" />
-          <rect :x="serverPanelView.fixedIo.x + 18" :y="serverPanelView.fixedIo.y + 30" width="8" height="5" rx="1" fill="#303848" stroke="#909399" />
-          <rect :x="serverPanelView.fixedIo.x + 30" :y="serverPanelView.fixedIo.y + 22" width="14" height="10" rx="1" fill="#303848" stroke="#909399" />
-          <text :x="serverPanelView.fixedIo.x + 37" :y="serverPanelView.fixedIo.y + 30" text-anchor="middle" class="fixed-io-mini">VGA</text>
-
-          <!-- Onboard 1G zone -->
+          <!-- VGA -->
           <rect
-            :x="serverPanelView.onboard1gZone.x"
-            :y="serverPanelView.onboard1gZone.y"
-            :width="serverPanelView.onboard1gZone.w"
-            :height="serverPanelView.onboard1gZone.h"
-            rx="2"
-            class="onboard-zone"
+            :x="serverPanelView.ioRegions.vga.x"
+            :y="serverPanelView.ioRegions.vga.y"
+            :width="serverPanelView.ioRegions.vga.w"
+            :height="serverPanelView.ioRegions.vga.h"
+            rx="1"
+            fill="#fafafa"
+            stroke="#606266"
           />
-          <text :x="serverPanelView.onboard1gZone.x + 4" :y="serverPanelView.onboard1gZone.y + 10" class="fixed-io-label">板载千兆</text>
-
-          <!-- Expansion zone outline -->
+          <text
+            :x="serverPanelView.ioRegions.vga.x + serverPanelView.ioRegions.vga.w / 2"
+            :y="serverPanelView.ioRegions.vga.y + serverPanelView.ioRegions.vga.h + 10"
+            text-anchor="middle"
+            class="mgmt-label"
+          >
+            VGA
+          </text>
+          <!-- Mgmt -->
           <rect
-            :x="serverPanelView.expansionZone.x - 2"
-            :y="serverPanelView.expansionZone.y - 2"
-            :width="serverPanelView.expansionZone.w + 4"
-            :height="serverPanelView.expansionZone.h + 4"
-            rx="2"
-            fill="none"
-            stroke="rgba(103,194,58,0.25)"
-            stroke-dasharray="3 2"
+            :x="serverPanelView.ioRegions.mgmt.x"
+            :y="serverPanelView.ioRegions.mgmt.y"
+            :width="serverPanelView.ioRegions.mgmt.w"
+            :height="serverPanelView.ioRegions.mgmt.h"
+            rx="1"
+            fill="#f0f9eb"
+            stroke="#67c23a"
           />
+          <text
+            :x="serverPanelView.ioRegions.mgmt.x + serverPanelView.ioRegions.mgmt.w / 2"
+            :y="serverPanelView.ioRegions.mgmt.y + serverPanelView.ioRegions.mgmt.h + 10"
+            text-anchor="middle"
+            class="mgmt-label"
+          >
+            Mgmt
+          </text>
+          <!-- USB stacked -->
+          <rect
+            :x="serverPanelView.ioRegions.usb.x"
+            :y="serverPanelView.ioRegions.usb.y"
+            :width="serverPanelView.ioRegions.usb.w"
+            :height="serverPanelView.ioRegions.usb.h * 0.42"
+            rx="1"
+            fill="#ecf5ff"
+            stroke="#909399"
+          />
+          <rect
+            :x="serverPanelView.ioRegions.usb.x"
+            :y="serverPanelView.ioRegions.usb.y + serverPanelView.ioRegions.usb.h * 0.55"
+            :width="serverPanelView.ioRegions.usb.w"
+            :height="serverPanelView.ioRegions.usb.h * 0.42"
+            rx="1"
+            fill="#ecf5ff"
+            stroke="#909399"
+          />
+          <text
+            :x="serverPanelView.ioRegions.usb.x + serverPanelView.ioRegions.usb.w / 2"
+            :y="serverPanelView.ioRegions.usb.y + serverPanelView.ioRegions.usb.h + 10"
+            text-anchor="middle"
+            class="mgmt-label"
+          >
+            USB
+          </text>
 
-          <!-- Expansion cards (professional PCIe-style) -->
+          <!-- PSU with fan + inlet -->
+          <g v-for="psu in serverPanelView.psus" :key="psu.id">
+            <rect :x="psu.x" :y="psu.y" :width="psu.w" :height="psu.h" rx="2" class="panel-zone psu-block" />
+            <circle
+              :cx="serverPsuFanPath(psu).cx"
+              :cy="serverPsuFanPath(psu).cy"
+              :r="serverPsuFanPath(psu).r"
+              fill="none"
+              stroke="#606266"
+              stroke-width="1.2"
+            />
+            <line
+              :x1="serverPsuFanPath(psu).cx - serverPsuFanPath(psu).r * 0.7"
+              :y1="serverPsuFanPath(psu).cy - serverPsuFanPath(psu).r * 0.7"
+              :x2="serverPsuFanPath(psu).cx + serverPsuFanPath(psu).r * 0.7"
+              :y2="serverPsuFanPath(psu).cy + serverPsuFanPath(psu).r * 0.7"
+              stroke="#909399"
+              stroke-width="1"
+            />
+            <line
+              :x1="serverPsuFanPath(psu).cx + serverPsuFanPath(psu).r * 0.7"
+              :y1="serverPsuFanPath(psu).cy - serverPsuFanPath(psu).r * 0.7"
+              :x2="serverPsuFanPath(psu).cx - serverPsuFanPath(psu).r * 0.7"
+              :y2="serverPsuFanPath(psu).cy + serverPsuFanPath(psu).r * 0.7"
+              stroke="#909399"
+              stroke-width="1"
+            />
+            <rect
+              :x="psu.x + psu.w * 0.58"
+              :y="psu.y + psu.h * 0.28"
+              :width="psu.w * 0.28"
+              :height="psu.h * 0.44"
+              rx="1"
+              fill="#fafafa"
+              stroke="#606266"
+            />
+            <text :x="psu.x + 6" :y="psu.y + 12" class="mgmt-label">{{ psu.label }}</text>
+          </g>
+
+          <!-- Expansion slots（参考图横置挡板风格） -->
           <g
             v-for="slot in serverPanelView.slots"
             :key="slot.slotIndex"
@@ -1603,99 +2250,67 @@ refreshServerPanel()
               selected: selectedServerSlotIdx === slot.slotIndex - 1,
             }"
             @mousedown="onServerSlotMouseDown($event, slot)"
+            @dblclick.stop="layoutCanEdit && openRegionEditor('edit', slot.slotIndex - 1)"
           >
-            <!-- Outer shadow -->
             <rect
-              :x="slot.x + 1"
-              :y="slot.y + 1"
+              :x="slot.x"
+              :y="slot.y"
               :width="slot.w"
               :height="slot.h"
-              rx="2"
-              fill="rgba(0,0,0,0.35)"
+              rx="1"
+              fill="#fff"
+              stroke="#303133"
+              stroke-width="1.4"
             />
-            <!-- Metal bracket -->
             <rect
-              :x="serverCardBracketRects(slot).x"
-              :y="serverCardBracketRects(slot).y"
-              :width="serverCardBracketRects(slot).w"
-              :height="serverCardBracketRects(slot).h"
-              :fill="serverCardPalette(slot.kind).bracket"
-              stroke="#5c6570"
-              stroke-width="0.6"
-            />
-            <circle
-              v-for="(r, ri) in serverCardBracketRects(slot).rivets"
-              :key="ri"
-              :cx="r.cx"
-              :cy="r.cy"
-              r="1.4"
-              fill="#4a515c"
-              stroke="#2a3038"
-              stroke-width="0.4"
-            />
-            <!-- Card face -->
-            <rect
-              :x="serverCardFaceRect(slot).x"
-              :y="serverCardFaceRect(slot).y"
-              :width="serverCardFaceRect(slot).w"
-              :height="serverCardFaceRect(slot).h"
-              rx="1.5"
+              :x="slot.x + 2"
+              :y="slot.y + 2"
+              :width="slot.w - 4"
+              :height="slot.h - 4"
+              rx="0.5"
               :fill="serverCardPalette(slot.kind).face"
               :stroke="serverCardPalette(slot.kind).accent"
-              stroke-width="1"
+              stroke-width="0.8"
+              opacity="0.95"
             />
-            <rect
-              :x="serverCardFaceRect(slot).x + 1"
-              :y="serverCardFaceRect(slot).y + 1"
-              :width="Math.max(0, serverCardFaceRect(slot).w - 2)"
-              height="8"
-              rx="1"
-              :fill="serverCardPalette(slot.kind).faceDark"
-              opacity="0.85"
+            <line
+              v-for="(m, mi) in serverSlotHatchLines(slot)"
+              :key="mi"
+              :x1="m.x1"
+              :y1="m.y1"
+              :x2="m.x2"
+              :y2="m.y2"
+              stroke="rgba(48,49,51,0.22)"
+              stroke-width="0.8"
             />
             <text
-              :x="serverCardFaceRect(slot).x + 5"
-              :y="serverCardFaceRect(slot).y + 8"
-              class="server-slot-label"
-              :fill="serverCardPalette(slot.kind).label"
+              :x="slot.x + slot.w / 2"
+              :y="slot.y + slot.h / 2 + 4"
+              text-anchor="middle"
+              class="slot-ref-label"
             >
-              {{ slot.shortLabel }} · {{ slot.slotIndex }}
+              Slot{{ slot.slotIndex }}
             </text>
-            <!-- Blank / RAID filler details -->
-            <g v-if="slot.kind === 'blank' || slot.kind === 'raid'">
-              <line
-                v-for="(m, mi) in serverBlankFillerMarks(slot)"
-                :key="mi"
-                :x1="m.x1"
-                :y1="m.y1"
-                :x2="m.x2"
-                :y2="m.y2"
-                stroke="rgba(255,255,255,0.08)"
-                stroke-width="1"
-              />
-              <text
-                :x="slot.x + slot.w / 2"
-                :y="slot.y + slot.h / 2 + 3"
-                text-anchor="middle"
-                class="raid-mark"
-              >
-                {{ slot.kind === 'blank' ? '挡板' : 'RAID' }}
-              </text>
-            </g>
-            <!-- Selection outline -->
+            <text
+              v-if="slot.kind !== 'blank'"
+              :x="slot.x + 8"
+              :y="slot.y + 12"
+              class="mgmt-label"
+            >
+              {{ slot.shortLabel }}
+            </text>
             <rect
               v-if="selectedServerSlotIdx === slot.slotIndex - 1"
               :x="slot.x - 1"
               :y="slot.y - 1"
               :width="slot.w + 2"
               :height="slot.h + 2"
-              rx="2.5"
+              rx="1.5"
               fill="none"
               stroke="#409eff"
               stroke-width="1.2"
               stroke-dasharray="3 2"
             />
-            <!-- Resize handle -->
             <g
               v-if="layoutCanEdit"
               class="resize-handle"
@@ -1710,11 +2325,6 @@ refreshServerPanel()
                 fill="#409eff"
                 opacity="0.85"
               />
-              <path
-                :d="`M ${slot.x + slot.w - 8} ${slot.y + slot.h - 3} L ${slot.x + slot.w - 3} ${slot.y + slot.h - 3} L ${slot.x + slot.w - 3} ${slot.y + slot.h - 8} Z`"
-                fill="#fff"
-                opacity="0.9"
-              />
             </g>
           </g>
 
@@ -1722,13 +2332,15 @@ refreshServerPanel()
           <g
             v-for="port in layout.ports"
             :key="port.id"
-            class="port port-interactive"
+            class="port port-interactive server-port"
             :class="{ selected: selectedPortId === port.id, linked: !!port.peer_node_id, locked: port.layout_locked }"
             @mousedown="onServerPortMouseDown($event, port)"
             @click.stop="onPortClick(port)"
             @dblclick.stop="openPeerDialog(port)"
           >
-            <title>{{ port.label }} · 单击选中，双击配置对端</title>
+            <title>
+              {{ port.label }} · {{ PORT_TYPE_LABELS[port.port_type || '1g'] }} · 单击选中，双击配置对端
+            </title>
             <rect
               :x="portHitPad(port).x"
               :y="portHitPad(port).y"
@@ -1742,25 +2354,66 @@ refreshServerPanel()
               :fill="portColors(port).fill"
               :stroke="portColors(port).stroke"
               :fill-rule="port.port_type === '10g' ? 'evenodd' : 'nonzero'"
-              stroke-width="1.4"
+              stroke-width="1.35"
               class="port-face"
             />
+            <rect
+              v-if="port.port_type !== '10g'"
+              :x="serverPortCavity(port).x"
+              :y="serverPortCavity(port).y"
+              :width="serverPortCavity(port).w"
+              :height="serverPortCavity(port).h"
+              rx="1"
+              class="server-port-cavity"
+              :style="{ stroke: portColors(port).stroke }"
+            />
+            <g
+              v-if="(!port.port_type || port.port_type === '1g') && port.w >= 18 && port.h >= 12"
+              class="server-port-pins"
+              pointer-events="none"
+            >
+              <line
+                v-for="n in 6"
+                :key="n"
+                :x1="serverPortCavity(port).x + (serverPortCavity(port).w * n) / 7"
+                :y1="serverPortCavity(port).y + 1"
+                :x2="serverPortCavity(port).x + (serverPortCavity(port).w * n) / 7"
+                :y2="serverPortCavity(port).y + serverPortCavity(port).h - 1"
+                stroke="rgba(212, 175, 55, 0.75)"
+                stroke-width="0.7"
+              />
+            </g>
             <text
               :x="port.x + port.w / 2"
-              :y="port.y + port.h + 8"
+              :y="
+                port.y +
+                port.h / 2 +
+                serverPortNumFontSize(port) * 0.35 -
+                (port.h >= 14 && port.w >= 16 ? 1.2 : 0)
+              "
               text-anchor="middle"
-              class="port-label"
+              class="server-port-num"
+              :style="{ fontSize: `${serverPortNumFontSize(port)}px` }"
             >
               {{ port.label }}
+            </text>
+            <text
+              v-if="port.h >= 14 && port.w >= 16"
+              :x="port.x + port.w / 2"
+              :y="port.y + port.h - 1.5"
+              text-anchor="middle"
+              class="server-port-type"
+            >
+              {{ PORT_TYPE_SHORT[port.port_type || '1g'] }}
             </text>
             <circle
               v-if="port.peer_node_id"
               :cx="port.x + port.w - 2"
               :cy="port.y + 2"
-              r="2.4"
+              r="2.6"
               fill="#67c23a"
               stroke="#fff"
-              stroke-width="0.5"
+              stroke-width="0.6"
             />
             <g
               v-if="portsCanEdit && selectedPortId === port.id"
@@ -1785,10 +2438,277 @@ refreshServerPanel()
               </text>
             </g>
           </g>
+
+          <!-- 扩展卡「编辑」角标置于端口之上，避免被接口热区挡住 -->
+          <g
+            v-for="slot in serverPanelView.slots"
+            :key="`edit-badge-${slot.slotIndex}`"
+          >
+            <g
+              v-if="layoutCanEdit && selectedServerSlotIdx === slot.slotIndex - 1"
+              class="slot-edit-badge"
+              @mousedown.stop
+              @click.stop="openRegionEditor('edit', slot.slotIndex - 1)"
+            >
+              <rect
+                :x="slot.x + slot.w - 36"
+                :y="slot.y + 2"
+                width="34"
+                height="14"
+                rx="2"
+                fill="#409eff"
+              />
+              <text
+                :x="slot.x + slot.w - 19"
+                :y="slot.y + 12"
+                text-anchor="middle"
+                class="slot-edit-badge-text"
+              >
+                编辑
+              </text>
+            </g>
+          </g>
         </g>
       </svg>
 
-      <!-- Legacy security editor -->
+      <!-- Security front panel -->
+      <svg
+        v-else-if="isSecurity && securityPanelView"
+        :key="`sec-panel-${normalizeSecurityHeightU(layout.height_u)}-${Math.round(layout.frame_height)}`"
+        ref="svgRef"
+        class="device-svg panel-svg security-panel"
+        :width="svgDisplayWidth"
+        :height="svgDisplayHeight"
+        :viewBox="svgViewBox"
+      >
+        <defs>
+          <linearGradient id="secChassis" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#f4f6f8" />
+            <stop offset="100%" stop-color="#d8dee6" />
+          </linearGradient>
+          <linearGradient id="secEar" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#b8bfc9" />
+            <stop offset="50%" stop-color="#e8ebf0" />
+            <stop offset="100%" stop-color="#a8b0bc" />
+          </linearGradient>
+        </defs>
+
+        <rect x="0" y="14" :width="svgOffset - 2" :height="layout.frame_height" rx="2" fill="url(#secEar)" stroke="#8a929e" />
+        <circle :cx="svgOffset / 2 - 1" :cy="28" r="2.5" fill="none" stroke="#606266" />
+        <circle :cx="svgOffset / 2 - 1" :cy="14 + layout.frame_height - 14" r="2.5" fill="none" stroke="#606266" />
+        <rect
+          :x="layout.frame_width + svgOffset + 2"
+          y="14"
+          :width="svgOffset - 2"
+          :height="layout.frame_height"
+          rx="2"
+          fill="url(#secEar)"
+          stroke="#8a929e"
+        />
+        <circle :cx="layout.frame_width + svgOffset + svgOffset / 2 + 1" :cy="28" r="2.5" fill="none" stroke="#606266" />
+        <circle
+          :cx="layout.frame_width + svgOffset + svgOffset / 2 + 1"
+          :cy="14 + layout.frame_height - 14"
+          r="2.5"
+          fill="none"
+          stroke="#606266"
+        />
+
+        <g :transform="`translate(${svgOffset}, 14)`">
+          <rect
+            :width="layout.frame_width"
+            :height="layout.frame_height"
+            rx="3"
+            fill="url(#secChassis)"
+            stroke="#4a5562"
+            stroke-width="1.5"
+          />
+          <text :x="12" y="15" class="panel-brand">{{ node.name }}</text>
+          <text :x="layout.frame_width - 12" y="15" text-anchor="end" class="panel-model">
+            {{ normalizeSecurityHeightU(layout.height_u) }}U 安全设备 · {{ securityPanelView.title }}
+          </text>
+
+          <!-- Status / console block（对齐交换机 MGMT 区） -->
+          <rect
+            :x="securityPanelView.statusBlock.x"
+            :y="securityPanelView.statusBlock.y"
+            :width="securityPanelView.statusBlock.w"
+            :height="securityPanelView.statusBlock.h"
+            rx="2"
+            class="panel-zone"
+          />
+          <text
+            :x="securityPanelView.statusBlock.x + 8"
+            :y="securityPanelView.statusBlock.y + 16"
+            class="panel-brand"
+          >
+            DCIM
+          </text>
+          <text
+            :x="securityPanelView.statusBlock.x + 8"
+            :y="securityPanelView.statusBlock.y + 30"
+            class="panel-model"
+          >
+            Security
+          </text>
+          <circle
+            :cx="securityPanelView.statusBlock.x + 14"
+            :cy="securityPanelView.statusBlock.y + 44"
+            r="3.5"
+            fill="#67c23a"
+            stroke="#fff"
+            stroke-width="0.8"
+          />
+          <circle
+            :cx="securityPanelView.statusBlock.x + 28"
+            :cy="securityPanelView.statusBlock.y + 44"
+            r="3.5"
+            fill="#e6a23c"
+            stroke="#fff"
+            stroke-width="0.8"
+          />
+          <circle
+            :cx="securityPanelView.statusBlock.x + 42"
+            :cy="securityPanelView.statusBlock.y + 44"
+            r="3.5"
+            fill="#c0c4cc"
+            stroke="#909399"
+            stroke-width="0.8"
+          />
+          <rect
+            :x="securityPanelView.statusBlock.x + 8"
+            :y="securityPanelView.statusBlock.y + securityPanelView.statusBlock.h - 28"
+            width="14"
+            height="12"
+            rx="1"
+            fill="#ecf5ff"
+            stroke="#409eff"
+          />
+          <text
+            :x="securityPanelView.statusBlock.x + 26"
+            :y="securityPanelView.statusBlock.y + securityPanelView.statusBlock.h - 19"
+            class="mgmt-label"
+          >
+            CONSOLE
+          </text>
+          <circle
+            :cx="securityPanelView.statusBlock.x + 16"
+            :cy="securityPanelView.statusBlock.y + securityPanelView.statusBlock.h - 8"
+            r="3"
+            fill="#c0c4cc"
+            stroke="#909399"
+          />
+          <text
+            :x="securityPanelView.statusBlock.x + 26"
+            :y="securityPanelView.statusBlock.y + securityPanelView.statusBlock.h - 5"
+            class="mgmt-label"
+          >
+            RESET
+          </text>
+
+          <g
+            v-for="zone in securityPanelView.zones"
+            :key="zone.id"
+            class="sec-zone"
+            :class="{
+              dragging: draggingSlot?.slotIndex === zone.slotIndex - 1,
+              selected: selectedSecurityZoneIdx === zone.slotIndex - 1,
+            }"
+            @mousedown="onSecurityZoneMouseDown($event, zone)"
+            @dblclick.stop="layoutCanEdit && openRegionEditor('edit', zone.slotIndex - 1)"
+          >
+            <rect
+              :x="zone.x"
+              :y="zone.y"
+              :width="zone.w"
+              :height="zone.h"
+              rx="2"
+              class="panel-zone"
+              :class="zone.portType === '10g' || zone.portType === '40_100g' ? 'uplink' : 'main'"
+            />
+            <text :x="zone.x + 6" :y="zone.y + 12" class="zone-label">{{ zone.label }}</text>
+            <rect
+              v-if="selectedSecurityZoneIdx === zone.slotIndex - 1"
+              :x="zone.x - 1"
+              :y="zone.y - 1"
+              :width="zone.w + 2"
+              :height="zone.h + 2"
+              rx="2.5"
+              fill="none"
+              stroke="#409eff"
+              stroke-width="1.2"
+              stroke-dasharray="3 2"
+              pointer-events="none"
+            />
+            <g
+              v-if="layoutCanEdit"
+              class="resize-handle"
+              @mousedown="onSecurityZoneResizeMouseDown($event, zone)"
+            >
+              <rect
+                :x="zone.x + zone.w - SEC_RESIZE_HANDLE"
+                :y="zone.y + zone.h - SEC_RESIZE_HANDLE"
+                :width="SEC_RESIZE_HANDLE"
+                :height="SEC_RESIZE_HANDLE"
+                rx="1.5"
+                fill="#409eff"
+                opacity="0.85"
+              />
+              <path
+                :d="`M ${zone.x + zone.w - 8} ${zone.y + zone.h - 3} L ${zone.x + zone.w - 3} ${zone.y + zone.h - 3} L ${zone.x + zone.w - 3} ${zone.y + zone.h - 8} Z`"
+                fill="#fff"
+              />
+            </g>
+          </g>
+
+          <g
+            v-for="port in layout.ports"
+            :key="port.id"
+            class="port port-interactive"
+            :class="{ selected: selectedPortId === port.id, linked: !!port.peer_node_id }"
+            @mousedown="onSecurityPortMouseDown($event, port)"
+            @click.stop="onPortClick(port)"
+            @dblclick.stop="openPeerDialog(port)"
+          >
+            <title>{{ port.label }} · 单击选中，双击配置对端</title>
+            <rect
+              :x="portHitPad(port).x"
+              :y="portHitPad(port).y"
+              :width="portHitPad(port).w"
+              :height="portHitPad(port).h"
+              class="port-hit"
+              rx="2"
+            />
+            <path
+              :d="portJackPath(port)"
+              :fill="portColors(port).fill"
+              :stroke="portColors(port).stroke"
+              :fill-rule="port.port_type === '10g' ? 'evenodd' : 'nonzero'"
+              stroke-width="1.2"
+              class="port-face"
+            />
+            <text
+              :x="port.x + port.w / 2"
+              :y="port.y + port.h + 8"
+              text-anchor="middle"
+              class="port-label"
+            >
+              {{ port.label }}
+            </text>
+            <circle
+              v-if="port.peer_node_id"
+              :cx="port.x + port.w - 2"
+              :cy="port.y + 2"
+              r="2.4"
+              fill="#67c23a"
+              stroke="#fff"
+              stroke-width="0.5"
+            />
+          </g>
+        </g>
+      </svg>
+
+      <!-- Legacy editor -->
       <svg
         v-else
         ref="svgRef"
@@ -1957,49 +2877,175 @@ refreshServerPanel()
     </div>
     <p v-else-if="isServer" class="hint">
       <template v-if="layoutCanEdit">
-        后面板：拖动扩展卡移动/缩放；网口可拖动调整位置；单击选中接口，双击或点「配置对端」编辑
+        后面板：列表中编辑/删除扩展卡；面板上拖动卡体移动缩放
       </template>
       <template v-else>
-        布局已锁定：单击选中扩展卡/板载接口，双击或使用下方按钮配置对端
+        布局已锁定：不可添加/编辑扩展卡；可单击选中接口，双击或点「配置对端」编辑连接
       </template>
+    </p>
+    <p v-else-if="isSecurity" class="hint">
+      <template v-if="layoutCanEdit">
+        列表中编辑/删除接口区；面板上可拖动接口区移动缩放
+      </template>
+      <template v-else>布局已锁定：不可添加/编辑接口区；可单击选中接口，双击或点「配置对端」编辑连接</template>
     </p>
     <p v-else class="hint">
       <template v-if="layoutCanEdit">单击接口选中，双击配置对端；调整上方数量/上联位置后面板自动更新</template>
       <template v-else>布局已锁定：单击选中接口，双击或点「配置对端」编辑连接</template>
     </p>
 
-    <el-dialog v-model="addSlotVisible" :title="isServer ? '添加服务器 Slot' : '添加 Slot'" width="420px" append-to-body>
+    <Teleport to="body">
+      <div
+        v-if="regionEditorVisible"
+        class="region-modal-mask"
+        @click.self="closeRegionEditor"
+        @mousedown.stop
+      >
+        <div class="region-modal" role="dialog" aria-modal="true">
+          <div class="region-modal-header">
+            <span class="region-modal-title">{{ regionEditorTitle }}</span>
+            <button type="button" class="region-modal-close" @click="closeRegionEditor">×</button>
+          </div>
+          <div class="region-modal-body">
+            <el-form label-width="96px">
+              <template v-if="isSecurity">
+                <el-form-item label="名称">
+                  <el-input v-model="regionForm.zone_label" placeholder="WAN / LAN / MGMT" />
+                </el-form-item>
+                <el-form-item label="接口类型">
+                  <el-select
+                    v-model="regionForm.port_type"
+                    style="width: 100%"
+                    teleported
+                    popper-class="region-modal-popper"
+                  >
+                    <el-option v-for="(label, key) in PORT_TYPE_LABELS" :key="key" :label="label" :value="key" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="接口数量">
+                  <el-input-number
+                    v-model="regionForm.count"
+                    :min="1"
+                    :max="128"
+                    @change="onSecurityZoneCountChange"
+                  />
+                </el-form-item>
+                <el-form-item label="排布">
+                  <el-radio-group v-model="regionForm.zone_layout" size="small">
+                    <el-radio-button
+                      v-for="(label, key) in SECURITY_ZONE_LAYOUT_LABELS"
+                      :key="key"
+                      :value="key"
+                    >
+                      {{ label }}
+                    </el-radio-button>
+                  </el-radio-group>
+                  <div class="field-hint" style="margin-top: 4px">
+                    满 8 口自动换行（上下两行均分，如 WAN×8 → 4+4）
+                  </div>
+                </el-form-item>
+                <el-form-item label="宽度">
+                  <el-input-number
+                    v-model="regionForm.layout_w"
+                    :min="56"
+                    :max="800"
+                    controls-position="right"
+                  />
+                </el-form-item>
+                <el-form-item label="高度">
+                  <el-input-number
+                    v-model="regionForm.layout_h"
+                    :min="36"
+                    :max="400"
+                    controls-position="right"
+                  />
+                </el-form-item>
+              </template>
+              <template v-else>
+                <el-form-item label="扩展卡类型">
+                  <el-radio-group
+                    v-model="regionForm.server_slot_kind"
+                    class="slot-kind-radios"
+                    @change="onRegionServerKindChange"
+                  >
+                    <el-radio-button
+                      v-for="(label, key) in SERVER_SLOT_KIND_LABELS"
+                      :key="key"
+                      :value="key"
+                    >
+                      {{ label }}
+                    </el-radio-button>
+                  </el-radio-group>
+                </el-form-item>
+                <el-form-item label="放置">
+                  <el-radio-group
+                    v-model="regionForm.orientation"
+                    size="small"
+                    :disabled="serverForm.form_factor === 1"
+                  >
+                    <el-radio-button
+                      v-for="(label, key) in SERVER_ORIENTATION_LABELS"
+                      :key="key"
+                      :value="key"
+                    >
+                      {{ label }}
+                    </el-radio-button>
+                  </el-radio-group>
+                  <div class="field-hint" style="margin-top: 4px">
+                    {{ serverForm.form_factor === 1 ? '1U 固定横向' : '横放贴网格 / 竖放从右依次排列' }}
+                  </div>
+                </el-form-item>
+                <template v-if="!isPortlessServerSlot(regionForm.server_slot_kind)">
+                  <el-form-item label="接口类型">
+                    <el-select
+                      v-model="regionForm.port_type"
+                      style="width: 100%"
+                      teleported
+                      popper-class="region-modal-popper"
+                    >
+                      <el-option v-for="(label, key) in PORT_TYPE_LABELS" :key="key" :label="label" :value="key" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item label="接口数量">
+                    <el-input-number
+                      v-model="regionForm.count"
+                      :min="1"
+                      :max="SERVER_SLOT_PORT_MAX"
+                      @change="onRegionPortCountChange"
+                    />
+                    <div v-if="regionForm.count > 5" class="field-hint" style="margin-top: 4px">
+                      超过 5 个接口须为偶数（6/8/10）
+                    </div>
+                  </el-form-item>
+                </template>
+                <el-form-item v-else label="说明">
+                  <span class="field-hint">
+                    {{ regionForm.server_slot_kind === 'blank' ? '预留挡板，无接口' : 'RAID 卡无对外网络接口' }}
+                  </span>
+                </el-form-item>
+              </template>
+            </el-form>
+          </div>
+          <div class="region-modal-footer">
+            <el-button @click="closeRegionEditor">取消</el-button>
+            <el-button type="primary" @click="confirmRegionEditor">
+              {{ regionEditorMode === 'add' ? '添加' : '保存' }}
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <el-dialog v-model="addSlotVisible" title="添加 Slot" width="420px" append-to-body>
       <el-form label-width="96px">
-        <template v-if="isServer">
-          <el-form-item label="Slot 类型">
-            <el-select v-model="addForm.server_slot_kind" style="width: 100%">
-              <el-option
-                v-for="(label, key) in SERVER_SLOT_KIND_LABELS"
-                :key="key"
-                :label="label"
-                :value="key"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item v-if="!isPortlessServerSlot(addForm.server_slot_kind)" label="接口数量">
-            <el-input-number
-              v-model="addForm.count"
-              :min="1"
-              :max="SERVER_SLOT_PORT_MAX"
-              @change="(val: number | undefined) => { if (val != null) addForm.count = normalizeServerSlotPortCount(val) }"
-            />
-          </el-form-item>
-        </template>
-        <template v-else>
-          <el-form-item label="接口类型">
-            <el-select v-model="addForm.port_type" style="width: 100%">
-              <el-option v-for="(label, key) in PORT_TYPE_LABELS" :key="key" :label="label" :value="key" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="接口数量">
-            <el-input-number v-model="addForm.count" :min="1" :max="32" />
-          </el-form-item>
-        </template>
+        <el-form-item label="接口类型">
+          <el-select v-model="addForm.port_type" style="width: 100%">
+            <el-option v-for="(label, key) in PORT_TYPE_LABELS" :key="key" :label="label" :value="key" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="接口数量">
+          <el-input-number v-model="addForm.count" :min="1" :max="32" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="addSlotVisible = false">取消</el-button>
@@ -2148,6 +3194,46 @@ refreshServerPanel()
   stroke: rgba(64, 158, 255, 0.35);
 }
 
+.panel-svg .panel-zone.card.blank {
+  fill: rgba(144, 147, 153, 0.12);
+  stroke: rgba(144, 147, 153, 0.45);
+  stroke-dasharray: 4 3;
+}
+
+.panel-svg .blank-card-mark {
+  fill: #909399;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  pointer-events: none;
+}
+
+.panel-svg .panel-zone.onboard-zone {
+  fill: rgba(103, 194, 58, 0.08);
+  stroke: rgba(103, 194, 58, 0.4);
+}
+
+.panel-svg .panel-zone.psu-block {
+  fill: rgba(255, 255, 255, 0.5);
+  stroke: rgba(96, 98, 102, 0.35);
+}
+
+.security-zone-config .slot-block {
+  min-width: 280px;
+}
+
+.security-zone-config .slot-block.active {
+  outline: 1px solid #409eff;
+  background: #f0f7ff;
+}
+
+.security-panel .sec-zone {
+  cursor: move;
+}
+
+.security-panel .sec-zone.dragging {
+  opacity: 0.92;
+}
+
 .panel-brand {
   font-size: 11px;
   font-weight: 700;
@@ -2168,6 +3254,17 @@ refreshServerPanel()
   font-size: 8px;
   font-weight: 600;
   fill: #606266;
+  pointer-events: none;
+}
+
+.security-panel .panel-zone.main {
+  fill: rgba(255, 255, 255, 0.55);
+  stroke: rgba(64, 158, 255, 0.35);
+}
+
+.security-panel .panel-zone.uplink {
+  fill: rgba(230, 162, 60, 0.08);
+  stroke: rgba(230, 162, 60, 0.45);
 }
 
 .panel-svg .port-label {
@@ -2175,46 +3272,67 @@ refreshServerPanel()
   fill: #606266;
 }
 
-.server-panel .server-title {
-  font-size: 11px;
-  font-weight: 600;
-  fill: #e8ecf2;
-}
-
-.server-panel .server-sub {
-  font-size: 9px;
-  fill: #9aa3b0;
-}
-
 .server-slot-bg {
-  fill: rgba(255, 255, 255, 0.08);
-  stroke: rgba(180, 190, 205, 0.45);
+  fill: rgba(255, 255, 255, 0.35);
+  stroke: rgba(96, 98, 102, 0.25);
   stroke-width: 1;
 }
 
 .server-slot-bg.nic_1g {
-  fill: rgba(64, 158, 255, 0.12);
-  stroke: rgba(64, 158, 255, 0.55);
+  fill: rgba(64, 158, 255, 0.1);
+  stroke: rgba(64, 158, 255, 0.45);
 }
 
 .server-slot-bg.nic_10g {
-  fill: rgba(103, 194, 58, 0.12);
-  stroke: rgba(103, 194, 58, 0.55);
+  fill: rgba(103, 194, 58, 0.1);
+  stroke: rgba(103, 194, 58, 0.45);
 }
 
 .server-slot-bg.hba {
-  fill: rgba(230, 162, 60, 0.12);
-  stroke: rgba(230, 162, 60, 0.55);
+  fill: rgba(230, 162, 60, 0.1);
+  stroke: rgba(230, 162, 60, 0.45);
+}
+
+.server-port .server-port-cavity {
+  fill: rgba(48, 49, 51, 0.16);
+  stroke-opacity: 0.35;
+  stroke-width: 0.6;
+  pointer-events: none;
+}
+
+.server-port .server-port-num {
+  font-weight: 700;
+  fill: #1f2d3d;
+  paint-order: stroke fill;
+  stroke: rgba(255, 255, 255, 0.88);
+  stroke-width: 2.4px;
+  pointer-events: none;
+}
+
+.server-port .server-port-type {
+  font-size: 5.5px;
+  font-weight: 600;
+  fill: rgba(48, 49, 51, 0.72);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.server-port:hover .port-face {
+  filter: brightness(1.04);
+}
+
+.server-port.selected .port-face {
+  filter: drop-shadow(0 0 2.5px rgba(64, 158, 255, 0.5));
 }
 
 .server-slot-bg.raid {
-  fill: rgba(144, 147, 153, 0.18);
-  stroke: rgba(192, 196, 204, 0.55);
+  fill: rgba(144, 147, 153, 0.12);
+  stroke: rgba(144, 147, 153, 0.4);
 }
 
 .server-slot-bg.blank {
-  fill: rgba(60, 64, 72, 0.35);
-  stroke: rgba(140, 145, 155, 0.45);
+  fill: rgba(255, 255, 255, 0.25);
+  stroke: rgba(144, 147, 153, 0.4);
   stroke-dasharray: 4 3;
 }
 
@@ -2238,30 +3356,21 @@ refreshServerPanel()
   cursor: nwse-resize;
 }
 
+.slot-edit-badge {
+  cursor: pointer;
+}
+
+.slot-edit-badge-text {
+  font-size: 8px;
+  font-weight: 700;
+  fill: #fff;
+  pointer-events: none;
+}
+
 .server-slot-label {
   font-size: 8px;
   font-weight: 600;
   pointer-events: none;
-}
-
-.fixed-io-block {
-  fill: rgba(0, 0, 0, 0.25);
-  stroke: rgba(144, 147, 153, 0.45);
-}
-
-.onboard-zone {
-  fill: rgba(103, 194, 58, 0.08);
-  stroke: rgba(103, 194, 58, 0.35);
-}
-
-.fixed-io-label {
-  font-size: 7px;
-  fill: #aeb6c2;
-}
-
-.fixed-io-mini {
-  font-size: 6px;
-  fill: #909399;
 }
 
 .drag-hint {
@@ -2277,17 +3386,71 @@ refreshServerPanel()
 .raid-mark {
   font-size: 11px;
   font-weight: 700;
-  fill: #c0c4cc;
+  fill: #909399;
 }
 
-.psu-block {
-  fill: rgba(0, 0, 0, 0.35);
-  stroke: rgba(180, 190, 205, 0.4);
+.slot-ref-label {
+  font-size: 11px;
+  font-weight: 700;
+  fill: #c45656;
+  pointer-events: none;
 }
 
-.psu-label {
-  font-size: 8px;
-  fill: #aeb6c2;
+.region-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 4px;
+}
+
+.region-list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.region-list-item:hover {
+  border-color: #c6e2ff;
+}
+
+.region-list-item.active {
+  border-color: #409eff;
+  background: #f0f7ff;
+}
+
+.region-list-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.region-list-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #303133;
+}
+
+.region-list-summary {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.region-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
 .server-slot-block {
@@ -2364,6 +3527,33 @@ refreshServerPanel()
   font-size: 12px;
   padding: 4px 0 4px 6px;
   border-left: 3px solid #e4e7ed;
+}
+
+.size-row {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.size-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: inherit;
+  font-weight: inherit;
+}
+
+.size-field > span {
+  flex: 0 0 auto;
+  color: #606266;
+}
+
+.size-field .el-input-number {
+  flex: 1;
+  width: auto;
+  min-width: 0;
 }
 
 .type-legend {
@@ -2571,5 +3761,74 @@ refreshServerPanel()
   margin: 0;
   font-size: 12px;
   color: #909399;
+}
+</style>
+
+<style>
+/* Teleport 到 body，使用非 scoped 样式保证可见 */
+.region-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.region-modal {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.region-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #ebeef5;
+}
+.region-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+.region-modal-close {
+  border: none;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+  color: #909399;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.region-modal-close:hover {
+  color: #303133;
+}
+.region-modal-body {
+  padding: 16px 16px 8px;
+}
+.region-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid #ebeef5;
+}
+.region-modal-popper {
+  z-index: 5000 !important;
+}
+.slot-kind-radios {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.slot-kind-radios .el-radio-button {
+  margin-bottom: 6px;
+}
+.slot-kind-radios .el-radio-button__inner {
+  padding: 8px 10px;
 }
 </style>

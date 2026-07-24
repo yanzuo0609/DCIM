@@ -35,7 +35,7 @@ export function layoutServerFrontPanel(layout: PortLayout): ServerFrontPanelView
   layout.height_u = formFactor
 
   const grid = serverDriveGrid(formFactor)
-  const { frameWidth, frameHeight } = serverChassisSize(formFactor, 'front')
+  const { frameWidth, frameHeight } = serverChassisSize(formFactor, 'rear')
   const ioW = formFactor === 1 ? 72 : 88
   const bayPad = 8
   const bayOriginX = ioW + bayPad
@@ -62,7 +62,7 @@ export function layoutServerFrontPanel(layout: PortLayout): ServerFrontPanelView
 
   layout.frame_width = frameWidth
   layout.frame_height = frameHeight
-  layout.rack_width_mm = Math.round(frameWidth / 0.6)
+  layout.rack_width_mm = 600
 
   return {
     formFactor,

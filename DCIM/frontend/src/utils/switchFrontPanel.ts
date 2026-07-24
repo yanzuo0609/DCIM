@@ -29,6 +29,8 @@ export interface PanelZone {
   w: number
   h: number
   cardIndex?: number
+  /** 空白板卡（无接口） */
+  blank?: boolean
 }
 
 export interface SwitchPanelView {
@@ -178,18 +180,37 @@ function placeUplinkBlock(
   return { width, height, label }
 }
 
-/** 千兆上联：0–8；大于 4 时必须为偶数 */
-export function normalizeGigabitUplinkCount(count: number): number {
-  let n = Math.max(0, Math.min(8, Math.round(count)))
-  if (n > 4 && n % 2 !== 0) n -= 1
-  return n
+/** 千兆上联合法数量：0–4 任意；6/8（>4 须偶数） */
+const GIGABIT_UPLINK_ALLOWED = [0, 1, 2, 3, 4, 6, 8] as const
+
+/**
+ * 千兆上联：0–8；大于 4 时必须为偶数。
+ * @param previous 变更前的值，用于加号/减号时跳到相邻合法数（避免 4→5→4 卡死）
+ */
+export function normalizeGigabitUplinkCount(count: number, previous?: number): number {
+  const raw = Math.max(0, Math.min(8, Math.round(Number(count))))
+  if ((GIGABIT_UPLINK_ALLOWED as readonly number[]).includes(raw)) return raw
+  const prev = previous ?? raw
+  if (raw > prev) {
+    // 加号：升到下一个合法值（4→5→6）
+    return GIGABIT_UPLINK_ALLOWED.find((a) => a >= raw) ?? 8
+  }
+  // 减号：降到上一个合法值（6→5→4）
+  for (let i = GIGABIT_UPLINK_ALLOWED.length - 1; i >= 0; i -= 1) {
+    if (GIGABIT_UPLINK_ALLOWED[i] <= raw) return GIGABIT_UPLINK_ALLOWED[i]
+  }
+  return 0
 }
 
 /** 万兆 40/100G 上联：0–8，必须为偶数（两排向后扩展） */
-export function normalizeTenGigabitUplinkCount(count: number): number {
-  let n = Math.max(0, Math.min(8, Math.round(count)))
-  if (n > 0 && n % 2 !== 0) n -= 1
-  return n
+export function normalizeTenGigabitUplinkCount(count: number, previous?: number): number {
+  let n = Math.max(0, Math.min(8, Math.round(Number(count))))
+  if (n === 0) return 0
+  if (n % 2 === 0) return n
+  const prev = previous ?? n
+  // 奇数时按增减方向取偶，避免卡在非法值
+  if (n > prev) return Math.min(8, n + 1)
+  return Math.max(0, n - 1)
 }
 
 function groupRoleMap(layout: PortLayout): Map<string, string> {
@@ -356,11 +377,14 @@ function layoutCoreChassis(layout: PortLayout, cards: CoreLineCard[]): SwitchPan
 
   list.forEach((card, idx) => {
     const y = CORE_HEADER_H + PANEL_PAD + idx * (CORE_CARD_H + CORE_CARD_GAP)
-    const cardPorts = collectCardPorts(layout, idx)
-    placeTwoRowBlock(cardPorts, portsOriginX, y + 4, CORE_CARD_H - 8, sharedPortWidth)
-    cardPorts.forEach((p, i) => {
-      p.label = String(i + 1)
-    })
+    const isBlank = card.card_type === 'blank'
+    const cardPorts = isBlank ? [] : collectCardPorts(layout, idx)
+    if (!isBlank) {
+      placeTwoRowBlock(cardPorts, portsOriginX, y + 4, CORE_CARD_H - 8, sharedPortWidth)
+      cardPorts.forEach((p, i) => {
+        p.label = String(i + 1)
+      })
+    }
     zones.push({
       id: `card-${idx}`,
       kind: 'card',
@@ -370,6 +394,7 @@ function layoutCoreChassis(layout: PortLayout, cards: CoreLineCard[]): SwitchPan
       w: cardZoneW,
       h: CORE_CARD_H,
       cardIndex: idx,
+      blank: isBlank,
     })
   })
 

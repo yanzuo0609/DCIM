@@ -191,28 +191,23 @@ class NetworkDesignService:
         await self.session.flush()
 
     async def get_detail(self, topology_id: uuid.UUID) -> NetworkTopologyDetailResponse:
-        entity = await self.topology_repo.get_with_canvas(topology_id)
-        if not entity:
+        entity = await self.topology_repo.get_by_id(topology_id)
+        if not entity or entity.deleted_at is not None:
             raise NotFoundError("Network topology not found")
+        nodes = await self.node_repo.list_by_topology(topology_id)
+        links = await self.link_repo.list_by_topology(topology_id)
         device_map = await self._load_device_briefs(
-            [node.device_id for node in entity.nodes if node.device_id]
+            [node.device_id for node in nodes if node.device_id]
         )
-        nodes = [
-            self._to_node_response(node, device_map.get(node.device_id) if node.device_id else None)
-            for node in entity.nodes
-            if node.deleted_at is None
-        ]
-        links = [
-            NetworkLinkResponse.model_validate(link)
-            for link in entity.links
-            if link.deleted_at is None
-        ]
         return NetworkTopologyDetailResponse(
             id=entity.id,
             name=entity.name,
             description=entity.description,
-            nodes=nodes,
-            links=links,
+            nodes=[
+                self._to_node_response(node, device_map.get(node.device_id) if node.device_id else None)
+                for node in nodes
+            ],
+            links=[NetworkLinkResponse.model_validate(link) for link in links],
             created_at=entity.created_at,
             updated_at=entity.updated_at,
         )
@@ -230,7 +225,9 @@ class NetworkDesignService:
         self._validate_canvas(payload)
         await self._validate_devices(payload.nodes)
 
-        existing_nodes = {node.id: node for node in entity.nodes if node.deleted_at is None}
+        # 含已软删节点：同 id 再次保存时恢复，避免主键冲突
+        nodes_by_id = {node.id: node for node in entity.nodes}
+        existing_nodes = {nid: n for nid, n in nodes_by_id.items() if n.deleted_at is None}
         incoming_ids: set[uuid.UUID] = set()
         id_map: dict[uuid.UUID, uuid.UUID] = {}
 
@@ -243,8 +240,8 @@ class NetworkDesignService:
             if item.kind in (NetworkNodeKind.SERVER, NetworkNodeKind.SECURITY):
                 slots_payload = [slot.model_dump() for slot in (item.slots or default_slots())]
 
-            if item.id and item.id in existing_nodes:
-                node = existing_nodes[item.id]
+            if item.id and item.id in nodes_by_id:
+                node = nodes_by_id[item.id]
                 node.kind = item.kind.value
                 node.name = item.name.strip()
                 node.device_id = item.device_id
@@ -253,11 +250,15 @@ class NetworkDesignService:
                 node.switch_port_count = item.switch_port_count
                 node.slots = slots_payload
                 node.port_layout = port_layout_payload
+                node.deleted_at = None
+                node.deleted_by = None
                 node.updated_by = user_id
                 incoming_ids.add(node.id)
                 id_map[item.id] = node.id
             else:
+                # 必须挂到 entity.nodes：关系带 delete-orphan，仅 session.add 会被当成孤儿删掉
                 node = NetworkNode(
+                    id=item.id or uuid.uuid4(),
                     topology_id=topology_id,
                     kind=item.kind.value,
                     name=item.name.strip(),
@@ -270,11 +271,13 @@ class NetworkDesignService:
                     created_by=user_id,
                     updated_by=user_id,
                 )
-                self.session.add(node)
+                entity.nodes.append(node)
                 await self.session.flush()
                 incoming_ids.add(node.id)
                 if item.id:
                     id_map[item.id] = node.id
+                else:
+                    id_map[node.id] = node.id
 
         now = datetime.now(timezone.utc)
         for node_id, node in existing_nodes.items():
@@ -289,8 +292,8 @@ class NetworkDesignService:
 
         node_lookup = {
             node.id: node
-            for node in (await self.node_repo.list_by_topology(topology_id))
-            if node.deleted_at is None
+            for node in entity.nodes
+            if node.deleted_at is None and node.id in incoming_ids
         }
 
         for link_input in payload.links:
@@ -301,8 +304,9 @@ class NetworkDesignService:
             if not source_node or not target_node:
                 raise ValidationError("Link references missing node")
             self._validate_link_ports(link_input, source_node, target_node)
-            self.session.add(
+            entity.links.append(
                 NetworkLink(
+                    id=link_input.id or uuid.uuid4(),
                     topology_id=topology_id,
                     link_type=link_input.link_type.value,
                     source_node_id=source_id,

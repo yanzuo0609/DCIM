@@ -6,11 +6,13 @@ export type NetworkLinkType = 'switch_server' | 'switch_switch' | 'switch_securi
 export type SwitchSubtype = 'gigabit' | 'ten_gigabit' | 'core'
 export type UplinkPosition = 'right' | 'middle'
 export type InterfaceGroupRole = 'main' | 'uplink' | 'mgmt' | 'card'
-export type CoreCardType = 'gigabit' | 'ten_gigabit' | '100g'
+export type CoreCardType = 'gigabit' | 'ten_gigabit' | '100g' | 'blank'
 export type ServerFormFactor = 1 | 2 | 4
 export type ServerSlotKind = 'nic_1g' | 'nic_10g' | 'raid' | 'hba' | 'blank'
 export type ServerSlotOrientation = 'horizontal' | 'vertical'
 export type ServerPanelSide = 'front' | 'rear'
+/** 安全设备接口区排布 */
+export type SecurityZoneLayout = 'single_row' | 'two_row' | 'auto'
 
 export interface SlotConfig {
   enabled: boolean
@@ -56,6 +58,10 @@ export interface LayoutSlotDef {
   server_slot_kind?: ServerSlotKind | null
   /** 板卡横/纵向放置 */
   orientation?: ServerSlotOrientation | null
+  /** 安全设备前面板：接口区名称（WAN/LAN/MGMT…） */
+  zone_label?: string | null
+  /** 安全设备前面板：接口区排布 */
+  zone_layout?: SecurityZoneLayout | null
   /** @deprecated migrated to groups */
   port_count?: number
   default_port_type?: PortType
@@ -104,6 +110,8 @@ export interface PortLayout {
   server_panel_side?: ServerPanelSide | null
   /** 板载千兆口数量（后面板固定区） */
   server_onboard_1g_count?: number | null
+  /** 安全设备前面板模式 */
+  security_panel?: boolean | null
   /** 布局已锁定：仅允许配置接口对端，不可改面板结构 */
   layout_locked?: boolean | null
 }
@@ -278,11 +286,11 @@ export const PORT_TYPE_LABELS: Record<PortType, string> = {
 }
 
 export const PORT_TYPE_COLORS: Record<PortType, { fill: string; stroke: string }> = {
-  '1g': { fill: '#ecf5ff', stroke: '#409eff' },
-  '10g': { fill: '#f0f9eb', stroke: '#67c23a' },
-  '40_100g': { fill: '#fdf6ec', stroke: '#e6a23c' },
-  bmc: { fill: '#f4f4f5', stroke: '#909399' },
-  other: { fill: '#fafafa', stroke: '#c0c4cc' },
+  '1g': { fill: '#d6eaff', stroke: '#2b7fd4' },
+  '10g': { fill: '#ddf2d0', stroke: '#4e9b2e' },
+  '40_100g': { fill: '#fce8c8', stroke: '#d48806' },
+  bmc: { fill: '#e8e9eb', stroke: '#6b7280' },
+  other: { fill: '#f3f4f6', stroke: '#9ca3af' },
 }
 
 export const PORT_TYPE_SHORT: Record<PortType, string> = {
@@ -323,12 +331,17 @@ export const CORE_CARD_TYPE_LABELS: Record<CoreCardType, string> = {
   gigabit: '千兆板卡',
   ten_gigabit: '万兆板卡',
   '100g': '100G板卡',
+  blank: '空白板卡',
 }
 
-export const CORE_CARD_PORT_TYPE: Record<CoreCardType, PortType> = {
+export const CORE_CARD_PORT_TYPE: Record<Exclude<CoreCardType, 'blank'>, PortType> = {
   gigabit: '1g',
   ten_gigabit: '10g',
   '100g': '40_100g',
+}
+
+export function isBlankCoreCard(cardType: CoreCardType | null | undefined): boolean {
+  return cardType === 'blank'
 }
 
 export const SERVER_FORM_FACTOR_LABELS: Record<ServerFormFactor, string> = {
@@ -362,6 +375,12 @@ export const SERVER_ORIENTATION_LABELS: Record<ServerSlotOrientation, string> = 
   vertical: '纵向',
 }
 
+export const SECURITY_ZONE_LAYOUT_LABELS: Record<SecurityZoneLayout, string> = {
+  auto: '自动',
+  single_row: '单行',
+  two_row: '双行',
+}
+
 export function serverSlotDefaultPortType(kind: ServerSlotKind): PortType {
   if (kind === 'nic_1g') return '1g'
   if (kind === 'nic_10g') return '10g'
@@ -376,7 +395,7 @@ export function newCoreLineCard(
   return {
     id: crypto.randomUUID().slice(0, 8),
     card_type: cardType,
-    port_count: Math.max(1, portCount),
+    port_count: cardType === 'blank' ? 0 : Math.max(1, portCount),
   }
 }
 

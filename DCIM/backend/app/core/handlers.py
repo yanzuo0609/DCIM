@@ -49,6 +49,11 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # 便于排查设备定义保存 422
+        try:
+            print("[RequestValidationError]", exc.errors())
+        except Exception:
+            print("[RequestValidationError]", str(exc))
         return JSONResponse(
             status_code=422,
             content=ErrorResponse(

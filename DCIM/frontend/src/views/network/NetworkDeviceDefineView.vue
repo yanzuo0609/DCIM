@@ -23,15 +23,18 @@ import {
 import { listDevices, type Device } from '@/api/device'
 import { useAuthStore } from '@/stores/auth'
 import {
+  applySecurityLayoutConfig,
   applySwitchLayoutConfig,
   defaultPortLayout,
   ensurePortLayout,
   generatePortsFromSlotsDef,
+  RACK_WIDTH_MM,
   syncLegacyFromPortLayout,
   syncLinksFromPortLayout,
 } from '@/utils/networkPortLayout'
 import { normalizeGigabitUplinkCount, normalizeTenGigabitUplinkCount } from '@/utils/switchFrontPanel'
 import { applyServerFormFactor, defaultServerSlotsDef } from '@/utils/serverRearPanel'
+import { SEC_FRAME_HEIGHT_BY_U, defaultSecurityZones } from '@/utils/securityFrontPanel'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -60,12 +63,14 @@ const basicForm = reactive({
   uplink_position: 'right' as UplinkPosition,
   line_cards: [newCoreLineCard('ten_gigabit', 48)] as CoreLineCard[],
   server_form_factor: 1 as ServerFormFactor,
+  security_height_u: 1,
 })
 
 const isCoreSwitch = computed(() => basicForm.kind === 'switch' && basicForm.switch_subtype === 'core')
 const isGigabitSwitch = computed(() => basicForm.kind === 'switch' && basicForm.switch_subtype === 'gigabit')
 const isTenGigabitSwitch = computed(() => basicForm.kind === 'switch' && basicForm.switch_subtype === 'ten_gigabit')
 const isCreateServer = computed(() => basicForm.kind === 'server')
+const isCreateSecurity = computed(() => basicForm.kind === 'security')
 
 const selectedNode = computed(
   () => nodes.value.find((n) => n.id === selectedNodeId.value) || null,
@@ -89,9 +94,13 @@ function openCreate(kind: NetworkNodeKind) {
     basicForm.uplink_port_count = 4
     basicForm.uplink_position = 'right'
     basicForm.line_cards = [newCoreLineCard('ten_gigabit', 48)]
+    lastCreateUplinkCount.value = 4
   }
   if (kind === 'server') {
     basicForm.server_form_factor = 1
+  }
+  if (kind === 'security') {
+    basicForm.security_height_u = 1
   }
   basicVisible.value = true
 }
@@ -100,19 +109,26 @@ function onSwitchSubtypeChange(subtype: SwitchSubtype) {
   const defaults = SWITCH_SUBTYPE_DEFAULTS[subtype]
   basicForm.main_port_count = defaults.mainPortCount
   basicForm.uplink_port_count = defaults.uplinkPortCount
+  lastCreateUplinkCount.value = defaults.uplinkPortCount
   if (subtype === 'core' && !basicForm.line_cards.length) {
     basicForm.line_cards = [newCoreLineCard('ten_gigabit', 48)]
   }
 }
 
+const lastCreateUplinkCount = ref(4)
+
 function onCreateGigabitUplinkChange(val: number | undefined) {
   if (val == null) return
-  basicForm.uplink_port_count = normalizeGigabitUplinkCount(val)
+  const next = normalizeGigabitUplinkCount(val, lastCreateUplinkCount.value)
+  basicForm.uplink_port_count = next
+  lastCreateUplinkCount.value = next
 }
 
 function onCreateTenGigabitUplinkChange(val: number | undefined) {
   if (val == null) return
-  basicForm.uplink_port_count = normalizeTenGigabitUplinkCount(val)
+  const next = normalizeTenGigabitUplinkCount(val, lastCreateUplinkCount.value)
+  basicForm.uplink_port_count = next
+  lastCreateUplinkCount.value = next
 }
 
 function addLineCard() {
@@ -125,13 +141,25 @@ function removeLineCard(idx: number) {
   basicForm.line_cards.splice(idx, 1)
 }
 
+function onCreateLineCardTypeChange(card: CoreLineCard) {
+  if (card.card_type === 'blank') card.port_count = 0
+  else if (!card.port_count || card.port_count < 1) card.port_count = 48
+}
+
 function confirmCreate() {
   if (!basicForm.name.trim() || !currentId.value) return
   if (basicForm.kind === 'switch' && basicForm.switch_subtype === 'core' && !basicForm.line_cards.length) {
     ElMessage.warning('请至少定义一块板卡')
     return
   }
-  const portLayout = defaultPortLayout(basicForm.kind)
+  const securityHeightU = basicForm.kind === 'security' && Number(basicForm.security_height_u) >= 2 ? 2 : 1
+  if (basicForm.kind === 'security') basicForm.security_height_u = securityHeightU
+
+  const portLayout =
+    basicForm.kind === 'security'
+      ? defaultPortLayout('security', RACK_WIDTH_MM, securityHeightU)
+      : defaultPortLayout(basicForm.kind)
+
   if (basicForm.kind === 'switch') {
     const uplinkCount =
       basicForm.switch_subtype === 'gigabit'
@@ -154,6 +182,16 @@ function confirmCreate() {
     portLayout.server_panel_side = 'rear'
     portLayout.server_onboard_1g_count = 4
     generatePortsFromSlotsDef(portLayout, false)
+  } else if (basicForm.kind === 'security') {
+    applySecurityLayoutConfig(portLayout, {
+      heightU: securityHeightU,
+      zones: defaultSecurityZones(),
+      preservePeers: false,
+    })
+    // 强制落盘高度，避免后续归一化覆盖
+    portLayout.height_u = securityHeightU
+    portLayout.frame_height = SEC_FRAME_HEIGHT_BY_U[securityHeightU as 1 | 2]
+    portLayout.security_panel = true
   } else {
     generatePortsFromSlotsDef(portLayout, false)
   }
@@ -173,7 +211,7 @@ function confirmCreate() {
   }
   syncLegacyFromPortLayout(node)
   nodes.value.push(node)
-  selectedNodeId.value = node.id
+  selectNode(node)
   basicVisible.value = false
 }
 
@@ -215,8 +253,14 @@ async function handleSave() {
     }
   })
   syncLinksFromPortLayout(nodes.value, links.value)
-  await saveCanvas()
-  ElMessage.success('已保存，布局已锁定；可继续配置接口对端，修改布局请点击「编辑布局」')
+  const ok = await saveCanvas()
+  if (ok) {
+    // 保存回写后再次锁定，避免后端未带回 layout_locked 时仍可改结构
+    nodes.value.forEach((node) => {
+      if (node.port_layout) node.port_layout.layout_locked = true
+    })
+    ElMessage.info('布局已锁定；可继续配置接口对端，修改布局请点击「编辑布局」')
+  }
 }
 
 function startLayoutEdit() {
@@ -349,6 +393,7 @@ onMounted(async () => {
               布局已锁定，不可拖动/调整结构；单击选中接口，双击配置对端
             </p>
             <NetworkDeviceFrameEditor
+              :key="selectedNode.id"
               :node="selectedNode"
               :peer-nodes="peerNodes"
               :editable="canConfigPorts"
@@ -424,7 +469,7 @@ onMounted(async () => {
               <div class="card-list">
                 <div v-for="(card, idx) in basicForm.line_cards" :key="card.id" class="card-row">
                   <span class="card-idx">板卡 {{ idx + 1 }}</span>
-                  <el-select v-model="card.card_type" style="width: 140px">
+                  <el-select v-model="card.card_type" style="width: 140px" @change="onCreateLineCardTypeChange(card)">
                     <el-option
                       v-for="(label, key) in CORE_CARD_TYPE_LABELS"
                       :key="key"
@@ -433,7 +478,12 @@ onMounted(async () => {
                     />
                   </el-select>
                   <span>接口数量</span>
-                  <el-input-number v-model="card.port_count" :min="1" :max="128" />
+                  <el-input-number
+                    v-model="card.port_count"
+                    :min="card.card_type === 'blank' ? 0 : 1"
+                    :max="128"
+                    :disabled="card.card_type === 'blank'"
+                  />
                   <el-button
                     type="danger"
                     link
@@ -459,7 +509,18 @@ onMounted(async () => {
               </el-radio>
             </el-radio-group>
             <div class="form-hint">
-              1U 最多 1×4 Slot；2U 最多 4×4 Slot；4U 最多 8×8 Slot。创建后可继续添加网卡 / RAID / HBA。
+              1U 默认 2 张扩展卡；2U 参考背板左 3 / 中 3 / 右 2 共 8 槽。创建后可继续添加或删除网卡 / RAID / HBA。
+            </div>
+          </el-form-item>
+        </template>
+        <template v-else-if="isCreateSecurity">
+          <el-form-item label="设备高度" required>
+            <el-radio-group v-model="basicForm.security_height_u">
+              <el-radio :value="1">1U</el-radio>
+              <el-radio :value="2">2U</el-radio>
+            </el-radio-group>
+            <div class="form-hint">
+              1U / 2U 机箱同宽；默认生成 WAN / LAN / HA / MGMT 接口区，创建后可调整位置与大小。
             </div>
           </el-form-item>
         </template>

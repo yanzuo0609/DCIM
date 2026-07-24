@@ -30,10 +30,22 @@ import {
   normalizeServerFormFactor,
 } from '@/utils/serverRearPanel'
 import { layoutServerFrontPanel } from '@/utils/serverFrontPanel'
+import {
+  buildSecuritySlotsDef,
+  defaultSecurityZones,
+  layoutSecurityFrontPanel,
+  normalizeSecurityHeightU,
+  type SecurityZoneInput,
+} from '@/utils/securityFrontPanel'
 import { defaultSlotOrientation } from '@/utils/serverPanelCommon'
 import type { ServerSlotKind } from '@/api/network'
 
 export { moveServerSlotInPanel, moveServerPortInPanel, resizeServerSlotInPanel } from '@/utils/serverRearPanel'
+export {
+  moveSecurityZoneInPanel,
+  resizeSecurityZoneInPanel,
+  resetSecurityZonePositions,
+} from '@/utils/securityFrontPanel'
 
 export const RACK_WIDTH_MM = 600
 export const MIN_DEVICE_WIDTH_MM = 200
@@ -169,6 +181,14 @@ function uplinkGroupLabel(portType: PortType, count: number): string {
 function buildCoreSlotsDef(cards: CoreLineCard[]): LayoutSlotDef[] {
   const list = cards.length ? cards : [newCoreLineCard('ten_gigabit', 48)]
   return list.map((card, idx) => {
+    if (card.card_type === 'blank') {
+      return {
+        groups: [],
+        layout_x: idx === 0 ? 0 : null,
+        layout_y: 0,
+        zone_label: '空白板卡',
+      }
+    }
     const portType = CORE_CARD_PORT_TYPE[card.card_type]
     const count = Math.max(1, card.port_count)
     const group = newInterfaceGroup(portType, count, {
@@ -232,7 +252,7 @@ export function applySwitchLayoutConfig(layout: PortLayout, config: SwitchLayout
     const cards = (config.lineCards?.length ? config.lineCards : [newCoreLineCard()]).map((c) => ({
       id: c.id || crypto.randomUUID().slice(0, 8),
       card_type: c.card_type,
-      port_count: Math.max(1, c.port_count),
+      port_count: c.card_type === 'blank' ? 0 : Math.max(1, c.port_count),
     }))
     layout.line_cards = cards
     layout.uplink_position = null
@@ -276,7 +296,9 @@ export function readSwitchLayoutConfig(layout: PortLayout): SwitchLayoutConfig {
 }
 
 function slotBandLabel(slot: LayoutSlotDef, idx: number): string {
+  if (slot.zone_label) return slot.zone_label
   const groups = ensureSlotGroups(slot)
+  if (!groups.length) return '空白板卡'
   if (groups.length === 1 && groups[0].role === 'card') {
     return `板卡 ${idx + 1}`
   }
@@ -303,6 +325,12 @@ function groupDisplayLabel(group: SlotInterfaceGroup): string {
   return `${PORT_TYPE_SHORT[group.port_type]} ×${group.count}`
 }
 
+export function coreSlotDisplayLabel(slot: LayoutSlotDef, idx: number): string {
+  if (slot.zone_label) return slot.zone_label
+  if (!slot.groups?.length) return '空白板卡'
+  return groupDisplayLabel(slot.groups[0]) || `Slot ${idx + 1}`
+}
+
 export function slotPortCount(slot: LayoutSlotDef): number {
   return slot.groups.reduce((sum, g) => sum + g.count, 0)
 }
@@ -314,6 +342,10 @@ export function migrateSlotToGroups(slot: LayoutSlotDef): LayoutSlotDef {
       if (g.layout_x == null) g.layout_x = null
       if (g.layout_y == null) g.layout_y = null
     })
+    // 已有 groups 时清除旧字段，避免后端 LayoutSlotDef.port_count 校验失败
+    delete slot.port_count
+    delete slot.default_port_type
+    delete slot.port_types
     return slot
   }
 
@@ -342,6 +374,11 @@ export function migrateSlotToGroups(slot: LayoutSlotDef): LayoutSlotDef {
 export function ensureSlotGroups(slot: LayoutSlotDef): SlotInterfaceGroup[] {
   migrateSlotToGroups(slot)
   if (slot.server_slot_kind === 'raid' || slot.server_slot_kind === 'blank') {
+    slot.groups = []
+    return slot.groups
+  }
+  // 核心交换机空白板卡：允许空 groups，不自动补默认接口
+  if (slot.zone_label === '空白板卡') {
     slot.groups = []
     return slot.groups
   }
@@ -375,12 +412,8 @@ export function defaultSlotsDef(kind: NetworkNodeKind, slotCount?: number): Layo
   if (kind === 'server') {
     return defaultServerSlotsDef(1)
   }
-  const count = slotCount ?? 2
-  return Array.from({ length: count }, (_, i) => ({
-    groups: [newInterfaceGroup(i === count - 1 ? 'bmc' : '10g', i === 0 ? 2 : 1)],
-    layout_x: i === 0 ? 0 : null,
-    layout_y: 0,
-  }))
+  // security
+  return buildSecuritySlotsDef(defaultSecurityZones())
 }
 
 export function defaultPortLayout(kind: NetworkNodeKind, rackWidthMm = RACK_WIDTH_MM, heightU = 1): PortLayout {
@@ -401,6 +434,10 @@ export function defaultPortLayout(kind: NetworkNodeKind, rackWidthMm = RACK_WIDT
   if (kind === 'server') {
     layout.server_form_factor = 1
     layout.height_u = 1
+  }
+  if (kind === 'security') {
+    layout.security_panel = true
+    layout.height_u = heightU
   }
   return layout
 }
@@ -437,10 +474,14 @@ export function addSlotWithGroup(layout: PortLayout, portType: PortType, count: 
 }
 
 export function addServerSlot(layout: PortLayout, kind: ServerSlotKind, portCount: number) {
-  applyServerFormFactor(layout, normalizeServerFormFactor(layout.server_form_factor ?? 1))
   const ff = normalizeServerFormFactor(layout.server_form_factor ?? 1)
+  layout.server_form_factor = ff
+  if (layout.height_u == null) layout.height_u = ff
   const slots = ensureSlotsDef(layout)
-  slots.push(newServerSlotDef(kind, portCount, defaultSlotOrientation(ff)))
+  const slot = newServerSlotDef(kind, portCount, defaultSlotOrientation(ff))
+  slot.layout_x = null
+  slot.layout_y = null
+  slots.push(slot)
   layout.slot_count = slots.length
 }
 
@@ -454,8 +495,23 @@ export function addGroupToSlot(layout: PortLayout, slotIndex: number, portType: 
 export function removeSlot(layout: PortLayout, slotIndex: number) {
   const slots = ensureSlotsDef(layout)
   if (slots.length <= 1) return
+  const removed = slotIndex + 1
   slots.splice(slotIndex, 1)
   layout.slot_count = slots.length
+  // 删除对应端口，并将后续槽位序号前移，避免面板残留旧卡口
+  layout.ports = (layout.ports || [])
+    .filter((p) => p.slot_index !== removed)
+    .map((p) => {
+      if (p.slot_index != null && p.slot_index > removed) {
+        const nextIdx = p.slot_index - 1
+        return {
+          ...p,
+          slot_index: nextIdx,
+          id: p.id.replace(new RegExp(`^slot${p.slot_index}`), `slot${nextIdx}`),
+        }
+      }
+      return p
+    })
 }
 
 export function removeGroupFromSlot(layout: PortLayout, slotIndex: number, groupId: string) {
@@ -888,6 +944,12 @@ export function autoAdjustDeviceFrame(layout: PortLayout) {
     }
     return
   }
+  // 安全设备：禁止用通用 U 拟合覆盖用户选择的 1U/2U 高度
+  if (layout.security_panel || (layout.slots_def || []).some((s) => s.zone_label)) {
+    layout.security_panel = true
+    layoutSecurityFrontPanel(layout)
+    return
+  }
   const slots_def = ensureSlotsDef(layout)
   const zoom = (frameDisplayScalePercent(layout) || 100) / 100
 
@@ -991,7 +1053,18 @@ export function normalizePortLayout(layout: PortLayout): PortLayout {
       const m = /^slot(\d+)-/.exec(port.id)
       if (m) port.slot_index = parseInt(m[1], 10)
     }
+    // 后端 FramePort 约束：w∈[8,120] h∈[8,60]
+    if (port.w != null) port.w = Math.max(8, Math.min(120, port.w))
+    if (port.h != null) port.h = Math.max(8, Math.min(60, port.h))
   })
+
+  // 后端 rack_width_mm ≤ 1200；示意图素尺寸不可直接换算为 mm
+  if (layout.rack_width_mm != null && layout.rack_width_mm > MAX_RACK_WIDTH_MM) {
+    layout.rack_width_mm = MAX_RACK_WIDTH_MM
+  }
+  if (layout.rack_width_mm != null && layout.rack_width_mm < MIN_DEVICE_WIDTH_MM) {
+    layout.rack_width_mm = MIN_DEVICE_WIDTH_MM
+  }
 
   if (layout.rack_width_mm != null && layout.height_u != null) {
     return layout
@@ -1146,6 +1219,27 @@ export function generatePortsFromSlotsDef(layout: PortLayout, preservePeers = tr
   syncPortsFromSlotsDef(layout, preservePeers)
 }
 
+export function applySecurityLayoutConfig(
+  layout: PortLayout,
+  opts: { heightU?: number; zones?: SecurityZoneInput[]; preservePeers?: boolean } = {},
+) {
+  layout.security_panel = true
+  const heightU = normalizeSecurityHeightU(opts.heightU ?? layout.height_u ?? 1)
+  layout.height_u = heightU
+  if (opts.zones?.length) {
+    layout.slots_def = buildSecuritySlotsDef(opts.zones)
+  } else if (!layout.slots_def?.length) {
+    layout.slots_def = buildSecuritySlotsDef(defaultSecurityZones())
+  }
+  layout.slot_count = layout.slots_def.length
+  // 先标记 security_panel，避免 syncPorts → autoAdjust 把高度压回 1U
+  syncPortsFromSlotsDef(layout, opts.preservePeers !== false)
+  // 再次锁定高度并生成面板（防止中间步骤改写）
+  layout.height_u = heightU
+  layout.security_panel = true
+  layoutSecurityFrontPanel(layout)
+}
+
 export function autoArrangePortsBySlots(layout: PortLayout) {
   if (layout.switch_subtype) {
     layoutSwitchFrontPanel(layout)
@@ -1158,6 +1252,11 @@ export function autoArrangePortsBySlots(layout: PortLayout) {
     } else {
       layoutServerRearPanel(layout)
     }
+    return
+  }
+  if (layout.security_panel || (layout.slots_def || []).some((s) => s.zone_label)) {
+    layout.security_panel = true
+    layoutSecurityFrontPanel(layout)
     return
   }
   const slots_def = ensureSlotsDef(layout)
@@ -1206,6 +1305,15 @@ export function ensurePortLayout(node: NetworkNode): PortLayout {
         group_id: p.group_id ?? null,
       })),
     })
+    // 写回节点，避免浅拷贝导致后续编辑丢失
+    node.port_layout = layout
+    if (node.kind === 'security') {
+      applySecurityLayoutConfig(layout, {
+        heightU: layout.height_u,
+        preservePeers: true,
+      })
+      return layout
+    }
     if (!layout.ports.length && layout.slots_def?.length) {
       syncPortsFromSlotsDef(layout, false)
     } else if (layout.ports.length) {
@@ -1252,11 +1360,22 @@ export function syncLegacyFromPortLayout(node: NetworkNode) {
     layout.slots_def.forEach((def, idx) => {
       if (idx >= 8) return
       migrateSlotToGroups(def)
-      slots[idx] = { enabled: true, port_count: slotPortCount(def) }
+      const count = slotPortCount(def)
+      if (count <= 0) {
+        slots[idx] = { enabled: false, port_count: 1 }
+      } else {
+        slots[idx] = { enabled: true, port_count: Math.max(1, Math.min(128, count)) }
+      }
     })
     node.slots = slots
     if (node.kind === 'switch') {
-      node.switch_port_count = layout.slots_def.reduce((sum, s) => sum + slotPortCount(migrateSlotToGroups(s)), 0)
+      node.switch_port_count = Math.max(
+        1,
+        Math.min(
+          128,
+          layout.slots_def.reduce((sum, s) => sum + slotPortCount(migrateSlotToGroups(s)), 0),
+        ),
+      )
     }
     return
   }
