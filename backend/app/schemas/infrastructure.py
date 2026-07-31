@@ -98,6 +98,84 @@ def normalize_row_layout(
     return layout
 
 
+PRESET_ROOM_ATTRIBUTES = frozenset({"internet", "private_network"})
+
+PURPOSE_FALLBACK_LABELS: dict[str, str] = {
+    "production": "生产",
+    "test": "测试",
+    "backup": "备份",
+    "network": "网络",
+    "storage": "存储",
+    "other": "其他",
+}
+
+
+def normalize_room_attributes(raw: list[str] | None) -> list[str]:
+    if not raw:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in raw:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        key = value if value in PRESET_ROOM_ATTRIBUTES else value
+        lower = key.lower() if key in PRESET_ROOM_ATTRIBUTES else key
+        # presets keep canonical codes; customs keep trimmed text
+        if key in PRESET_ROOM_ATTRIBUTES:
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(key)
+        else:
+            if lower in seen or key in PRESET_ROOM_ATTRIBUTES:
+                continue
+            seen.add(lower)
+            if len(key) > 40:
+                raise ValueError("custom attribute length must be <= 40")
+            result.append(key)
+        if len(result) > 20:
+            raise ValueError("at most 20 room attributes")
+    return result
+
+
+def resolve_room_attributes(
+    attributes: list[str] | None,
+    *,
+    purpose: str | None = None,
+) -> list[str]:
+    normalized = normalize_room_attributes(attributes)
+    if normalized:
+        return normalized
+    label = PURPOSE_FALLBACK_LABELS.get((purpose or "").strip())
+    return [label] if label else []
+
+
+def purpose_from_attributes(attributes: list[str] | None) -> str:
+    """属性为主；purpose 列兼容写 other。"""
+    _ = attributes
+    return "other"
+
+
+def ensure_layout_within_outline(
+    row_layout: list[int],
+    *,
+    outline_rows: int,
+    outline_cols: int,
+) -> None:
+    if outline_rows < 1 or outline_rows > 50 or outline_cols < 1 or outline_cols > 50:
+        raise ValueError("outline grid must be between 1 and 50")
+    if len(row_layout) > outline_rows:
+        raise ValueError(
+            f"机柜排数 {len(row_layout)} 超出机房轮廓宽向网格 {outline_rows}，请缩小编排或扩大轮廓"
+        )
+    widest = max(row_layout) if row_layout else 0
+    if widest > outline_cols:
+        raise ValueError(
+            f"机柜列数 {widest} 超出机房轮廓长向网格 {outline_cols}，请缩小编排或扩大轮廓"
+        )
+
+
 def letter_to_index(label: str) -> int:
     text = label.strip().upper()
     if not text or not all("A" <= ch <= "Z" for ch in text):
@@ -165,14 +243,20 @@ def generate_slot_codes(
         result: list[list[str]] = []
         seen: set[str] = set()
         for row_idx, cols in enumerate(row_layout):
-            row = slot_codes[row_idx] if row_idx < len(slot_codes) else []
-            if not isinstance(row, list) or len(row) != cols:
-                raise ValueError(f"row {row_idx + 1} must have {cols} rack codes")
+            raw_row = slot_codes[row_idx] if row_idx < len(slot_codes) else []
+            if not isinstance(raw_row, list):
+                raise ValueError(f"row {row_idx + 1} must be a list of rack codes")
+            # 允许短行补空：场景网格中立柱/空位可不占号
+            row = [str(x) if x is not None else "" for x in raw_row[:cols]]
+            if len(row) < cols:
+                row.extend([""] * (cols - len(row)))
             codes: list[str] = []
             for col_idx, raw in enumerate(row):
                 code = str(raw).strip()
                 if not code:
-                    raise ValueError(f"rack code at row {row_idx + 1} col {col_idx + 1} is empty")
+                    # 空码合法（非机柜格占位），不参与唯一性校验
+                    codes.append("")
+                    continue
                 if len(code) > 50:
                     raise ValueError(f"rack code too long: {code}")
                 key = code.lower()
@@ -204,6 +288,13 @@ class RoomCreate(BaseModel):
     floor_id: str
     name: str = Field(min_length=1, max_length=100)
     description: str | None = None
+    purpose: Literal["production", "test", "backup", "network", "storage", "other"] | None = (
+        "production"
+    )
+    importance: Literal["critical", "high", "medium", "low"] | None = "medium"
+    attributes: list[str] | None = None
+    outline_rows: int = Field(default=8, ge=1, le=50, description="机房轮廓宽向网格数")
+    outline_cols: int = Field(default=10, ge=1, le=50, description="机房轮廓长向网格数")
     layout_mode: Literal["auto", "manual"] = "auto"
     rack_rows: int = Field(default=4, ge=1, le=50, description="机柜排数（自动模式）")
     rack_columns: int = Field(default=6, ge=1, le=50, description="每排机柜数（自动模式）")
@@ -211,9 +302,11 @@ class RoomCreate(BaseModel):
     code_mode: Literal["auto", "custom"] = "auto"
     code_prefix: str | None = Field(default="A", max_length=50)
     slot_codes: list[list[str]] | None = None
+    pillar_layout: dict | None = None
 
     @model_validator(mode="after")
     def validate_layout(self) -> "RoomCreate":
+        self.attributes = normalize_room_attributes(self.attributes)
         self.row_layout = normalize_row_layout(
             layout_mode=self.layout_mode,
             rack_rows=self.rack_rows,
@@ -222,20 +315,34 @@ class RoomCreate(BaseModel):
         )
         self.rack_rows = len(self.row_layout)
         self.rack_columns = max(self.row_layout)
+        ensure_layout_within_outline(
+            self.row_layout,
+            outline_rows=self.outline_rows,
+            outline_cols=self.outline_cols,
+        )
         self.slot_codes = generate_slot_codes(
             self.row_layout,
             code_mode=self.code_mode,
             code_prefix=self.code_prefix,
             slot_codes=self.slot_codes,
         )
+        if self.attributes:
+            self.purpose = purpose_from_attributes(self.attributes)  # type: ignore[assignment]
         return self
 
 
 class RoomQuickCreate(BaseModel):
     datacenter_id: str = Field(description="关联数据中心 ID")
     building_no: str = Field(min_length=1, max_length=100, description="机房楼号")
-    room_no: str = Field(min_length=1, max_length=100, description="机房编号")
+    room_no: str = Field(min_length=1, max_length=100, description="机房门牌号")
     description: str | None = None
+    purpose: Literal["production", "test", "backup", "network", "storage", "other"] | None = (
+        "other"
+    )
+    importance: Literal["critical", "high", "medium", "low"] | None = "medium"
+    attributes: list[str] | None = None
+    outline_rows: int = Field(default=8, ge=1, le=50, description="机房轮廓宽向网格数")
+    outline_cols: int = Field(default=10, ge=1, le=50, description="机房轮廓长向网格数")
     layout_mode: Literal["auto", "manual"] = "auto"
     rack_rows: int = Field(default=4, ge=1, le=50, description="机柜排数（自动模式）")
     rack_columns: int = Field(default=6, ge=1, le=50, description="每排机柜数（自动模式）")
@@ -243,9 +350,11 @@ class RoomQuickCreate(BaseModel):
     code_mode: Literal["auto", "custom"] = "auto"
     code_prefix: str | None = Field(default="A", max_length=50)
     slot_codes: list[list[str]] | None = None
+    pillar_layout: dict | None = None
 
     @model_validator(mode="after")
     def validate_layout(self) -> "RoomQuickCreate":
+        self.attributes = normalize_room_attributes(self.attributes)
         self.row_layout = normalize_row_layout(
             layout_mode=self.layout_mode,
             rack_rows=self.rack_rows,
@@ -254,12 +363,19 @@ class RoomQuickCreate(BaseModel):
         )
         self.rack_rows = len(self.row_layout)
         self.rack_columns = max(self.row_layout)
+        ensure_layout_within_outline(
+            self.row_layout,
+            outline_rows=self.outline_rows,
+            outline_cols=self.outline_cols,
+        )
         self.slot_codes = generate_slot_codes(
             self.row_layout,
             code_mode=self.code_mode,
             code_prefix=self.code_prefix,
             slot_codes=self.slot_codes,
         )
+        if self.attributes is not None:
+            self.purpose = purpose_from_attributes(self.attributes)  # type: ignore[assignment]
         return self
 
 
@@ -267,6 +383,11 @@ class RoomUpdate(BaseModel):
     room_no: str | None = Field(default=None, min_length=1, max_length=100)
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = None
+    purpose: Literal["production", "test", "backup", "network", "storage", "other"] | None = None
+    importance: Literal["critical", "high", "medium", "low"] | None = None
+    attributes: list[str] | None = None
+    outline_rows: int | None = Field(default=None, ge=1, le=50)
+    outline_cols: int | None = Field(default=None, ge=1, le=50)
     layout_mode: Literal["auto", "manual"] | None = None
     rack_rows: int | None = Field(default=None, ge=1, le=50)
     rack_columns: int | None = Field(default=None, ge=1, le=50)
@@ -274,6 +395,7 @@ class RoomUpdate(BaseModel):
     code_mode: Literal["auto", "custom"] | None = None
     code_prefix: str | None = Field(default=None, max_length=50)
     slot_codes: list[list[str]] | None = None
+    pillar_layout: dict | None = None
 
 
 class RoomResponse(BaseModel):
@@ -291,10 +413,22 @@ class RoomResponse(BaseModel):
     rack_rows: int = 4
     rack_columns: int = 6
     row_layout: list[int] = Field(default_factory=lambda: [6, 6, 6, 6])
+    outline_rows: int = 8
+    outline_cols: int = 10
     rack_capacity: int = 24
     code_mode: str = "auto"
     code_prefix: str | None = "A"
     slot_codes: list[list[str]] = Field(default_factory=list)
+    pillar_layout: dict | None = None
+    purpose: str | None = "production"
+    importance: str | None = "medium"
+    attributes: list[str] = Field(default_factory=list)
+    # 独立统计：已建机柜 / 在用机柜 / 空余机柜位 / 容量(Σ模板U位) / 总功耗(W)
+    rack_count: int = 0
+    used_count: int = 0
+    free_count: int = 0
+    total_u: int = 0
+    total_power: float = 0.0
     description: str | None
     created_at: datetime
     updated_at: datetime

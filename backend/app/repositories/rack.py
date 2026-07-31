@@ -227,6 +227,73 @@ class RackRepository(BaseRepository[Rack]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def room_stats_for_ids(
+        self, room_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, dict[str, float | int]]:
+        """Per-room: rack_count, total_u (= Σ 模板U位), used_count, total_power (W).
+
+        容量 total_u：每个已建机柜按其应用模板的 U 位数累计
+        （无模板时回退为机柜自身 total_u）。
+        """
+        from app.models.device import Device
+
+        if not room_ids:
+            return {}
+
+        rack_stmt = (
+            select(
+                Rack.room_id,
+                func.count(Rack.id),
+                func.coalesce(
+                    func.sum(func.coalesce(RackTemplate.total_u, Rack.total_u)),
+                    0,
+                ),
+            )
+            .select_from(Rack)
+            .outerjoin(RackTemplate, RackTemplate.id == Rack.rack_template_id)
+            .where(Rack.room_id.in_(room_ids), Rack.deleted_at.is_(None))
+            .group_by(Rack.room_id)
+        )
+        rack_rows = (await self.session.execute(rack_stmt)).all()
+        stats: dict[uuid.UUID, dict[str, float | int]] = {
+            rid: {"rack_count": 0, "total_u": 0, "used_count": 0, "total_power": 0.0}
+            for rid in room_ids
+        }
+        for room_id, count, total_u in rack_rows:
+            stats[room_id]["rack_count"] = int(count)
+            stats[room_id]["total_u"] = int(total_u or 0)
+
+        used_stmt = (
+            select(Rack.room_id, func.count(func.distinct(Rack.id)))
+            .select_from(Rack)
+            .join(Device, Device.rack_id == Rack.id)
+            .where(
+                Rack.room_id.in_(room_ids),
+                Rack.deleted_at.is_(None),
+                Device.deleted_at.is_(None),
+                Device.rack_id.is_not(None),
+            )
+            .group_by(Rack.room_id)
+        )
+        for room_id, count in (await self.session.execute(used_stmt)).all():
+            stats[room_id]["used_count"] = int(count)
+
+        power_stmt = (
+            select(Rack.room_id, func.coalesce(func.sum(Device.power), 0))
+            .select_from(Device)
+            .join(Rack, Rack.id == Device.rack_id)
+            .where(
+                Rack.room_id.in_(room_ids),
+                Rack.deleted_at.is_(None),
+                Device.deleted_at.is_(None),
+            )
+            .group_by(Rack.room_id)
+        )
+        for room_id, power in (await self.session.execute(power_stmt)).all():
+            stats[room_id]["total_power"] = float(power or 0)
+
+        return stats
+
 
 class RackPositionRepository(BaseRepository[RackPosition]):
     model = RackPosition
