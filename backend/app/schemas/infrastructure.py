@@ -1,0 +1,300 @@
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class DataCenterCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=100)
+    location: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+
+
+class DataCenterUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=50)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    location: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+
+
+class DataCenterResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    code: str
+    name: str
+    location: str | None
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BuildingCreate(BaseModel):
+    datacenter_id: str
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+
+
+class BuildingUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+
+
+class BuildingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    datacenter_id: str
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FloorCreate(BaseModel):
+    building_id: str
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+
+
+class FloorUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+
+
+class FloorResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    building_id: str
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+def normalize_row_layout(
+    *,
+    layout_mode: Literal["auto", "manual"] = "auto",
+    rack_rows: int | None = None,
+    rack_columns: int | None = None,
+    row_layout: list[int] | None = None,
+) -> list[int]:
+    if layout_mode == "manual":
+        if not row_layout:
+            raise ValueError("row_layout is required in manual mode")
+        layout = [int(n) for n in row_layout]
+    else:
+        rows = rack_rows or 4
+        cols = rack_columns or 6
+        layout = [cols] * rows
+    if not layout:
+        raise ValueError("row_layout must not be empty")
+    if any(n < 1 or n > 50 for n in layout):
+        raise ValueError("each row rack count must be between 1 and 50")
+    if len(layout) > 50:
+        raise ValueError("row count must be between 1 and 50")
+    return layout
+
+
+def letter_to_index(label: str) -> int:
+    text = label.strip().upper()
+    if not text or not all("A" <= ch <= "Z" for ch in text):
+        raise ValueError(f"invalid letter label: {label}")
+    value = 0
+    for ch in text:
+        value = value * 26 + (ord(ch) - ord("A") + 1)
+    return value
+
+
+def index_to_letter(index: int) -> str:
+    if index < 1:
+        raise ValueError("letter index must be >= 1")
+    chars: list[str] = []
+    n = index
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        chars.append(chr(ord("A") + rem))
+    return "".join(reversed(chars))
+
+
+def expand_row_prefixes(expression: str, row_count: int) -> list[str]:
+    """
+    Expand rack-row letter prefixes.
+
+    - Single letter/token ``A``: generate A, B, C... for ``row_count`` rows
+    - Range ``A-D`` / ``A-BZ``: Excel-style inclusive letter range; count must cover rows
+    """
+    if row_count < 1:
+        raise ValueError("row_count must be >= 1")
+    raw = (expression or "A").strip().upper().replace(" ", "")
+    if not raw:
+        raw = "A"
+
+    if "-" in raw:
+        start_raw, end_raw = raw.split("-", 1)
+        if not start_raw or not end_raw:
+            raise ValueError("prefix range must look like A-D or A-BZ")
+        start = letter_to_index(start_raw)
+        end = letter_to_index(end_raw)
+        if end < start:
+            raise ValueError("prefix range end must be >= start")
+        labels = [index_to_letter(i) for i in range(start, end + 1)]
+        if len(labels) < row_count:
+            raise ValueError(
+                f"prefix range {raw} only has {len(labels)} letters, but room has {row_count} rows"
+            )
+        return labels[:row_count]
+
+    # Single starting label: expand consecutive letters for each row
+    start = letter_to_index(raw)
+    return [index_to_letter(start + i) for i in range(row_count)]
+
+
+def generate_slot_codes(
+    row_layout: list[int],
+    *,
+    code_mode: Literal["auto", "custom"] = "auto",
+    code_prefix: str | None = None,
+    slot_codes: list[list[str]] | None = None,
+) -> list[list[str]]:
+    if code_mode == "custom" and slot_codes is not None:
+        if len(slot_codes) != len(row_layout):
+            raise ValueError("slot_codes rows must match row_layout")
+        result: list[list[str]] = []
+        seen: set[str] = set()
+        for row_idx, cols in enumerate(row_layout):
+            row = slot_codes[row_idx] if row_idx < len(slot_codes) else []
+            if not isinstance(row, list) or len(row) != cols:
+                raise ValueError(f"row {row_idx + 1} must have {cols} rack codes")
+            codes: list[str] = []
+            for col_idx, raw in enumerate(row):
+                code = str(raw).strip()
+                if not code:
+                    raise ValueError(f"rack code at row {row_idx + 1} col {col_idx + 1} is empty")
+                if len(code) > 50:
+                    raise ValueError(f"rack code too long: {code}")
+                key = code.lower()
+                if key in seen:
+                    raise ValueError(f"duplicate rack code: {code}")
+                seen.add(key)
+                codes.append(code)
+            result.append(codes)
+        return result
+
+    row_prefixes = expand_row_prefixes(code_prefix or "A", len(row_layout))
+    generated: list[list[str]] = []
+    seen_auto: set[str] = set()
+    for row_idx, cols in enumerate(row_layout):
+        prefix = row_prefixes[row_idx]
+        width = max(2, len(str(cols)))
+        row_codes: list[str] = []
+        for col in range(1, cols + 1):
+            code = f"{prefix}{col:0{width}d}"
+            if code.lower() in seen_auto:
+                raise ValueError(f"duplicate rack code: {code}")
+            seen_auto.add(code.lower())
+            row_codes.append(code)
+        generated.append(row_codes)
+    return generated
+
+
+class RoomCreate(BaseModel):
+    floor_id: str
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+    layout_mode: Literal["auto", "manual"] = "auto"
+    rack_rows: int = Field(default=4, ge=1, le=50, description="机柜排数（自动模式）")
+    rack_columns: int = Field(default=6, ge=1, le=50, description="每排机柜数（自动模式）")
+    row_layout: list[int] | None = Field(default=None, description="每排机柜数列表（手动模式）")
+    code_mode: Literal["auto", "custom"] = "auto"
+    code_prefix: str | None = Field(default="A", max_length=50)
+    slot_codes: list[list[str]] | None = None
+
+    @model_validator(mode="after")
+    def validate_layout(self) -> "RoomCreate":
+        self.row_layout = normalize_row_layout(
+            layout_mode=self.layout_mode,
+            rack_rows=self.rack_rows,
+            rack_columns=self.rack_columns,
+            row_layout=self.row_layout,
+        )
+        self.rack_rows = len(self.row_layout)
+        self.rack_columns = max(self.row_layout)
+        self.slot_codes = generate_slot_codes(
+            self.row_layout,
+            code_mode=self.code_mode,
+            code_prefix=self.code_prefix,
+            slot_codes=self.slot_codes,
+        )
+        return self
+
+
+class RoomQuickCreate(BaseModel):
+    datacenter_id: str = Field(description="关联数据中心 ID")
+    building_no: str = Field(min_length=1, max_length=100, description="机房楼号")
+    room_no: str = Field(min_length=1, max_length=100, description="机房编号")
+    description: str | None = None
+    layout_mode: Literal["auto", "manual"] = "auto"
+    rack_rows: int = Field(default=4, ge=1, le=50, description="机柜排数（自动模式）")
+    rack_columns: int = Field(default=6, ge=1, le=50, description="每排机柜数（自动模式）")
+    row_layout: list[int] | None = Field(default=None, description="每排机柜数列表（手动模式）")
+    code_mode: Literal["auto", "custom"] = "auto"
+    code_prefix: str | None = Field(default="A", max_length=50)
+    slot_codes: list[list[str]] | None = None
+
+    @model_validator(mode="after")
+    def validate_layout(self) -> "RoomQuickCreate":
+        self.row_layout = normalize_row_layout(
+            layout_mode=self.layout_mode,
+            rack_rows=self.rack_rows,
+            rack_columns=self.rack_columns,
+            row_layout=self.row_layout,
+        )
+        self.rack_rows = len(self.row_layout)
+        self.rack_columns = max(self.row_layout)
+        self.slot_codes = generate_slot_codes(
+            self.row_layout,
+            code_mode=self.code_mode,
+            code_prefix=self.code_prefix,
+            slot_codes=self.slot_codes,
+        )
+        return self
+
+
+class RoomUpdate(BaseModel):
+    room_no: str | None = Field(default=None, min_length=1, max_length=100)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+    layout_mode: Literal["auto", "manual"] | None = None
+    rack_rows: int | None = Field(default=None, ge=1, le=50)
+    rack_columns: int | None = Field(default=None, ge=1, le=50)
+    row_layout: list[int] | None = None
+    code_mode: Literal["auto", "custom"] | None = None
+    code_prefix: str | None = Field(default=None, max_length=50)
+    slot_codes: list[list[str]] | None = None
+
+
+class RoomResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    floor_id: str
+    name: str
+    datacenter_id: str | None = None
+    datacenter_name: str | None = None
+    location: str | None = None
+    building_no: str | None = None
+    room_no: str | None = None
+    layout_mode: str = "auto"
+    rack_rows: int = 4
+    rack_columns: int = 6
+    row_layout: list[int] = Field(default_factory=lambda: [6, 6, 6, 6])
+    rack_capacity: int = 24
+    code_mode: str = "auto"
+    code_prefix: str | None = "A"
+    slot_codes: list[list[str]] = Field(default_factory=list)
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
