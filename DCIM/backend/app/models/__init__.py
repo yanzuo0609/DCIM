@@ -11,7 +11,7 @@ from app.models.device import (
     DeviceType,
     Manufacturer,
 )
-from app.models.ip_address import IpAddress
+from app.models.ip_address import IpAddress, IpSegment
 from app.models.infrastructure import Building, DataCenter, Floor, Room
 from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology
 from app.models.rack import Rack, RackPosition, RackTemplate
@@ -42,6 +42,7 @@ __all__ = [
     "DeviceContract",
     "Device",
     "IpAddress",
+    "IpSegment",
     "NetworkProject",
     "NetworkTopology",
     "NetworkNode",

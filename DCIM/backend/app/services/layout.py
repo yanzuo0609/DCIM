@@ -11,6 +11,7 @@ from app.repositories.device import DeviceModelRepository, DeviceRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.ip_address import IpAddressRepository
 from app.repositories.rack import RackPositionRepository, RackRepository
+from app.services.ip_address import IpAddressService
 from app.schemas.device import (
     BatchMountRequest,
     BatchMountResult,
@@ -43,6 +44,7 @@ class LayoutService:
         self.model_repo = DeviceModelRepository(session)
         self.room_repo = RoomRepository(session)
         self.ip_repo = IpAddressRepository(session)
+        self.ip_service = IpAddressService(session)
 
     async def _build_occupied_map(self, rack_id: uuid.UUID) -> dict[int, uuid.UUID | None]:
         positions = await self.position_repo.list_by_rack(rack_id)
@@ -169,6 +171,8 @@ class LayoutService:
         device.status = DeviceStatus.STOCK.value
         device.updated_by = user_id
         device.version += 1
+        # 标准下架：释放该设备已分配的 IP，恢复为空闲
+        await self.ip_service.release_by_device(device_id, user_id=user_id)
         await self.session.flush()
 
         return ValidateLayoutResponse(valid=True, message="Device unmounted successfully")

@@ -12,6 +12,7 @@ export interface Device {
   manufacturer_name: string | null
   device_type_id: string | null
   device_type_name: string | null
+  device_type_code?: string | null
   param_profile_id: string | null
   system_profile_id: string | null
   bmc_profile_id: string | null
@@ -31,6 +32,12 @@ export interface Device {
   power: number | null
   status: string
   description: string | null
+  /** 来自设备定义/型号的面板布局（按设备名称匹配） */
+  port_layout?: Record<string, unknown> | null
+  network_kind?: string | null
+  panel_apply_device_name?: string | null
+  /** 是否已绑定网络设备定义面板 */
+  network_panel_bound?: boolean
   created_at: string
   updated_at: string
 }
@@ -51,6 +58,9 @@ export interface DeviceModel {
   height_u: number
   power: number | null
   description?: string | null
+  port_layout?: Record<string, unknown> | null
+  apply_device_name?: string | null
+  network_kind?: string | null
 }
 
 export interface DeviceType {
@@ -286,9 +296,67 @@ export async function updateDeviceModel(
     height_u?: number
     power?: number | null
     description?: string | null
+    port_layout?: Record<string, unknown> | null
+    apply_device_name?: string | null
+    network_kind?: string | null
   },
 ) {
   const response = await api.put<ApiResponse<DeviceModel>>(`/device-models/${id}`, payload)
+  return unwrap(response)
+}
+
+export async function applyDeviceModelPanel(
+  modelId: string,
+  payload: {
+    port_layout: Record<string, unknown>
+    apply_device_name: string
+    network_kind?: string | null
+    mode?: 'apply' | 'modify'
+    device_ids?: string[]
+  },
+) {
+  const response = await api.post<
+    ApiResponse<{
+      device_model_id: string
+      apply_device_name: string
+      mode: string
+      matched_device_count: number
+      matched_device_ids: string[]
+      applied_count: number
+      modified_count: number
+      skipped_count: number
+      skipped_device_ids: string[]
+      message?: string | null
+    }>
+  >(`/device-models/${modelId}/apply-panel`, payload)
+  return unwrap(response)
+}
+
+export interface DevicePanelCandidate {
+  id: string
+  name: string | null
+  hostname: string
+  serial_number: string
+  device_model_id: string
+  device_model_name: string | null
+  network_panel_bound: boolean
+  rack_code: string | null
+  room_name: string | null
+  u_position: number | null
+  status: string
+}
+
+export async function listPanelCandidates(modelId: string, applyDeviceName: string) {
+  const response = await api.get<
+    ApiResponse<{
+      apply_device_name: string
+      items: DevicePanelCandidate[]
+      unbound_count: number
+      bound_count: number
+    }>
+  >(`/device-models/${modelId}/panel-candidates`, {
+    params: { apply_device_name: applyDeviceName },
+  })
   return unwrap(response)
 }
 

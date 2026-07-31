@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   applyTemplateToRoom,
@@ -8,10 +8,22 @@ import {
   listRackTemplates,
   updateRackTemplate,
   type RackTemplate,
+  type RackVisualStyle,
 } from '@/api/rack'
 import { listRooms, type Room } from '@/api/room'
 import { useAuthStore } from '@/stores/auth'
 import RackCabinet from '@/components/RackCabinet.vue'
+
+const VISUAL_STYLE_OPTIONS: Array<{
+  value: RackVisualStyle
+  label: string
+  hint: string
+}> = [
+  { value: 'classic', label: '经典立面', hint: '原深色机柜立面（默认）' },
+  { value: 'schematic', label: '线框立面', hint: '双侧 U 位刻度，浅色信息列（参考图 2）' },
+  { value: 'realistic', label: '正面面板', hint: '设备正面面板示意（参考图 1）' },
+  { value: 'grid', label: '表格占位', hint: '黄格占用、白格空闲（参考图 3）' },
+]
 
 const auth = useAuthStore()
 const templates = ref<RackTemplate[]>([])
@@ -28,10 +40,32 @@ const applyForm = reactive({
   template_id: '',
   room_ids: [] as string[],
   fill_empty_slots: true,
+  visual_style: 'classic' as RackVisualStyle,
 })
 
 const applyTemplate = computed(
   () => templates.value.find((t) => t.id === applyForm.template_id) || null,
+)
+
+function normalizeVisualStyle(value?: string | null): RackVisualStyle {
+  if (
+    value === 'realistic' ||
+    value === 'grid' ||
+    value === 'schematic' ||
+    value === 'classic'
+  ) {
+    return value
+  }
+  return 'classic'
+}
+
+watch(
+  () => applyForm.template_id,
+  (id) => {
+    if (!id) return
+    const tpl = templates.value.find((t) => t.id === id)
+    if (tpl) applyForm.visual_style = normalizeVisualStyle(tpl.visual_style)
+  },
 )
 
 const selectedApplyRooms = computed(() =>
@@ -46,10 +80,83 @@ const templateForm = reactive({
   total_u: 42,
   width: 600,
   depth: 1000,
+  visual_style: 'classic' as RackVisualStyle,
   description: '',
 })
 
-const templatePreviewCode = computed(() => templateForm.code || templateForm.name || '模板预览')
+const templatePreviewCode = computed(() => templateForm.code || templateForm.name || '预览')
+
+/** 预览用示意占用，便于分辨三种样式差异 */
+const templatePreviewSlots = computed(() => {
+  const total = Math.max(1, templateForm.total_u || 42)
+  const slots = []
+  for (let u = total; u >= 1; u -= 1) {
+    const isTop = u === total || u === total - 1
+    const isMid = u === Math.max(1, Math.floor(total * 0.55))
+    if (isTop && u === total) {
+      slots.push({
+        u_position: u,
+        occupied: true,
+        is_span_start: true,
+        span_height: 2,
+        device: {
+          device_id: 'preview-1',
+          hostname: '设备10',
+          height_u: 2,
+          start_u: total - 1,
+          power: 200,
+          ip_summary: '10.0.0.10',
+          model_name: 'Demo',
+        },
+      })
+    } else if (isTop && u === total - 1 && total > 1) {
+      slots.push({
+        u_position: u,
+        occupied: true,
+        is_span_start: false,
+        span_height: 2,
+        device: {
+          device_id: 'preview-1',
+          hostname: '设备10',
+          height_u: 2,
+          start_u: total - 1,
+          power: 200,
+          ip_summary: '10.0.0.10',
+          model_name: 'Demo',
+        },
+      })
+    } else if (isMid) {
+      slots.push({
+        u_position: u,
+        occupied: true,
+        is_span_start: true,
+        span_height: 1,
+        device: {
+          device_id: 'preview-2',
+          hostname: '交换机',
+          height_u: 1,
+          start_u: u,
+          power: 80,
+          ip_summary: null,
+          model_name: 'SW',
+        },
+      })
+    } else {
+      slots.push({
+        u_position: u,
+        occupied: false,
+        is_span_start: false,
+        span_height: 1,
+        device: null,
+      })
+    }
+  }
+  return slots
+})
+
+function visualStyleLabel(value?: string | null) {
+  return VISUAL_STYLE_OPTIONS.find((o) => o.value === value)?.label || value || '经典立面'
+}
 
 function isTemplateApplied(row: RackTemplate) {
   return (row.applied_rack_count || 0) > 0 || (row.applied_rooms?.length || 0) > 0
@@ -80,6 +187,8 @@ function openApply(templateId?: string) {
   applyForm.template_id = templateId || templates.value[0]?.id || ''
   applyForm.room_ids = []
   applyForm.fill_empty_slots = true
+  const tpl = templates.value.find((t) => t.id === applyForm.template_id)
+  applyForm.visual_style = normalizeVisualStyle(tpl?.visual_style)
   applyLockTemplate.value = !!templateId
   applyVisible.value = true
 }
@@ -96,7 +205,7 @@ async function submitApply() {
   const tpl = applyTemplate.value
   const roomLabels = selectedApplyRooms.value.map((r) => roomLabel(r)).join('、')
   await ElMessageBox.confirm(
-    `将模板「${tpl?.name}」应用到 ${applyForm.room_ids.length} 个机房？\n${roomLabels}\n` +
+    `将模板「${tpl?.name}」以「${visualStyleLabel(applyForm.visual_style)}」样式应用到 ${applyForm.room_ids.length} 个机房？\n${roomLabels}\n` +
       (applyForm.fill_empty_slots
         ? '将更新已有机柜，并为空闲机柜位创建机柜。'
         : '仅更新各机房已有机柜规格。'),
@@ -118,6 +227,7 @@ async function submitApply() {
           applyForm.template_id,
           roomId,
           applyForm.fill_empty_slots,
+          applyForm.visual_style,
         )
         updated += result.updated
         created += result.created
@@ -159,6 +269,7 @@ function openCreateTemplate() {
   templateForm.total_u = 42
   templateForm.width = 600
   templateForm.depth = 1000
+  templateForm.visual_style = 'classic'
   templateForm.description = ''
   templateDialogVisible.value = true
 }
@@ -170,6 +281,13 @@ function openEditTemplate(row: RackTemplate) {
   templateForm.total_u = row.total_u
   templateForm.width = row.width
   templateForm.depth = row.depth
+  templateForm.visual_style =
+    row.visual_style === 'realistic' ||
+    row.visual_style === 'grid' ||
+    row.visual_style === 'schematic' ||
+    row.visual_style === 'classic'
+      ? (row.visual_style as RackVisualStyle)
+      : 'classic'
   templateForm.description = row.description || ''
   templateDialogVisible.value = true
 }
@@ -190,6 +308,7 @@ async function submitTemplate() {
         total_u: templateForm.total_u,
         width: templateForm.width,
         depth: templateForm.depth,
+        visual_style: templateForm.visual_style,
         description: templateForm.description || null,
       })
       ElMessage.success('模板已更新')
@@ -200,6 +319,7 @@ async function submitTemplate() {
         total_u: templateForm.total_u,
         width: templateForm.width,
         depth: templateForm.depth,
+        visual_style: templateForm.visual_style,
         description: templateForm.description || null,
       })
       ElMessage.success('模板已创建')
@@ -244,6 +364,9 @@ onMounted(() => {
         <el-table-column prop="code" label="编码" width="140" />
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column prop="total_u" label="U 位" width="80" />
+        <el-table-column label="视觉样式" width="110">
+          <template #default="{ row }">{{ visualStyleLabel(row.visual_style) }}</template>
+        </el-table-column>
         <el-table-column label="尺寸" width="140">
           <template #default="{ row }">{{ row.width }}×{{ row.depth }} mm</template>
         </el-table-column>
@@ -288,14 +411,36 @@ onMounted(() => {
             <el-form-item label="深度 mm">
               <el-input-number v-model="templateForm.depth" :min="600" :max="1500" style="width: 100%" />
             </el-form-item>
+            <el-form-item label="视觉样式" required>
+              <el-radio-group v-model="templateForm.visual_style" class="style-radios">
+                <el-radio
+                  v-for="item in VISUAL_STYLE_OPTIONS"
+                  :key="item.value"
+                  :value="item.value"
+                  border
+                >
+                  {{ item.label }}
+                </el-radio>
+              </el-radio-group>
+              <div class="field-hint">
+                {{ VISUAL_STYLE_OPTIONS.find((o) => o.value === templateForm.visual_style)?.hint }}
+              </div>
+            </el-form-item>
             <el-form-item label="描述">
               <el-input v-model="templateForm.description" type="textarea" :rows="2" />
             </el-form-item>
           </el-form>
         </div>
         <div class="create-preview">
-          <div class="preview-title">样式预览</div>
-          <RackCabinet :code="templatePreviewCode" :total-u="templateForm.total_u" :total-power="0" compact />
+          <div class="preview-title">样式预览 · {{ visualStyleLabel(templateForm.visual_style) }}</div>
+          <RackCabinet
+            :code="templatePreviewCode"
+            :total-u="templateForm.total_u"
+            :slots="templatePreviewSlots"
+            :total-power="280"
+            :visual-style="templateForm.visual_style"
+            compact
+          />
         </div>
       </div>
       <template #footer>
@@ -304,7 +449,7 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="applyVisible" title="应用模板到机房" width="560px" destroy-on-close>
+    <el-dialog v-model="applyVisible" title="应用模板到机房" width="620px" destroy-on-close>
       <el-form label-width="110px">
         <el-form-item label="样式模板" required>
           <el-select
@@ -315,10 +460,28 @@ onMounted(() => {
             <el-option
               v-for="t in templates"
               :key="t.id"
-              :label="`${t.name}（${t.total_u}U）`"
+              :label="`${t.name}（${t.total_u}U · ${visualStyleLabel(t.visual_style)}）`"
               :value="t.id"
             />
           </el-select>
+        </el-form-item>
+        <el-form-item label="视觉样式" required>
+          <el-radio-group v-model="applyForm.visual_style" class="style-radios">
+            <el-radio
+              v-for="item in VISUAL_STYLE_OPTIONS"
+              :key="item.value"
+              :value="item.value"
+              border
+            >
+              {{ item.label }}
+            </el-radio>
+          </el-radio-group>
+          <div class="field-hint">
+            {{ VISUAL_STYLE_OPTIONS.find((o) => o.value === applyForm.visual_style)?.hint }}
+            <template v-if="applyTemplate && normalizeVisualStyle(applyTemplate.visual_style) !== applyForm.visual_style">
+              （已覆盖模板默认「{{ visualStyleLabel(applyTemplate.visual_style) }}」）
+            </template>
+          </div>
         </el-form-item>
         <el-form-item label="目标机房" required>
           <el-select
@@ -405,5 +568,15 @@ onMounted(() => {
   .create-layout {
     grid-template-columns: 1fr;
   }
+}
+
+.style-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.style-radios :deep(.el-radio) {
+  margin-right: 0;
 }
 </style>

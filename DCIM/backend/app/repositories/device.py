@@ -26,6 +26,12 @@ class ManufacturerRepository(BaseRepository[Manufacturer]):
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    async def get_by_name(self, name: str) -> Manufacturer | None:
+        stmt = select(Manufacturer).where(
+            Manufacturer.name == name, Manufacturer.deleted_at.is_(None)
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
 
 class DeviceCategoryRepository(BaseRepository[DeviceCategory]):
     model = DeviceCategory
@@ -92,6 +98,47 @@ class DeviceModelRepository(BaseRepository[DeviceModel]):
             DeviceModel.code == code, DeviceModel.deleted_at.is_(None)
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def find_by_name(
+        self, name: str, manufacturer_id: uuid.UUID | None = None
+    ) -> DeviceModel | None:
+        filters = [DeviceModel.name == name, DeviceModel.deleted_at.is_(None)]
+        if manufacturer_id:
+            filters.append(DeviceModel.manufacturer_id == manufacturer_id)
+        stmt = (
+            select(DeviceModel)
+            .options(selectinload(DeviceModel.manufacturer))
+            .where(*filters)
+            .order_by(DeviceModel.created_at.desc())
+            .limit(1)
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def find_by_name_ci(self, name: str) -> DeviceModel | None:
+        from sqlalchemy import func
+
+        key = name.strip().lower()
+        if not key:
+            return None
+        stmt = (
+            select(DeviceModel)
+            .options(selectinload(DeviceModel.manufacturer))
+            .where(
+                func.lower(DeviceModel.name) == key,
+                DeviceModel.deleted_at.is_(None),
+            )
+            .order_by(DeviceModel.created_at.desc())
+            .limit(1)
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def list_contract_synced(self) -> list[DeviceModel]:
+        """列出由合同同步创建的设备型号。"""
+        stmt = select(DeviceModel).where(
+            DeviceModel.deleted_at.is_(None),
+            DeviceModel.description == "来自合同信息同步",
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
 
     async def get_by_id_with_mfg(self, model_id: uuid.UUID) -> DeviceModel | None:
         stmt = (
@@ -249,3 +296,65 @@ class DeviceRepository(BaseRepository[Device]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_by_exact_name(self, name: str) -> list[Device]:
+        """Match inventory devices by exact 设备名称 (falls back to hostname)."""
+        name = (name or "").strip()
+        if not name:
+            return []
+        from sqlalchemy import or_
+
+        stmt = (
+            select(Device)
+            .options(*self._with_list_relations())
+            .where(
+                Device.deleted_at.is_(None),
+                or_(Device.name == name, Device.hostname == name),
+            )
+            .order_by(Device.created_at.desc())
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def list_for_panel_apply(
+        self,
+        *,
+        apply_device_name: str | None = None,
+        model_id: uuid.UUID | None = None,
+    ) -> list[Device]:
+        """候选设备：按合同「厂商型号采购汇总」中的设备名称匹配台账。
+
+        有设备名称时：名称/主机名等值或包含匹配（不再因同型号而列出无关设备）。
+        仅有型号、无名称时：回退为同型号全部台账。
+        """
+        from sqlalchemy import or_
+
+        name = (apply_device_name or "").strip()
+        if not name and not model_id:
+            return []
+
+        if name:
+            name_match = or_(
+                Device.name == name,
+                Device.hostname == name,
+                Device.name.ilike(f"%{name}%"),
+                Device.hostname.ilike(f"%{name}%"),
+            )
+            where_clause = name_match
+        else:
+            where_clause = Device.device_model_id == model_id
+
+        stmt = (
+            select(Device)
+            .options(*self._with_list_relations())
+            .where(Device.deleted_at.is_(None), where_clause)
+            .order_by(Device.created_at.desc())
+        )
+        # 去重保序
+        seen: set[uuid.UUID] = set()
+        result: list[Device] = []
+        for d in (await self.session.execute(stmt)).scalars().all():
+            if d.id in seen:
+                continue
+            seen.add(d.id)
+            result.append(d)
+        return result

@@ -251,6 +251,7 @@ const isSecurity = computed(() => props.node.kind === 'security')
 const isCoreSwitch = computed(() => isSwitch.value && switchForm.subtype === 'core')
 const isGigabitSwitch = computed(() => isSwitch.value && switchForm.subtype === 'gigabit')
 const isTenGigabitSwitch = computed(() => isSwitch.value && switchForm.subtype === 'ten_gigabit')
+const isAggregationSwitch = computed(() => isSwitch.value && switchForm.subtype === 'aggregation')
 
 const slotBands = computed(() =>
   isSwitch.value || isServer.value || isSecurity.value ? [] : slotBandRects(layout.value),
@@ -1491,8 +1492,8 @@ refreshSecurityPanel()
             </el-radio-group>
           </template>
 
-          <template v-else-if="isTenGigabitSwitch">
-            <label>光口数量</label>
+          <template v-else-if="isTenGigabitSwitch || isAggregationSwitch">
+            <label>{{ isAggregationSwitch ? '下联光口' : '光口数量' }}</label>
             <el-input-number
               v-model="switchForm.main_port_count"
               :min="1"
@@ -1500,7 +1501,7 @@ refreshSecurityPanel()
               size="small"
               @change="onSwitchFormChange"
             />
-            <label>40/100G</label>
+            <label>40/100G上联</label>
             <el-input-number
               v-model="switchForm.uplink_port_count"
               :min="0"
@@ -1509,7 +1510,9 @@ refreshSecurityPanel()
               size="small"
               @change="onTenGigabitUplinkChange"
             />
-            <span class="field-hint">≤8，须为偶数，两排向后扩展</span>
+            <span class="field-hint">
+              {{ isAggregationSwitch ? '汇聚：10G下联接入，40/100G上联核心' : '≤8，须为偶数，两排向后扩展' }}
+            </span>
             <label>上联位置</label>
             <el-radio-group v-model="switchForm.uplink_position" size="small" @change="onSwitchFormChange">
               <el-radio-button v-for="(label, key) in UPLINK_POSITION_LABELS" :key="key" :value="key">

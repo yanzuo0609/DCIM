@@ -22,6 +22,8 @@ class RackTemplate(BaseModel):
     total_u: Mapped[int] = mapped_column(Integer, default=42, nullable=False)
     width: Mapped[int] = mapped_column(Integer, default=600, nullable=False)
     depth: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    # classic | schematic | realistic | grid — 机柜立面视觉样式（classic 为原深色默认）
+    visual_style: Mapped[str] = mapped_column(String(30), default="classic", nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     racks: Mapped[list["Rack"]] = relationship(back_populates="template", lazy="select")
@@ -47,8 +49,12 @@ class Rack(BaseModel):
     total_u: Mapped[int] = mapped_column(Integer, default=42, nullable=False)
     width: Mapped[int] = mapped_column(Integer, default=600, nullable=False)
     depth: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    visual_style: Mapped[str] = mapped_column(String(30), default="classic", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=RackStatus.ACTIVE.value, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 机柜用途标签与展示色（布局图着色，提示应用部署）
+    app_usage: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    app_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     room: Mapped["Room"] = relationship(back_populates="racks")
     template: Mapped[RackTemplate | None] = relationship(back_populates="racks")

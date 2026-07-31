@@ -470,6 +470,9 @@ class DeviceModelUpdate(BaseModel):
     height_u: int | None = Field(default=None, ge=1, le=10)
     power: Decimal | None = None
     description: str | None = None
+    port_layout: dict | None = None
+    apply_device_name: str | None = Field(default=None, max_length=100)
+    network_kind: str | None = Field(default=None, max_length=20)
 
 
 class DeviceModelResponse(BaseModel):
@@ -486,7 +489,58 @@ class DeviceModelResponse(BaseModel):
     power: Decimal | None
     depth: int | None
     description: str | None
+    port_layout: dict | None = None
+    apply_device_name: str | None = None
+    network_kind: str | None = None
     created_at: datetime
+
+
+class DeviceModelPanelApply(BaseModel):
+    """将网络设备定义面板应用到设备清单。
+
+    mode=apply：仅可绑定尚未应用面板的设备（可指定 device_ids，空则全部未绑定）。
+    mode=modify：仅可更新已应用面板的设备对应布局（可指定 device_ids，空则全部已绑定）。
+    """
+
+    port_layout: dict
+    apply_device_name: str = Field(min_length=1, max_length=100)
+    network_kind: str | None = Field(default=None, max_length=20)
+    mode: Literal["apply", "modify"] = "apply"
+    device_ids: list[str] = Field(default_factory=list)
+
+
+class DeviceModelPanelApplyResult(BaseModel):
+    device_model_id: str
+    apply_device_name: str
+    mode: str
+    matched_device_count: int
+    matched_device_ids: list[str] = Field(default_factory=list)
+    applied_count: int = 0
+    modified_count: int = 0
+    skipped_count: int = 0
+    skipped_device_ids: list[str] = Field(default_factory=list)
+    message: str | None = None
+
+
+class DevicePanelCandidate(BaseModel):
+    id: str
+    name: str | None = None
+    hostname: str
+    serial_number: str
+    device_model_id: str
+    device_model_name: str | None = None
+    network_panel_bound: bool = False
+    rack_code: str | None = None
+    room_name: str | None = None
+    u_position: int | None = None
+    status: str
+
+
+class DevicePanelCandidateList(BaseModel):
+    apply_device_name: str
+    items: list[DevicePanelCandidate]
+    unbound_count: int = 0
+    bound_count: int = 0
 
 
 class DeviceCreate(BaseModel):
@@ -535,6 +589,7 @@ class DeviceResponse(BaseModel):
     manufacturer_name: str | None = None
     device_type_id: str | None = None
     device_type_name: str | None = None
+    device_type_code: str | None = None
     param_profile_id: str | None = None
     system_profile_id: str | None = None
     bmc_profile_id: str | None = None
@@ -554,6 +609,10 @@ class DeviceResponse(BaseModel):
     power: Decimal | None
     status: str
     description: str | None
+    port_layout: dict | None = None
+    network_kind: str | None = None
+    panel_apply_device_name: str | None = None
+    network_panel_bound: bool = False
     created_at: datetime
     updated_at: datetime
 

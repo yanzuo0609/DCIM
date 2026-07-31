@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 BindType = Literal["none", "device", "rack", "rack_range"]
-IpStatusLiteral = Literal["free", "allocated", "disabled"]
+IpStatusLiteral = Literal["free", "allocated", "disabled", "reserved"]
 
 
 class IpAddressCreate(BaseModel):
@@ -31,7 +31,9 @@ class IpAddressUpdate(BaseModel):
     dns_secondary: str | None = Field(default=None, max_length=64)
     label: str | None = Field(default=None, max_length=100)
     description: str | None = None
-    status: IpStatusLiteral | None = Field(default=None, description="手动设置：disabled 禁用；free 启用后按绑定回填")
+    status: IpStatusLiteral | None = Field(
+        default=None, description="手动设置：disabled/reserved/free；free 启用后按绑定回填"
+    )
 
 
 class IpAddressResponse(BaseModel):
@@ -48,6 +50,7 @@ class IpAddressResponse(BaseModel):
     label: str | None
     description: str | None
     status: str = "free"
+    segment_id: str | None = None
     bind_type: str
     device_id: str | None
     device_name: str | None = None
@@ -73,8 +76,9 @@ class IpStatusBatchResult(BaseModel):
 
 
 class IpAddressBatchCreateRequest(BaseModel):
-    """按系统 IP 段批量生成记录，可选同步生成 BMC IP 段。"""
+    """按系统 IP 段批量生成记录，同时创建/归属到一个地址段。"""
 
+    name: str | None = Field(default=None, max_length=100, description="地址段名称，默认用起止 IP")
     start_system_ip: str
     end_system_ip: str
     start_bmc_ip: str | None = None
@@ -82,6 +86,7 @@ class IpAddressBatchCreateRequest(BaseModel):
     gateway: str | None = Field(default=None, max_length=64)
     dns: str | None = Field(default=None, max_length=64)
     dns_secondary: str | None = Field(default=None, max_length=64)
+    application_type: str | None = Field(default=None, max_length=50, description="应用类型")
     label_prefix: str | None = None
     description: str | None = None
 
@@ -90,6 +95,77 @@ class IpAddressBatchCreateResult(BaseModel):
     created: int = 0
     skipped: int = 0
     errors: list[str] = Field(default_factory=list)
+    segment_id: str | None = None
+
+
+class IpSegmentCreate(BaseModel):
+    """按参考台账新建地址段：网络地址 + 掩码位数，自动展开主机地址。"""
+
+    application: str | None = Field(default=None, max_length=100, description="应用")
+    network: str = Field(description="IP地址段，如 172.17.0.0")
+    prefix_len: int = Field(default=24, ge=8, le=30, description="掩码位数，如 24")
+    gateway: str | None = Field(default=None, max_length=64)
+    reserved_count: int = Field(default=0, ge=0, description="保留个数")
+    address_purpose: str | None = Field(default=None, max_length=50, description="地址用途")
+    network_type: str | None = Field(default=None, max_length=50, description="网络类型")
+    location: str | None = Field(default=None, max_length=100, description="所属机房位置")
+    remarks: str | None = Field(default=None, description="备注")
+    start_bmc_ip: str | None = None
+    dns: str | None = Field(default=None, max_length=64)
+    dns_secondary: str | None = Field(default=None, max_length=64)
+
+
+class IpSegmentUpdate(BaseModel):
+    application: str | None = Field(default=None, max_length=100)
+    gateway: str | None = Field(default=None, max_length=64)
+    address_purpose: str | None = Field(default=None, max_length=50)
+    network_type: str | None = Field(default=None, max_length=50)
+    location: str | None = Field(default=None, max_length=100)
+    remarks: str | None = None
+    dns: str | None = Field(default=None, max_length=64)
+    dns_secondary: str | None = Field(default=None, max_length=64)
+    # 兼容旧编辑表单
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    netmask: str | None = Field(default=None, max_length=64)
+    application_type: str | None = Field(default=None, max_length=50)
+    label: str | None = Field(default=None, max_length=100)
+    description: str | None = None
+
+
+class IpSegmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    application: str | None = None
+    network: str
+    prefix_len: int = 24
+    gateway: str | None = None
+    address_purpose: str | None = None
+    network_type: str | None = None
+    location: str | None = None
+    remarks: str | None = None
+    # 统计
+    total_count: int = 0
+    free_count: int = 0
+    allocated_count: int = 0
+    reserved_count: int = 0
+    disabled_count: int = 0
+    # 兼容
+    name: str
+    start_ip: str
+    end_ip: str
+    netmask: str | None = None
+    dns: str | None = None
+    dns_secondary: str | None = None
+    application_type: str | None = None
+    label: str | None = None
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IpSegmentDetail(IpSegmentResponse):
+    addresses: list[IpAddressResponse] = Field(default_factory=list)
 
 
 class IpBindRequest(BaseModel):

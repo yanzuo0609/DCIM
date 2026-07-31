@@ -113,6 +113,10 @@ class DeviceModel(BaseModel):
     power: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 网络设备定义同步的面板布局；按 apply_device_name 一对多应用到设备清单
+    port_layout: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    apply_device_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    network_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     manufacturer: Mapped[Manufacturer] = relationship(back_populates="models")
     category: Mapped[DeviceCategory | None] = relationship(back_populates="models")
@@ -192,6 +196,8 @@ class Device(BaseModel):
     power: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default=DeviceStatus.STOCK.value, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 是否已绑定网络设备定义面板；已绑定仅允许修改面板，不可重复应用
+    network_panel_bound: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     model: Mapped[DeviceModel] = relationship(back_populates="devices")
     device_type: Mapped[DeviceType | None] = relationship(back_populates="devices")

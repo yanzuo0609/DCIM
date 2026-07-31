@@ -2,11 +2,17 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import Response
 
-from app.core.dependencies import get_network_design_service, require_permissions
+from app.core.dependencies import (
+    get_network_design_service,
+    get_network_interface_export_service,
+    require_permissions,
+)
 from app.models.user import User
 from app.schemas.common import ApiResponse, PaginatedData, PaginatedResponse, PaginationParams
+from app.schemas.export import ImportResult
 from app.schemas.network import (
     CanvasSaveRequest,
     NetworkTopologyCreate,
@@ -15,6 +21,7 @@ from app.schemas.network import (
     NetworkTopologyUpdate,
 )
 from app.services.network import NetworkDesignService
+from app.services.network_interface_export import NetworkInterfaceExportService
 
 router = APIRouter(prefix="/network-topologies")
 
@@ -50,6 +57,19 @@ async def create_topology(
     return ApiResponse(data=data, timestamp=datetime.now())
 
 
+@router.get("/interface-design/import/template")
+async def interface_design_import_template(
+    service: Annotated[NetworkInterfaceExportService, Depends(get_network_interface_export_service)],
+    _: Annotated[User, Depends(require_permissions("network:view"))],
+) -> Response:
+    content = service.template_excel()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="interface_design_template.xlsx"'},
+    )
+
+
 @router.get("/{topology_id}", response_model=ApiResponse[NetworkTopologyDetailResponse])
 async def get_topology_detail(
     topology_id: uuid.UUID,
@@ -79,6 +99,35 @@ async def save_topology_canvas(
     current_user: Annotated[User, Depends(require_permissions("network:update"))],
 ) -> ApiResponse[NetworkTopologyDetailResponse]:
     data = await service.save_canvas(topology_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.get("/{topology_id}/interface-design/export")
+async def export_interface_design(
+    topology_id: uuid.UUID,
+    service: Annotated[NetworkInterfaceExportService, Depends(get_network_interface_export_service)],
+    _: Annotated[User, Depends(require_permissions("network:view"))],
+) -> Response:
+    content = await service.export_excel(topology_id)
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="interface_design.xlsx"'},
+    )
+
+
+@router.post(
+    "/{topology_id}/interface-design/import",
+    response_model=ApiResponse[ImportResult],
+)
+async def import_interface_design(
+    topology_id: uuid.UUID,
+    service: Annotated[NetworkInterfaceExportService, Depends(get_network_interface_export_service)],
+    current_user: Annotated[User, Depends(require_permissions("network:update"))],
+    file: UploadFile = File(...),
+) -> ApiResponse[ImportResult]:
+    content = await file.read()
+    data = await service.import_excel(topology_id, content, user_id=current_user.id)
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

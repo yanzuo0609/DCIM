@@ -263,7 +263,7 @@ export function applySwitchLayoutConfig(layout: PortLayout, config: SwitchLayout
     const uplinkCount =
       config.subtype === 'gigabit'
         ? normalizeGigabitUplinkCount(config.uplinkPortCount)
-        : config.subtype === 'ten_gigabit'
+        : config.subtype === 'ten_gigabit' || config.subtype === 'aggregation'
           ? normalizeTenGigabitUplinkCount(config.uplinkPortCount)
           : Math.max(0, Math.min(32, config.uplinkPortCount))
     layout.line_cards = null

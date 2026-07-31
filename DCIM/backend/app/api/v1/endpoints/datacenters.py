@@ -66,11 +66,13 @@ async def update_datacenter(
     return ApiResponse(data=data, timestamp=datetime.now())
 
 
-@router.delete("/{datacenter_id}", response_model=ApiResponse[dict[str, str]])
+@router.delete("/{datacenter_id}", response_model=ApiResponse[dict])
 async def delete_datacenter(
     datacenter_id: uuid.UUID,
     service: Annotated[DataCenterService, Depends(get_datacenter_service)],
     current_user: Annotated[User, Depends(require_permissions("datacenter:delete"))],
-) -> ApiResponse[dict[str, str]]:
-    await service.delete(datacenter_id, user_id=current_user.id)
-    return ApiResponse(data={"message": "deleted"}, timestamp=datetime.now())
+    force: bool = Query(default=False, description="强制删除：一并清空下属机房及机柜"),
+) -> ApiResponse[dict]:
+    stats = await service.delete(datacenter_id, user_id=current_user.id, force=force)
+    return ApiResponse(data={"message": "deleted", **stats}, timestamp=datetime.now())
+

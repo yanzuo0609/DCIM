@@ -26,6 +26,7 @@ from app.services.infrastructure import (
 )
 from app.services.layout import LayoutService
 from app.services.network import NetworkDesignService
+from app.services.network_interface_export import NetworkInterfaceExportService
 from app.services.rack import RackService, RackTemplateService
 from app.services.svg import SVGService
 from app.services.user_mgmt import RoleManagementService, UserManagementService
@@ -97,6 +98,12 @@ async def get_network_design_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> NetworkDesignService:
     return NetworkDesignService(session)
+
+
+async def get_network_interface_export_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> NetworkInterfaceExportService:
+    return NetworkInterfaceExportService(session)
 
 
 async def get_layout_service(
@@ -174,5 +181,23 @@ def require_permissions(*required: str) -> Callable:
         if missing:
             raise ForbiddenError(f"Missing permissions: {', '.join(missing)}")
         return user
+
+    return checker
+
+
+def require_any_permission(*required: str) -> Callable:
+    """User needs at least one of the listed permissions (or admin:*)."""
+
+    async def checker(user: Annotated[User, Depends(get_current_user)]) -> User:
+        user_permissions: set[str] = set()
+        for role in user.roles:
+            for permission in role.permissions:
+                user_permissions.add(permission.code)
+
+        if "admin:*" in user_permissions:
+            return user
+        if any(perm in user_permissions for perm in required):
+            return user
+        raise ForbiddenError(f"Missing permissions (need one of): {', '.join(required)}")
 
     return checker

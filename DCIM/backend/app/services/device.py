@@ -27,14 +27,19 @@ from app.repositories.device import (
 from app.repositories.device_contract import DeviceContractRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.rack import RackRepository
+from app.services.ip_address import IpAddressService
 from app.schemas.common import PaginationMeta, PaginationParams
 from app.schemas.device import (
     DeviceBatchDeleteRequest,
     DeviceBatchDeleteResult,
     DeviceCreate,
     DeviceModelCreate,
+    DeviceModelPanelApply,
+    DeviceModelPanelApplyResult,
     DeviceModelResponse,
     DeviceModelUpdate,
+    DevicePanelCandidate,
+    DevicePanelCandidateList,
     DeviceResponse,
     DeviceTypeCreate,
     DeviceTypeResponse,
@@ -80,6 +85,21 @@ def _ip_fields_from_device(device: Device) -> tuple[str | None, str | None, str 
     return primary.system_ip, primary.bmc_ip, primary.vip
 
 
+def _panel_for_device(device: Device) -> tuple[dict | None, str | None, str | None]:
+    """Resolve panel layout only when the device has been explicitly bound."""
+    if not getattr(device, "network_panel_bound", False):
+        return None, None, None
+    model = getattr(device, "model", None)
+    if not model or not getattr(model, "port_layout", None):
+        return None, None, None
+    apply_name = (getattr(model, "apply_device_name", None) or "").strip() or None
+    return (
+        model.port_layout,
+        getattr(model, "network_kind", None),
+        apply_name,
+    )
+
+
 def _to_device_response(
     device: Device,
     *,
@@ -91,6 +111,7 @@ def _to_device_response(
     mfg = model.manufacturer if model else None
     contract = getattr(device, "contract", None)
     system_ip, bmc_ip, vip = _ip_fields_from_device(device)
+    port_layout, network_kind, panel_name = _panel_for_device(device)
     return DeviceResponse(
         id=str(device.id),
         name=device.name or device.hostname,
@@ -102,6 +123,7 @@ def _to_device_response(
         manufacturer_name=mfg.name if mfg else None,
         device_type_id=str(device.device_type_id) if device.device_type_id else None,
         device_type_name=device.device_type.name if device.device_type else None,
+        device_type_code=device.device_type.code if device.device_type else None,
         param_profile_id=str(device.param_profile_id) if device.param_profile_id else None,
         system_profile_id=str(device.system_profile_id) if device.system_profile_id else None,
         bmc_profile_id=str(device.bmc_profile_id) if device.bmc_profile_id else None,
@@ -121,6 +143,10 @@ def _to_device_response(
         power=device.power,
         status=device.status,
         description=device.description,
+        port_layout=port_layout,
+        network_kind=network_kind,
+        panel_apply_device_name=panel_name,
+        network_panel_bound=bool(getattr(device, "network_panel_bound", False)),
         created_at=device.created_at,
         updated_at=device.updated_at,
     )
@@ -140,6 +166,7 @@ class DeviceService:
         self.contract_repo = DeviceContractRepository(session)
         self.rack_repo = RackRepository(session)
         self.room_repo = RoomRepository(session)
+        self.ip_service = IpAddressService(session)
 
     async def _resolve_contract_id(self, contract_id: str | None) -> uuid.UUID | None:
         if not contract_id:
@@ -363,6 +390,7 @@ class DeviceService:
             raise NotFoundError("Device not found", code=10003)
         if device.rack_id:
             raise ConflictError("请先下架设备再删除")
+        await self.ip_service.release_by_device(device_id, user_id=user_id)
         await self.repo.soft_delete(device, deleted_by=user_id)
 
     async def batch_delete(
@@ -370,6 +398,7 @@ class DeviceService:
     ) -> DeviceBatchDeleteResult:
         result = DeviceBatchDeleteResult()
         seen: set[uuid.UUID] = set()
+        to_delete: list[uuid.UUID] = []
         for raw in payload.ids:
             try:
                 device_id = uuid.UUID(raw)
@@ -389,8 +418,16 @@ class DeviceService:
                 result.skipped += 1
                 result.errors.append(f"{device.hostname}: 已上架，无法删除")
                 continue
-            await self.repo.soft_delete(device, deleted_by=user_id)
-            result.deleted += 1
+            to_delete.append(device_id)
+        if to_delete:
+            await self.ip_service.release_by_devices(to_delete, user_id=user_id)
+            for device_id in to_delete:
+                device = await self.repo.get_by_id(device_id)
+                if not device:
+                    result.skipped += 1
+                    continue
+                await self.repo.soft_delete(device, deleted_by=user_id)
+                result.deleted += 1
         await self.session.flush()
         return result
 
@@ -916,6 +953,9 @@ class DeviceService:
             power=created.power,
             depth=created.depth,
             description=created.description,
+            port_layout=getattr(created, "port_layout", None),
+            apply_device_name=getattr(created, "apply_device_name", None),
+            network_kind=getattr(created, "network_kind", None),
             created_at=created.created_at,
         )
 
@@ -934,6 +974,9 @@ class DeviceService:
             power=entity.power,
             depth=entity.depth,
             description=entity.description,
+            port_layout=getattr(entity, "port_layout", None),
+            apply_device_name=getattr(entity, "apply_device_name", None),
+            network_kind=getattr(entity, "network_kind", None),
             created_at=entity.created_at,
         )
 
@@ -965,11 +1008,206 @@ class DeviceService:
             entity.power = payload.power
         if payload.description is not None:
             entity.description = payload.description
+        if payload.port_layout is not None:
+            entity.port_layout = payload.port_layout
+        if payload.apply_device_name is not None:
+            name = payload.apply_device_name.strip()
+            entity.apply_device_name = name or None
+        if payload.network_kind is not None:
+            kind = payload.network_kind.strip()
+            entity.network_kind = kind or None
         entity.updated_by = user_id
         entity.version += 1
         await self.session.flush()
         mfg_name = entity.manufacturer.name if entity.manufacturer else None
         return self._to_model_response(entity, mfg_name)
+
+    async def list_panel_candidates(
+        self,
+        *,
+        apply_device_name: str,
+        model_id: uuid.UUID | None = None,
+    ) -> DevicePanelCandidateList:
+        name = apply_device_name.strip()
+        if not name and not model_id:
+            raise ValidationError("设备名称不能为空", code=10004)
+        devices = await self.repo.list_for_panel_apply(
+            apply_device_name=name or None,
+            model_id=model_id,
+        )
+        items: list[DevicePanelCandidate] = []
+        unbound = 0
+        bound = 0
+        for d in devices:
+            is_bound = bool(getattr(d, "network_panel_bound", False))
+            if is_bound:
+                bound += 1
+            else:
+                unbound += 1
+            model = getattr(d, "model", None)
+            items.append(
+                DevicePanelCandidate(
+                    id=str(d.id),
+                    name=d.name,
+                    hostname=d.hostname,
+                    serial_number=d.serial_number,
+                    device_model_id=str(d.device_model_id),
+                    device_model_name=model.name if model else None,
+                    network_panel_bound=is_bound,
+                    rack_code=None,
+                    room_name=None,
+                    u_position=d.u_position,
+                    status=d.status,
+                )
+            )
+        # Enrich rack/room labels
+        rack_ids = [d.rack_id for d in devices if d.rack_id]
+        if rack_ids:
+            racks = await self.rack_repo.list_by_ids(list({r for r in rack_ids if r}))
+            rack_map = {r.id: r for r in racks}
+            room_ids = list({r.room_id for r in racks})
+            rooms = await self.room_repo.list_by_ids(room_ids)
+            room_map = {r.id: r for r in rooms}
+            for i, d in enumerate(devices):
+                if not d.rack_id:
+                    continue
+                rack = rack_map.get(d.rack_id)
+                if not rack:
+                    continue
+                items[i].rack_code = rack.code
+                room = room_map.get(rack.room_id)
+                items[i].room_name = room.name if room else None
+        return DevicePanelCandidateList(
+            apply_device_name=name,
+            items=items,
+            unbound_count=unbound,
+            bound_count=bound,
+        )
+
+    async def apply_device_model_panel(
+        self,
+        model_id: uuid.UUID,
+        payload: DeviceModelPanelApply,
+        user_id: uuid.UUID | None = None,
+    ) -> DeviceModelPanelApplyResult:
+        """Apply or modify network panel for selected inventory devices."""
+        entity = await self.model_repo.get_by_id_with_mfg(model_id)
+        if not entity:
+            raise NotFoundError("设备型号不存在")
+        apply_name = payload.apply_device_name.strip()
+        if not apply_name:
+            raise ValidationError("应用设备名称不能为空", code=10004)
+        mode = payload.mode or "apply"
+
+        # Always refresh shared layout on the catalog model
+        entity.port_layout = payload.port_layout
+        entity.apply_device_name = apply_name
+        if payload.network_kind is not None:
+            kind = payload.network_kind.strip()
+            entity.network_kind = kind or None
+        height = None
+        if isinstance(payload.port_layout, dict):
+            raw_h = payload.port_layout.get("height_u")
+            if isinstance(raw_h, int) and 1 <= raw_h <= 10:
+                height = raw_h
+                entity.height_u = raw_h
+        entity.updated_by = user_id
+        entity.version += 1
+
+        candidates = await self.repo.list_for_panel_apply(
+            apply_device_name=apply_name,
+            model_id=entity.id,
+        )
+        if not candidates and payload.device_ids:
+            # 允许直接按所选 ID 应用（前端已列出）
+            try:
+                ids = [uuid.UUID(i) for i in payload.device_ids]
+            except ValueError as exc:
+                raise ValidationError("设备 ID 格式无效", code=10004) from exc
+            candidates = await self.repo.list_by_ids_for_list(ids)
+        if not candidates:
+            raise ValidationError(
+                f"未找到与采购汇总设备名称「{apply_name}」对应的台账设备",
+                code=10004,
+            )
+
+        selected_ids: set[uuid.UUID] | None = None
+        if payload.device_ids:
+            try:
+                selected_ids = {uuid.UUID(i) for i in payload.device_ids}
+            except ValueError as exc:
+                raise ValidationError("设备 ID 格式无效", code=10004) from exc
+            # 补齐不在候选集中的所选设备
+            missing = selected_ids - {d.id for d in candidates}
+            if missing:
+                extra = await self.repo.list_by_ids_for_list(list(missing))
+                candidates = [*candidates, *extra]
+            unknown = selected_ids - {d.id for d in candidates}
+            if unknown:
+                raise ValidationError("所选设备不存在或已删除", code=10004)
+
+        applied_ids: list[str] = []
+        modified_ids: list[str] = []
+        skipped_ids: list[str] = []
+
+        for device in candidates:
+            if selected_ids is not None and device.id not in selected_ids:
+                continue
+            is_bound = bool(getattr(device, "network_panel_bound", False))
+            if mode == "apply":
+                if is_bound:
+                    skipped_ids.append(str(device.id))
+                    continue
+                device.device_model_id = entity.id
+                device.network_panel_bound = True
+                if height is not None:
+                    device.height_u = height
+                device.updated_by = user_id
+                device.version += 1
+                applied_ids.append(str(device.id))
+            else:  # modify
+                if not is_bound:
+                    skipped_ids.append(str(device.id))
+                    continue
+                # 已绑定设备：更新型号指向与高度，布局已写到 model
+                if device.device_model_id != entity.id:
+                    device.device_model_id = entity.id
+                if height is not None:
+                    device.height_u = height
+                device.updated_by = user_id
+                device.version += 1
+                modified_ids.append(str(device.id))
+
+        if mode == "apply" and not applied_ids and skipped_ids and selected_ids is not None:
+            raise ValidationError("所选设备均已应用面板，请使用「修改」更新", code=10004)
+        if mode == "apply" and not applied_ids and selected_ids is None and skipped_ids:
+            raise ValidationError("同名设备均已应用面板，请使用「修改」更新", code=10004)
+        if mode == "modify" and not modified_ids:
+            raise ValidationError("没有可修改的已应用设备", code=10004)
+
+        await self.session.flush()
+        touched = applied_ids if mode == "apply" else modified_ids
+        if mode == "apply":
+            msg = f"已应用面板到 {len(applied_ids)} 台设备"
+            if skipped_ids:
+                msg += f"，跳过已应用 {len(skipped_ids)} 台"
+        else:
+            msg = f"已修改 {len(modified_ids)} 台已应用设备的面板"
+            if skipped_ids:
+                msg += f"，跳过未应用 {len(skipped_ids)} 台"
+
+        return DeviceModelPanelApplyResult(
+            device_model_id=str(entity.id),
+            apply_device_name=apply_name,
+            mode=mode,
+            matched_device_count=len(touched),
+            matched_device_ids=touched,
+            applied_count=len(applied_ids),
+            modified_count=len(modified_ids),
+            skipped_count=len(skipped_ids),
+            skipped_device_ids=skipped_ids,
+            message=msg,
+        )
 
     async def delete_device_model(
         self, model_id: uuid.UUID, user_id: uuid.UUID | None = None
@@ -1016,6 +1254,9 @@ class DeviceService:
                     power=i.power,
                     depth=i.depth,
                     description=i.description,
+                    port_layout=getattr(full or i, "port_layout", None),
+                    apply_device_name=getattr(full or i, "apply_device_name", None),
+                    network_kind=getattr(full or i, "network_kind", None),
                     created_at=i.created_at,
                 )
             )

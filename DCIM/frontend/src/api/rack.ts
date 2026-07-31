@@ -1,6 +1,8 @@
 import api, { unwrap } from '@/api'
 import type { ApiResponse, PaginatedResponse } from '@/types/api'
 
+export type RackVisualStyle = 'classic' | 'schematic' | 'realistic' | 'grid'
+
 export interface Rack {
   id: string
   room_id: string
@@ -12,8 +14,11 @@ export interface Rack {
   total_u: number
   width: number
   depth: number
+  visual_style?: RackVisualStyle | string
   status: string
   description: string | null
+  app_usage?: string | null
+  app_color?: string | null
   occupied_u: number
   free_u: number
   utilization: number
@@ -36,6 +41,7 @@ export interface RackTemplate {
   total_u: number
   width: number
   depth: number
+  visual_style?: RackVisualStyle | string
   description?: string | null
   applied_rack_count?: number
   applied_rooms?: RackTemplateAppliedRoom[]
@@ -89,6 +95,8 @@ export interface RackPayload {
   depth?: number
   status?: string
   description?: string | null
+  app_usage?: string | null
+  app_color?: string | null
 }
 
 export async function listRacks(params: Record<string, unknown> = {}) {
@@ -107,6 +115,7 @@ export interface RackTemplatePayload {
   total_u?: number
   width?: number
   depth?: number
+  visual_style?: RackVisualStyle | string
   description?: string | null
 }
 
@@ -158,10 +167,15 @@ export async function applyTemplateToRoom(
   templateId: string,
   roomId: string,
   fillEmptySlots = true,
+  visualStyle?: RackVisualStyle | string | null,
 ): Promise<ApplyTemplateResult> {
   const response = await api.post<ApiResponse<ApplyTemplateResult>>(
     `/rack-templates/${templateId}/apply-to-room`,
-    { room_id: roomId, fill_empty_slots: fillEmptySlots },
+    {
+      room_id: roomId,
+      fill_empty_slots: fillEmptySlots,
+      visual_style: visualStyle || undefined,
+    },
   )
   return unwrap(response)
 }
@@ -252,7 +266,10 @@ export async function placeRacksBatch(payload: PlaceBatchPayload): Promise<Place
   return unwrap(response)
 }
 
-export async function updateRack(id: string, payload: Partial<RackPayload>): Promise<Rack> {
+export async function updateRack(
+  id: string,
+  payload: Partial<RackPayload> & { app_usage?: string | null; app_color?: string | null },
+): Promise<Rack> {
   const response = await api.put<ApiResponse<Rack>>(`/racks/${id}`, payload)
   return unwrap(response)
 }

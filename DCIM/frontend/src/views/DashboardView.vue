@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { fetchDashboardSummary, type DashboardSummary } from '@/api/dashboard'
 import { useAuthStore } from '@/stores/auth'
 
+const router = useRouter()
 const auth = useAuthStore()
 const loading = ref(true)
 const health = ref<{ status: string; version?: string } | null>(null)
@@ -26,6 +28,14 @@ onMounted(async () => {
 
   loading.value = false
 })
+
+function openScreen(blank = false) {
+  if (blank) {
+    window.open(router.resolve({ name: 'dashboard-screen' }).href, '_blank')
+    return
+  }
+  void router.push({ name: 'dashboard-screen' })
+}
 </script>
 
 <template>
@@ -33,7 +43,15 @@ onMounted(async () => {
     <el-row :gutter="20">
       <el-col :span="24">
         <el-card shadow="never">
-          <template #header><span>系统概览</span></template>
+          <template #header>
+            <div class="card-head">
+              <span>系统概览</span>
+              <div class="actions">
+                <el-button type="primary" @click="openScreen(false)">打开运营大屏</el-button>
+                <el-button @click="openScreen(true)">新窗口大屏</el-button>
+              </div>
+            </div>
+          </template>
           <el-skeleton v-if="loading" :rows="2" animated />
           <div v-else class="status">
             <el-tag :type="health?.status === 'ok' ? 'success' : 'danger'" size="large">
@@ -41,6 +59,7 @@ onMounted(async () => {
             </el-tag>
             <p v-if="health?.version">RackDCIM Pro v{{ health.version }}</p>
             <p v-if="auth.profile">欢迎，{{ auth.profile.full_name || auth.profile.username }}</p>
+            <p class="hint">运营大屏支持模块化自定义：可开关图表模块、调整布局列宽与 KPI 指标，适合投屏 / 值班室展示。</p>
           </div>
         </el-card>
       </el-col>
@@ -80,7 +99,15 @@ onMounted(async () => {
 
 <style scoped>
 .dashboard { display: flex; flex-direction: column; gap: 20px; }
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .status p { margin: 12px 0 0; color: #606266; }
+.hint { font-size: 13px; }
 .stats { margin-top: 0; }
 .stat { display: flex; flex-direction: column; gap: 8px; }
 .stat .label { color: #909399; font-size: 14px; }

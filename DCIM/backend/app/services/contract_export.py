@@ -10,6 +10,7 @@ from app.schemas.device_contract import QUANTITY_UNITS, DeviceContractItem
 
 # 与前端 ContractView 设备明细表头保持一致
 COLUMN_SPECS: list[tuple[str, str, tuple[str, ...]]] = [
+    ("item_kind", "类别", ("软硬类别", "类型")),
     ("device_name", "设备名称", ()),
     ("device_model_name", "设备型号", ()),
     ("manufacturer_name", "厂商", ()),
@@ -27,13 +28,15 @@ for key, label, aliases in COLUMN_SPECS:
     for alias in aliases:
         HEADER_ALIASES[alias] = key
 
-# 示例行：数量单位可选 台/个/件/套；金额单位可选 元/万元
+# 示例行：类别可选 硬件/软件；数量单位可选 台/个/件/套；金额单位可选 元/万元
 SAMPLE_ROWS: list[list[object]] = [
-    ["服务器", "PowerEdge R750", "Dell", 10, "台", 8500, "元"],
-    ["核心交换机", "CE6857-48S6CQ-EI", "华为", 2, "套", 12, "万元"],
+    ["硬件", "服务器", "PowerEdge R750", "Dell", 10, "台", 8500, "元"],
+    ["硬件", "核心交换机", "CE6857-48S6CQ-EI", "华为", 2, "套", 12, "万元"],
+    ["软件", "操作系统许可", "Windows Server 2022", "Microsoft", 10, "套", 3200, "元"],
 ]
 
 FIELD_HINTS = [
+    "硬件 或 软件，默认硬件",
     "必填，最多100字",
     "必填，最多100字",
     "选填，最多100字",
@@ -42,6 +45,13 @@ FIELD_HINTS = [
     "选填，支持小数",
     "元 或 万元，默认元",
 ]
+
+
+def _normalize_item_kind(raw: object) -> str:
+    text = str(raw or "").strip().lower()
+    if text in ("software", "软", "软件", "许可", "license"):
+        return "software"
+    return "hardware"
 
 
 def _normalize_price_unit(raw: object) -> str:
@@ -146,6 +156,7 @@ class ContractItemsExportService:
             quantity_unit = _normalize_quantity_unit(cell("quantity_unit"))
             unit_price = _to_decimal(cell("unit_price"))
             price_unit = _normalize_price_unit(cell("price_unit"))
+            item_kind = _normalize_item_kind(cell("item_kind"))
 
             if not name and not model:
                 continue
@@ -161,6 +172,7 @@ class ContractItemsExportService:
                     device_name=name[:100],
                     device_model_name=model[:100],
                     manufacturer_name=mfg[:100] if mfg else None,
+                    item_kind=item_kind,
                     quantity=min(quantity, 100000),
                     quantity_unit=quantity_unit,
                     unit_price=unit_price,

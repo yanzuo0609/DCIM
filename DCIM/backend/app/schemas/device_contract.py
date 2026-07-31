@@ -4,6 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 QUANTITY_UNITS = frozenset({"台", "个", "件", "套"})
+ITEM_KINDS = frozenset({"hardware", "software"})
 
 
 class DeviceContractItem(BaseModel):
@@ -12,6 +13,7 @@ class DeviceContractItem(BaseModel):
     device_name: str = Field(min_length=1, max_length=100)
     device_model_name: str = Field(min_length=1, max_length=100)
     manufacturer_name: str | None = Field(default=None, max_length=100)
+    item_kind: str = Field(default="hardware", pattern="^(hardware|software)$")
     quantity: int = Field(default=0, ge=0, le=100000)
     quantity_unit: str = Field(default="台", max_length=10)
     unit_price: Decimal | None = Field(default=None, ge=0)
@@ -33,6 +35,14 @@ class DeviceContractItem(BaseModel):
             return None
         text = value.strip()
         return text[:100] if text else None
+
+    @field_validator("item_kind", mode="before")
+    @classmethod
+    def normalize_item_kind(cls, value: object) -> str:
+        text = str(value or "hardware").strip().lower()
+        if text in ("software", "软", "软件", "许可", "license"):
+            return "software"
+        return "hardware"
 
     @field_validator("quantity_unit")
     @classmethod
@@ -66,9 +76,10 @@ def _normalize_items(items: list[DeviceContractItem] | None) -> list[DeviceContr
     if not items:
         return []
     result: list[DeviceContractItem] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for item in items:
-        key = (item.device_name, item.device_model_name, item.manufacturer_name or "")
+        kind = item.item_kind if item.item_kind in ITEM_KINDS else "hardware"
+        key = (kind, item.device_name, item.device_model_name, item.manufacturer_name or "")
         if key in seen:
             continue
         seen.add(key)
@@ -76,6 +87,7 @@ def _normalize_items(items: list[DeviceContractItem] | None) -> list[DeviceContr
         result.append(
             item.model_copy(
                 update={
+                    "item_kind": kind,
                     "price_unit": unit,
                     "line_amount": _line_amount(item.quantity, item.unit_price),
                 }
@@ -132,6 +144,7 @@ def _pair_from_lists(
                 "device_name": str(name).strip() or str(model).strip(),
                 "device_model_name": str(model).strip() or str(name).strip(),
                 "manufacturer_name": mfg_text,
+                "item_kind": "hardware",
                 "quantity": fallback_quantity if i == 0 else 0,
                 "quantity_unit": "台",
                 "unit_price": fallback_unit_price if i == 0 else None,
@@ -183,6 +196,8 @@ class DeviceContractCreate(BaseModel):
                     row["price_unit"] = "yuan"
                 if not row.get("quantity_unit"):
                     row["quantity_unit"] = "台"
+                if not row.get("item_kind"):
+                    row["item_kind"] = "hardware"
                 filled.append(row)
             data["device_items"] = filled
             return data
@@ -241,6 +256,8 @@ class DeviceContractUpdate(BaseModel):
                         row["price_unit"] = "yuan"
                     if not row.get("quantity_unit"):
                         row["quantity_unit"] = "台"
+                    if not row.get("item_kind"):
+                        row["item_kind"] = "hardware"
                     filled.append(row)
                 else:
                     filled.append(raw)
@@ -307,10 +324,13 @@ class DeviceContractSummaryItem(BaseModel):
     manufacturer_name: str | None = None
     device_name: str | None = None
     device_model_name: str
+    item_kind: str = "hardware"
     purchase_quantity: int
+    purchase_amount: Decimal | None = None
     linked_count: int
     contract_count: int
     avg_unit_price: Decimal | None = None
+    remaining_quantity: int = 0
 
 
 class DeviceContractBindRequest(BaseModel):
@@ -321,6 +341,14 @@ class DeviceContractBindResult(BaseModel):
     bound: int
     skipped: int
     errors: list[str] = Field(default_factory=list)
+
+
+class DeviceContractModelSyncResult(BaseModel):
+    created: int = 0
+    skipped: int = 0
+    deleted: int = 0
+    kept_in_use: int = 0
+    messages: list[str] = Field(default_factory=list)
 
 
 class DeviceContractItemsImportResult(BaseModel):

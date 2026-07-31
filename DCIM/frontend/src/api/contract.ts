@@ -2,18 +2,35 @@ import api, { unwrap } from '@/api'
 import type { ApiResponse, PaginatedResponse } from '@/types/api'
 
 export type QuantityUnit = '台' | '个' | '件' | '套'
+export type ContractItemKind = 'hardware' | 'software'
 
 export const QUANTITY_UNIT_OPTIONS: QuantityUnit[] = ['台', '个', '件', '套']
+
+export const ITEM_KIND_OPTIONS: Array<{ value: ContractItemKind; label: string }> = [
+  { value: 'hardware', label: '硬件' },
+  { value: 'software', label: '软件' },
+]
 
 export function normalizeQuantityUnit(value: string | null | undefined): QuantityUnit {
   const text = (value || '台').trim()
   return QUANTITY_UNIT_OPTIONS.includes(text as QuantityUnit) ? (text as QuantityUnit) : '台'
 }
 
+export function normalizeItemKind(value: string | null | undefined): ContractItemKind {
+  const text = (value || 'hardware').trim().toLowerCase()
+  if (['software', '软', '软件', '许可', 'license'].includes(text)) return 'software'
+  return 'hardware'
+}
+
+export function itemKindLabel(value: string | null | undefined) {
+  return normalizeItemKind(value) === 'software' ? '软件' : '硬件'
+}
+
 export interface DeviceContractItem {
   device_name: string
   device_model_name: string
   manufacturer_name?: string | null
+  item_kind?: ContractItemKind | string
   quantity?: number
   quantity_unit?: QuantityUnit
   unit_price?: number | null
@@ -50,10 +67,13 @@ export interface DeviceContractSummary {
   manufacturer_name: string | null
   device_name?: string | null
   device_model_name: string
+  item_kind?: ContractItemKind | string
   purchase_quantity: number
+  purchase_amount?: number | null
   linked_count: number
   contract_count: number
   avg_unit_price: number | null
+  remaining_quantity?: number
 }
 
 export interface DeviceContractPayload {
@@ -70,6 +90,14 @@ export interface BindResult {
   bound: number
   skipped: number
   errors: string[]
+}
+
+export interface ContractModelSyncResult {
+  created: number
+  skipped: number
+  deleted: number
+  kept_in_use: number
+  messages: string[]
 }
 
 export function formatItemLabel(item: DeviceContractItem): string {
@@ -116,6 +144,7 @@ export function normalizeContractItems(contract: {
       device_name: i.device_name,
       device_model_name: i.device_model_name,
       manufacturer_name: i.manufacturer_name || null,
+      item_kind: normalizeItemKind(i.item_kind),
       quantity: Number(i.quantity || 0),
       quantity_unit: normalizeQuantityUnit(i.quantity_unit),
       unit_price:
@@ -153,6 +182,7 @@ export function normalizeContractItems(contract: {
       device_name: name || model,
       device_model_name: model || name,
       manufacturer_name: mfg,
+      item_kind: 'hardware',
       quantity: i === 0 ? fallbackQty : 0,
       quantity_unit: '台',
       unit_price: i === 0 ? fallbackPrice : null,
@@ -237,6 +267,22 @@ export async function deleteDeviceContract(id: string) {
 
 export async function getContractSummary() {
   const response = await api.get<ApiResponse<DeviceContractSummary[]>>('/device-contracts/summary')
+  return unwrap(response)
+}
+
+/** 全量：按合同同步型号，并清理已无合同引用的同步型号 */
+export async function syncContractModels() {
+  const response = await api.post<ApiResponse<ContractModelSyncResult>>(
+    '/device-contracts/sync-models',
+  )
+  return unwrap(response)
+}
+
+/** 将指定合同明细同步为设备型号 */
+export async function syncContractModelsById(id: string) {
+  const response = await api.post<ApiResponse<ContractModelSyncResult>>(
+    `/device-contracts/${id}/sync-models`,
+  )
   return unwrap(response)
 }
 

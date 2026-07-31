@@ -51,6 +51,14 @@ class BuildingRepository(BaseRepository[Building]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_by_datacenter(self, datacenter_id: uuid.UUID) -> list[Building]:
+        stmt = select(Building).where(
+            Building.datacenter_id == datacenter_id,
+            Building.deleted_at.is_(None),
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
 
 class FloorRepository(BaseRepository[Floor]):
     model = Floor
@@ -64,9 +72,51 @@ class FloorRepository(BaseRepository[Floor]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_by_building_ids(self, building_ids: list[uuid.UUID]) -> list[Floor]:
+        if not building_ids:
+            return []
+        stmt = select(Floor).where(
+            Floor.building_id.in_(building_ids),
+            Floor.deleted_at.is_(None),
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
 
 class RoomRepository(BaseRepository[Room]):
     model = Room
+
+    async def count_by_datacenter(self, datacenter_id: uuid.UUID) -> int:
+        from sqlalchemy import func
+
+        stmt = (
+            select(func.count())
+            .select_from(Room)
+            .join(Floor, Floor.id == Room.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(
+                Room.deleted_at.is_(None),
+                Floor.deleted_at.is_(None),
+                Building.deleted_at.is_(None),
+                Building.datacenter_id == datacenter_id,
+            )
+        )
+        return int((await self.session.execute(stmt)).scalar_one() or 0)
+
+    async def list_by_datacenter(self, datacenter_id: uuid.UUID) -> list[Room]:
+        stmt = (
+            select(Room)
+            .join(Floor, Floor.id == Room.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(
+                Room.deleted_at.is_(None),
+                Floor.deleted_at.is_(None),
+                Building.deleted_at.is_(None),
+                Building.datacenter_id == datacenter_id,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
 
     async def get_by_id_with_hierarchy(self, room_id: uuid.UUID) -> Room | None:
         stmt = (
@@ -101,6 +151,45 @@ class RoomRepository(BaseRepository[Room]):
             return []
         stmt = select(Room).where(Room.id.in_(ids), Room.deleted_at.is_(None))
         return list((await self.session.execute(stmt)).scalars().all())
+
+    async def list_paginated_by_datacenter(
+        self,
+        *,
+        datacenter_id: uuid.UUID,
+        page: int = 1,
+        page_size: int = 20,
+        keyword: str | None = None,
+        sort: str = "created_at",
+        order: str = "desc",
+    ) -> tuple[list[Room], int]:
+        from sqlalchemy import asc, desc, func, or_
+
+        stmt = (
+            select(Room)
+            .join(Floor, Floor.id == Room.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(
+                Room.deleted_at.is_(None),
+                Floor.deleted_at.is_(None),
+                Building.deleted_at.is_(None),
+                Building.datacenter_id == datacenter_id,
+            )
+        )
+        if keyword:
+            stmt = stmt.where(
+                or_(
+                    Room.name.ilike(f"%{keyword}%"),
+                    Building.name.ilike(f"%{keyword}%"),
+                )
+            )
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total = (await self.session.execute(count_stmt)).scalar_one()
+        sort_column = getattr(Room, sort, Room.created_at)
+        order_fn = desc if order.lower() == "desc" else asc
+        stmt = stmt.order_by(order_fn(sort_column))
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all()), total
 
     async def get_by_name_in_floor(self, floor_id: uuid.UUID, name: str) -> Room | None:
         stmt = select(Room).where(

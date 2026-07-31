@@ -129,7 +129,7 @@ function placeUplinkBlock(
   const labelH = 12
 
   // 万兆 40/100G：固定两排，列数随数量向后（向右）扩展
-  if (type === '40_100g' || subtype === 'ten_gigabit') {
+  if (type === '40_100g' || subtype === 'ten_gigabit' || subtype === 'aggregation') {
     const rows = 2
     const cols = Math.max(1, Math.ceil(count / rows))
     const width = cols * w + (cols - 1) * gap
@@ -238,6 +238,7 @@ function collectCardPorts(layout: PortLayout, cardIndex: number): FramePort[] {
 function modelHint(subtype: SwitchSubtype): string {
   if (subtype === 'gigabit') return 'Gigabit Switch'
   if (subtype === 'ten_gigabit') return '10 Gigabit Switch'
+  if (subtype === 'aggregation') return 'Aggregation Switch'
   return 'Core Chassis'
 }
 

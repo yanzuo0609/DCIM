@@ -8,19 +8,35 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const activeMenu = computed(() => {
-  if (route.path.startsWith('/rooms')) return '/rooms/manage'
+  if (route.path.startsWith('/rooms') || route.path.startsWith('/datacenters')) {
+    if (route.path.startsWith('/rooms/simulate')) return '/rooms/simulate'
+    if (route.path.startsWith('/rooms/templates')) return '/rooms/templates'
+    if (route.path.startsWith('/rooms/manage')) return '/rooms/manage'
+    if (route.path.startsWith('/datacenters')) return '/datacenters'
+    return '/rooms/manage'
+  }
   if (route.path.startsWith('/network')) return route.path
+  // 合同子页（汇总/参数）仍高亮「合同信息」菜单
+  if (route.path.startsWith('/devices/contracts')) return '/devices/contracts'
   return route.path
 })
 const openedMenus = computed(() => {
   const menus: string[] = []
   if (route.path.startsWith('/devices')) menus.push('device-menu')
   if (route.path.startsWith('/network')) menus.push('network-menu')
+  if (route.path.startsWith('/rooms') || route.path.startsWith('/datacenters')) {
+    menus.push('datacenter-menu')
+  }
   return menus
 })
 const displayName = computed(() => auth.profile?.full_name || auth.profile?.username || 'User')
 
 function handleMenuSelect(index: string) {
+  // 主菜单「机房管理」始终进入全部机房（清除 datacenter_id 筛选）
+  if (index === '/rooms/manage') {
+    void router.push({ path: '/rooms/manage', query: {} })
+    return
+  }
   if (route.path !== index) {
     void router.push(index)
   }
@@ -50,15 +66,30 @@ async function handleLogout() {
         <el-menu-item index="/">
           <span>Dashboard</span>
         </el-menu-item>
-        <el-menu-item v-if="auth.hasPermission('datacenter:view')" index="/datacenters">
-          <span>数据中心</span>
+        <el-menu-item index="/dashboard/screen">
+          <span>运营大屏</span>
         </el-menu-item>
-        <el-menu-item
+        <el-sub-menu
           v-if="auth.hasPermission('datacenter:view') || auth.hasPermission('rack:view')"
-          index="/rooms/manage"
+          index="datacenter-menu"
         >
-          <span>机房管理</span>
-        </el-menu-item>
+          <template #title><span>数据中心</span></template>
+          <el-menu-item v-if="auth.hasPermission('datacenter:view')" index="/datacenters">
+            数据中心台账
+          </el-menu-item>
+          <el-menu-item v-if="auth.hasPermission('datacenter:view')" index="/rooms/manage">
+            机房管理
+          </el-menu-item>
+          <el-menu-item
+            v-if="auth.hasPermission('datacenter:view') || auth.hasPermission('rack:view')"
+            index="/rooms/simulate"
+          >
+            3D 机房仿真
+          </el-menu-item>
+          <el-menu-item v-if="auth.hasPermission('rack:view')" index="/rooms/templates">
+            机柜模板
+          </el-menu-item>
+        </el-sub-menu>
         <el-sub-menu v-if="auth.hasPermission('network:view')" index="network-menu">
           <template #title><span>网络设计</span></template>
           <el-menu-item index="/network/devices">设备定义</el-menu-item>

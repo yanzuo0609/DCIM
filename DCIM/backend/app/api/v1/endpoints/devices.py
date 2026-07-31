@@ -5,7 +5,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import Response
 
-from app.core.dependencies import get_device_export_service, get_device_service, require_permissions
+from app.core.dependencies import (
+    get_device_export_service,
+    get_device_service,
+    require_any_permission,
+    require_permissions,
+)
 from app.models.user import User
 from app.schemas.common import ApiResponse, PaginatedData, PaginatedResponse, PaginationParams
 from app.schemas.device import (
@@ -13,8 +18,11 @@ from app.schemas.device import (
     DeviceBatchDeleteResult,
     DeviceCreate,
     DeviceModelCreate,
+    DeviceModelPanelApply,
+    DeviceModelPanelApplyResult,
     DeviceModelResponse,
     DeviceModelUpdate,
+    DevicePanelCandidateList,
     DeviceResponse,
     DeviceTypeCreate,
     DeviceTypeResponse,
@@ -428,6 +436,39 @@ async def update_device_model(
     current_user: Annotated[User, Depends(require_permissions("device:update"))],
 ) -> ApiResponse[DeviceModelResponse]:
     data = await service.update_device_model(model_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.post(
+    "/device-models/{model_id}/apply-panel",
+    response_model=ApiResponse[DeviceModelPanelApplyResult],
+)
+async def apply_device_model_panel(
+    model_id: uuid.UUID,
+    payload: DeviceModelPanelApply,
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    current_user: Annotated[
+        User, Depends(require_any_permission("device:update", "network:update"))
+    ],
+) -> ApiResponse[DeviceModelPanelApplyResult]:
+    data = await service.apply_device_model_panel(model_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.get(
+    "/device-models/{model_id}/panel-candidates",
+    response_model=ApiResponse[DevicePanelCandidateList],
+)
+async def list_panel_candidates(
+    model_id: uuid.UUID,
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    _: Annotated[User, Depends(require_any_permission("device:view", "network:view", "network:update"))],
+    apply_device_name: str = Query(..., min_length=1, max_length=100),
+) -> ApiResponse[DevicePanelCandidateList]:
+    data = await service.list_panel_candidates(
+        apply_device_name=apply_device_name,
+        model_id=model_id,
+    )
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

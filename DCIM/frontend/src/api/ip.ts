@@ -1,8 +1,8 @@
 import api, { unwrap } from '@/api'
-import type { ApiResponse } from '@/types/api'
+import type { ApiResponse, PaginatedResponse } from '@/types/api'
 
 export type IpBindType = 'none' | 'device' | 'rack' | 'rack_range'
-export type IpStatus = 'free' | 'allocated' | 'disabled'
+export type IpStatus = 'free' | 'allocated' | 'disabled' | 'reserved'
 
 export interface IpAddress {
   id: string
@@ -16,6 +16,7 @@ export interface IpAddress {
   label: string | null
   description: string | null
   status: IpStatus | string
+  segment_id?: string | null
   bind_type: IpBindType | string
   device_id: string | null
   device_name: string | null
@@ -27,6 +28,69 @@ export interface IpAddress {
   u_position: number | null
   created_at: string
   updated_at: string
+}
+
+export interface IpSegment {
+  id: string
+  application: string | null
+  network: string
+  prefix_len: number
+  gateway: string | null
+  address_purpose: string | null
+  network_type: string | null
+  location: string | null
+  remarks: string | null
+  total_count: number
+  free_count: number
+  allocated_count: number
+  reserved_count: number
+  disabled_count: number
+  name: string
+  start_ip: string
+  end_ip: string
+  netmask: string | null
+  dns: string | null
+  dns_secondary: string | null
+  application_type: string | null
+  label: string | null
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface IpSegmentDetail extends IpSegment {
+  addresses: IpAddress[]
+}
+
+export interface IpSegmentPayload {
+  application?: string | null
+  network: string
+  prefix_len: number
+  gateway?: string | null
+  reserved_count?: number
+  address_purpose?: string | null
+  network_type?: string | null
+  location?: string | null
+  remarks?: string | null
+  start_bmc_ip?: string | null
+  dns?: string | null
+  dns_secondary?: string | null
+}
+
+export interface IpSegmentUpdatePayload {
+  application?: string | null
+  gateway?: string | null
+  address_purpose?: string | null
+  network_type?: string | null
+  location?: string | null
+  remarks?: string | null
+  dns?: string | null
+  dns_secondary?: string | null
+  name?: string | null
+  netmask?: string | null
+  application_type?: string | null
+  label?: string | null
+  description?: string | null
 }
 
 export interface IpAddressPayload {
@@ -43,6 +107,7 @@ export interface IpAddressPayload {
 }
 
 export interface IpBatchCreatePayload {
+  name?: string | null
   start_system_ip: string
   end_system_ip: string
   start_bmc_ip?: string | null
@@ -50,6 +115,7 @@ export interface IpBatchCreatePayload {
   gateway?: string | null
   dns?: string | null
   dns_secondary?: string | null
+  application_type?: string | null
   label_prefix?: string | null
   description?: string | null
 }
@@ -68,6 +134,36 @@ export interface IpAllocatePayload {
   rack_ids?: string[]
   row_nos?: number[]
   column_nos?: number[]
+}
+
+export async function listIpSegments(params: Record<string, unknown> = {}) {
+  const response = await api.get<PaginatedResponse<IpSegment>>('/ip-addresses/segments', { params })
+  return response.data.data
+}
+
+export async function getIpSegment(id: string): Promise<IpSegmentDetail> {
+  const response = await api.get<ApiResponse<IpSegmentDetail>>(`/ip-addresses/segments/${id}`)
+  return unwrap(response)
+}
+
+export async function createIpSegment(payload: IpSegmentPayload): Promise<IpSegmentDetail> {
+  const response = await api.post<ApiResponse<IpSegmentDetail>>('/ip-addresses/segments', payload)
+  return unwrap(response)
+}
+
+export async function updateIpSegment(
+  id: string,
+  payload: IpSegmentUpdatePayload,
+): Promise<IpSegmentDetail> {
+  const response = await api.put<ApiResponse<IpSegmentDetail>>(
+    `/ip-addresses/segments/${id}`,
+    payload,
+  )
+  return unwrap(response)
+}
+
+export async function deleteIpSegment(id: string): Promise<void> {
+  await api.delete(`/ip-addresses/segments/${id}`)
 }
 
 export async function listIpAddresses(params: Record<string, unknown> = {}) {
@@ -90,10 +186,9 @@ export async function deleteIpAddress(id: string): Promise<void> {
 }
 
 export async function batchCreateIpAddresses(payload: IpBatchCreatePayload) {
-  const response = await api.post<ApiResponse<{ created: number; skipped: number; errors: string[] }>>(
-    '/ip-addresses/batch-create',
-    payload,
-  )
+  const response = await api.post<
+    ApiResponse<{ created: number; skipped: number; errors: string[]; segment_id?: string | null }>
+  >('/ip-addresses/batch-create', payload)
   return unwrap(response)
 }
 

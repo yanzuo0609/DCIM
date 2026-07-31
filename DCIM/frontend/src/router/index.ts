@@ -11,6 +11,12 @@ const router = createRouter({
       meta: { public: true },
     },
     {
+      path: '/dashboard/screen',
+      name: 'dashboard-screen',
+      component: () => import('@/views/DashboardScreenView.vue'),
+      meta: { fullscreen: true },
+    },
+    {
       path: '/',
       component: () => import('@/layouts/MainLayout.vue'),
       children: [
@@ -21,9 +27,16 @@ const router = createRouter({
         },
         {
           path: 'datacenters',
-          name: 'datacenters',
-          component: () => import('@/views/DatacenterView.vue'),
+          component: () => import('@/layouts/RoomSectionLayout.vue'),
           meta: { permission: 'datacenter:view' },
+          children: [
+            {
+              path: '',
+              name: 'datacenters',
+              component: () => import('@/views/DatacenterView.vue'),
+              meta: { permission: 'datacenter:view' },
+            },
+          ],
         },
         {
           path: 'rooms',
@@ -32,6 +45,12 @@ const router = createRouter({
             {
               path: '',
               redirect: '/rooms/manage',
+            },
+            {
+              path: 'simulate',
+              name: 'rooms-simulate',
+              component: () => import('@/views/Room3DSimulateView.vue'),
+              meta: { permission: 'datacenter:view' },
             },
             {
               path: 'manage',
@@ -59,9 +78,28 @@ const router = createRouter({
         },
         {
           path: 'devices/contracts',
-          name: 'device-contracts',
-          component: () => import('@/views/ContractView.vue'),
+          component: () => import('@/layouts/ContractSectionLayout.vue'),
           meta: { permission: 'device:view' },
+          children: [
+            {
+              path: '',
+              name: 'device-contracts',
+              component: () => import('@/views/ContractView.vue'),
+              meta: { permission: 'device:view' },
+            },
+            {
+              path: 'summary',
+              name: 'device-contracts-summary',
+              component: () => import('@/views/contract/ContractSummaryView.vue'),
+              meta: { permission: 'device:view' },
+            },
+            {
+              path: 'params',
+              name: 'device-contracts-params',
+              component: () => import('@/views/contract/ContractParamsView.vue'),
+              meta: { permission: 'device:view' },
+            },
+          ],
         },
         {
           path: 'network',
@@ -140,6 +178,12 @@ router.beforeEach(async (to) => {
     .reverse()
     .find((record) => record.meta.permission)?.meta.permission as string | undefined
   if (permission && !auth.hasPermission(permission)) {
+    if (
+      to.name === 'rooms-simulate'
+      && (auth.hasPermission('datacenter:view') || auth.hasPermission('rack:view'))
+    ) {
+      return true
+    }
     if (
       to.name === 'rooms-manage'
       && !auth.hasPermission('datacenter:view')

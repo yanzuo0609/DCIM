@@ -10,14 +10,11 @@ import {
   createDevice,
   createDeviceModel,
   createDeviceType,
-  createManufacturer,
-  createParamProfile,
   createSystemProfile,
   deleteBmcProfile,
   deleteDevice,
   deleteDeviceModel,
   deleteDeviceType,
-  deleteParamProfile,
   deleteSystemProfile,
   exportDevicesExcel,
   exportDevicesPdf,
@@ -37,7 +34,6 @@ import {
   updateDevice,
   updateDeviceModel,
   updateDeviceType,
-  updateParamProfile,
   updateSystemProfile,
   type BatchMountNewDevice,
   type BmcProfile,
@@ -59,34 +55,40 @@ import {
 import {
   allocateIpAddresses,
   batchBindIpAddresses,
-  batchCreateIpAddresses,
   batchDeleteIpAddresses,
   batchSetIpStatus,
   bindIpAddress,
-  createIpAddress,
-  deleteIpAddress,
-  listIpAddresses,
+  createIpSegment,
+  deleteIpSegment,
+  getIpSegment,
+  listIpSegments,
   updateIpAddress,
+  updateIpSegment,
+  deleteIpAddress,
   type IpAddress,
   type IpBindType,
+  type IpSegment,
+  type IpSegmentDetail,
   type IpStatus,
 } from '@/api/ip'
 import {
   listDeviceContracts,
-  normalizeContractItems,
+  syncContractModels,
   type DeviceContract,
 } from '@/api/contract'
 import { getRackLayout, listRacks, type Rack, type RackLayoutSlot } from '@/api/rack'
 import { listRooms, type Room } from '@/api/room'
 import BatchCreateDeviceDialog from '@/components/BatchCreateDeviceDialog.vue'
+import DevicePanelPreview from '@/components/DevicePanelPreview.vue'
 import RackCabinet from '@/components/RackCabinet.vue'
 import RackRangePicker from '@/components/RackRangePicker.vue'
 import { useAuthStore } from '@/stores/auth'
+import type { PortLayout } from '@/api/network'
 
 const auth = useAuthStore()
 const route = useRoute()
 const activeTab = ref<'devices' | 'profiles' | 'ips'>('devices')
-const profileSubTab = ref<'param' | 'bmc' | 'system' | 'type' | 'model'>('param')
+const profileSubTab = ref<'bmc' | 'system' | 'type' | 'model'>('bmc')
 
 const loading = ref(false)
 const tableData = ref<Device[]>([])
@@ -107,17 +109,36 @@ const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const keyword = ref('')
 
 const ipLoading = ref(false)
-const ipTableData = ref<IpAddress[]>([])
-const selectedIps = ref<IpAddress[]>([])
-const ipPagination = reactive({ page: 1, page_size: 20, total: 0 })
+const ipSegmentTable = ref<IpSegment[]>([])
+const ipSegmentPagination = reactive({ page: 1, page_size: 20, total: 0 })
 const ipKeyword = ref('')
-const ipStatusFilter = ref<IpStatus | ''>('')
+const ipAppTypeFilter = ref('')
 const ipBatchBusy = ref(false)
+
+const selectedIps = ref<IpAddress[]>([])
+const ipDetailVisible = ref(false)
+const ipDetailLoading = ref(false)
+const ipDetail = ref<IpSegmentDetail | null>(null)
 
 const IP_STATUS_OPTIONS: Array<{ value: IpStatus; label: string; type: 'success' | 'warning' | 'info' | 'danger' }> = [
   { value: 'free', label: '空闲', type: 'success' },
   { value: 'allocated', label: '已分配', type: 'warning' },
-  { value: 'disabled', label: '已禁用', type: 'info' },
+  { value: 'reserved', label: '保留', type: 'info' },
+  { value: 'disabled', label: '已禁用', type: 'danger' },
+]
+
+const IP_PURPOSE_OPTIONS = [
+  { value: '业务地址', label: '业务地址' },
+  { value: '管理地址', label: '管理地址' },
+  { value: '存储地址', label: '存储地址' },
+  { value: 'BMC地址', label: 'BMC地址' },
+  { value: '备份地址', label: '备份地址' },
+]
+
+const IP_NETWORK_TYPE_OPTIONS = [
+  { value: '互联网', label: '互联网' },
+  { value: '内网', label: '内网' },
+  { value: '专网', label: '专网' },
 ]
 
 function ipStatusMeta(status: string | undefined | null) {
@@ -127,6 +148,7 @@ function ipStatusMeta(status: string | undefined | null) {
 function ipStatusLabel(status: string | undefined | null) {
   return ipStatusMeta(status).label
 }
+
 const bindDeviceOptions = ref<Device[]>([])
 
 const ipDialogVisible = ref(false)
@@ -145,14 +167,31 @@ const ipForm = reactive({
 
 const ipBatchCreateVisible = ref(false)
 const ipBatchForm = reactive({
-  start_system_ip: '',
-  end_system_ip: '',
-  start_bmc_ip: '',
-  netmask: '255.255.255.0',
+  application: '',
+  network: '',
+  prefix_len: 24,
   gateway: '',
+  reserved_count: 0,
+  address_purpose: '业务地址',
+  network_type: '互联网',
+  location: '',
+  remarks: '',
+  start_bmc_ip: '',
   dns: '',
   dns_secondary: '',
-  label_prefix: '',
+})
+
+const ipSegmentEditVisible = ref(false)
+const ipSegmentEditingId = ref<string | null>(null)
+const ipSegmentEditForm = reactive({
+  application: '',
+  gateway: '',
+  address_purpose: '',
+  network_type: '',
+  location: '',
+  remarks: '',
+  dns: '',
+  dns_secondary: '',
 })
 
 const ipBindVisible = ref(false)
@@ -178,6 +217,11 @@ const ipAllocateForm = reactive({
 
 const editVisible = ref(false)
 const editingId = ref<string | null>(null)
+const editingPanel = ref<{
+  port_layout: PortLayout | Record<string, unknown> | null
+  network_kind: string | null
+  device_name: string | null
+} | null>(null)
 const form = reactive({
   name: '',
   hostname: '',
@@ -430,122 +474,36 @@ function genModelCode(name: string) {
   return `MODEL_${Date.now().toString(36).toUpperCase()}`
 }
 
-function genMfgCode(name: string) {
-  const ascii = name
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 40)
-  if (ascii) return `MFG_${ascii}`
-  return `MFG_${Date.now().toString(36).toUpperCase()}`
-}
-
-interface ContractModelEntry {
-  modelName: string
-  manufacturerName: string | null
-}
-
-function collectContractModelEntries(): ContractModelEntry[] {
-  const map = new Map<string, ContractModelEntry>()
-  for (const contract of contracts.value) {
-    for (const item of normalizeContractItems(contract)) {
-      const modelName = item.device_model_name?.trim()
-      if (!modelName) continue
-      const key = modelName.toLowerCase()
-      const manufacturerName = item.manufacturer_name?.trim() || null
-      const existing = map.get(key)
-      if (!existing || (manufacturerName && !existing.manufacturerName)) {
-        map.set(key, { modelName, manufacturerName })
-      }
-    }
-  }
-  return [...map.values()]
-}
-
-function findModelByName(modelName: string) {
-  const key = modelName.trim().toLowerCase()
-  return models.value.find(
-    (m) => m.name.trim().toLowerCase() === key || m.code.trim().toLowerCase() === key,
-  )
-}
-
 async function loadManufacturers() {
   manufacturers.value = await listManufacturers()
 }
 
-async function ensureManufacturer(name: string | null): Promise<string | undefined> {
-  const trimmed = name?.trim()
-  if (!trimmed) return undefined
-  let mfg = manufacturers.value.find((m) => m.name === trimmed)
-  if (mfg) return mfg.id
-  let code = genMfgCode(trimmed)
-  if (manufacturers.value.some((m) => m.code === code)) {
-    code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
-  }
-  try {
-    mfg = await createManufacturer({ code, name: trimmed })
-    manufacturers.value = [...manufacturers.value, mfg].sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )
-    return mfg.id
-  } catch (error: unknown) {
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    const msg = err.response?.data?.message || err.message || ''
-    if (msg.includes('already exists') || msg.includes('已存在')) {
-      await loadManufacturers()
-      mfg = manufacturers.value.find((m) => m.name === trimmed || m.code === code)
-      return mfg?.id
-    }
-    throw error
-  }
-}
-
 async function syncModelsFromContracts(options?: { quiet?: boolean }) {
-  if (!auth.hasPermission('device:create')) return 0
-  const entries = collectContractModelEntries()
-  if (!entries.length) return 0
-  let created = 0
-  for (const entry of entries) {
-    if (findModelByName(entry.modelName)) continue
-    let code = genModelCode(entry.modelName)
-    if (models.value.some((m) => m.code === code)) {
-      code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
-    }
-    const manufacturerId = await ensureManufacturer(entry.manufacturerName)
-    try {
-      const createdModel = await createDeviceModel({
-        code,
-        name: entry.modelName,
-        manufacturer_id: manufacturerId,
-        height_u: 1,
-        description: '来自合同信息同步',
-      })
-      models.value = [...models.value, createdModel].sort((a, b) => a.name.localeCompare(b.name))
-      created += 1
-    } catch (error: unknown) {
-      const err = error as { response?: { data?: { message?: string } }; message?: string }
-      const msg = err.response?.data?.message || err.message || ''
-      if (msg.includes('已存在') || msg.includes('already exists')) {
-        await loadProfileRefs()
-        continue
-      }
-      if (!options?.quiet) throw error
+  if (!auth.hasPermission('device:create')) return null
+  const result = await syncContractModels()
+  if (result.created > 0 || result.deleted > 0) {
+    await loadProfileRefs()
+    await loadManufacturers()
+  }
+  if (!options?.quiet) {
+    const parts: string[] = []
+    if (result.created > 0) parts.push(`新建 ${result.created} 个型号`)
+    if (result.deleted > 0) parts.push(`清理 ${result.deleted} 个无合同引用型号`)
+    if (result.kept_in_use > 0) parts.push(`${result.kept_in_use} 个仍有设备使用已保留`)
+    if (parts.length) {
+      ElMessage.success(`合同型号同步完成：${parts.join('，')}`)
+    } else {
+      ElMessage.info('合同中的设备型号均已存在，无需同步')
     }
   }
-  if (created > 0 && !options?.quiet) {
-    ElMessage.success(`已从合同同步 ${created} 个设备型号`)
-  }
-  return created
+  return result
 }
 
 async function handleSyncModelsFromContracts() {
   syncModelsLoading.value = true
   try {
     await loadLocationRefs()
-    await loadManufacturers()
-    const created = await syncModelsFromContracts()
-    if (created === 0) ElMessage.info('合同中的设备型号均已存在，无需同步')
+    await syncModelsFromContracts()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '从合同同步型号失败')
@@ -1171,19 +1129,118 @@ async function loadData() {
 async function loadIpData() {
   ipLoading.value = true
   try {
-    const data = await listIpAddresses({
-      page: ipPagination.page,
-      page_size: ipPagination.page_size,
+    const data = await listIpSegments({
+      page: ipSegmentPagination.page,
+      page_size: ipSegmentPagination.page_size,
       keyword: ipKeyword.value || undefined,
-      status: ipStatusFilter.value || undefined,
+      address_purpose: ipAppTypeFilter.value || undefined,
     })
-    ipTableData.value = data.items
-    ipPagination.total = data.pagination.total
+    ipSegmentTable.value = data.items
+    ipSegmentPagination.total = data.pagination.total
   } catch {
-    ipTableData.value = []
-    ElMessage.error('加载 IP 地址失败')
+    ipSegmentTable.value = []
+    ElMessage.error('加载地址段失败')
   } finally {
     ipLoading.value = false
+  }
+}
+
+async function openIpSegmentDetail(row: IpSegment) {
+  ipDetailVisible.value = true
+  ipDetailLoading.value = true
+  selectedIps.value = []
+  try {
+    ipDetail.value = await getIpSegment(row.id)
+  } catch (error: unknown) {
+    ipDetail.value = null
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '加载地址段详情失败')
+  } finally {
+    ipDetailLoading.value = false
+  }
+}
+
+async function refreshIpDetail() {
+  if (!ipDetail.value) return
+  ipDetailLoading.value = true
+  try {
+    ipDetail.value = await getIpSegment(ipDetail.value.id)
+    selectedIps.value = []
+  } finally {
+    ipDetailLoading.value = false
+  }
+}
+
+/** 设备删除/下架后刷新地址段列表与详情，使释放后的 IP 立刻可见 */
+async function refreshIpAfterDeviceChange() {
+  try {
+    await loadIpData()
+  } catch {
+    /* ignore */
+  }
+  if (ipDetailVisible.value) {
+    try {
+      await refreshIpDetail()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function handleIpSegmentDelete(row: IpSegment) {
+  await ElMessageBox.confirm(
+    `确定删除地址段「${row.name}」及其全部 ${row.total_count} 个地址吗？`,
+    '删除地址段',
+    { type: 'warning' },
+  )
+  await deleteIpSegment(row.id)
+  ElMessage.success('地址段已删除')
+  if (ipDetail.value?.id === row.id) {
+    ipDetailVisible.value = false
+    ipDetail.value = null
+  }
+  await loadIpData()
+}
+
+function openIpSegmentEdit(row?: IpSegment | null) {
+  const seg = row || ipDetail.value
+  if (!seg) return
+  ipSegmentEditingId.value = seg.id
+  ipSegmentEditForm.application = seg.application || ''
+  ipSegmentEditForm.gateway = seg.gateway || ''
+  ipSegmentEditForm.address_purpose = seg.address_purpose || ''
+  ipSegmentEditForm.network_type = seg.network_type || ''
+  ipSegmentEditForm.location = seg.location || ''
+  ipSegmentEditForm.remarks = seg.remarks || ''
+  ipSegmentEditForm.dns = seg.dns || ''
+  ipSegmentEditForm.dns_secondary = seg.dns_secondary || ''
+  ipSegmentEditVisible.value = true
+}
+
+async function saveIpSegmentEdit() {
+  const id = ipSegmentEditingId.value || ipDetail.value?.id
+  if (!id) return
+  try {
+    const updated = await updateIpSegment(id, {
+      application: ipSegmentEditForm.application.trim() || null,
+      gateway: ipSegmentEditForm.gateway.trim() || null,
+      address_purpose: ipSegmentEditForm.address_purpose.trim() || null,
+      network_type: ipSegmentEditForm.network_type.trim() || null,
+      location: ipSegmentEditForm.location.trim() || null,
+      remarks: ipSegmentEditForm.remarks.trim() || null,
+      dns: ipSegmentEditForm.dns.trim() || null,
+      dns_secondary: ipSegmentEditForm.dns_secondary.trim() || null,
+    })
+    if (ipDetail.value?.id === id) {
+      ipDetail.value = { ...ipDetail.value, ...updated, addresses: ipDetail.value.addresses }
+    }
+    ElMessage.success('地址段已更新')
+    ipSegmentEditVisible.value = false
+    ipSegmentEditingId.value = null
+    await loadIpData()
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '保存失败')
   }
 }
 
@@ -1273,6 +1330,7 @@ function resetForm() {
 
 function openCreate() {
   editingId.value = null
+  editingPanel.value = null
   resetForm()
   editVisible.value = true
 }
@@ -1298,8 +1356,26 @@ function openEdit(row: Device) {
     rack_id: row.rack_id || null,
     u_position: row.u_position || null,
   }
+  editingPanel.value = {
+    port_layout: row.port_layout || null,
+    network_kind: row.network_kind || null,
+    device_name: row.name || row.hostname,
+  }
   editVisible.value = true
   if (form.rack_id) void loadFormRackLayout(form.rack_id)
+  // 列表可能未带全面板时补拉详情
+  if (!row.port_layout) {
+    void getDevice(row.id)
+      .then((d) => {
+        if (editingId.value !== row.id) return
+        editingPanel.value = {
+          port_layout: d.port_layout || null,
+          network_kind: d.network_kind || null,
+          device_name: d.name || d.hostname,
+        }
+      })
+      .catch(() => undefined)
+  }
 }
 
 async function openDeviceFromQuery() {
@@ -1443,12 +1519,15 @@ async function handleDelete(row: Device) {
     return
   }
   try {
-    await ElMessageBox.confirm(`确定删除设备「${row.name || row.hostname}」吗？`, '确认删除', {
-      type: 'warning',
-    })
+    await ElMessageBox.confirm(
+      `确定删除设备「${row.name || row.hostname}」吗？已分配的 IP 将释放为空闲。`,
+      '确认删除',
+      { type: 'warning' },
+    )
     await deleteDevice(row.id)
-    ElMessage.success('删除成功')
+    ElMessage.success('删除成功，已释放关联 IP')
     await loadData()
+    await refreshIpAfterDeviceChange()
   } catch (error: unknown) {
     if (isMessageBoxCancel(error)) return
     const err = error as { response?: { data?: { message?: string } }; message?: string }
@@ -1467,9 +1546,11 @@ async function handleBatchDelete() {
     ElMessage.warning(`已跳过 ${mounted.length} 台已上架设备，仅删除库存设备`)
   }
   try {
-    await ElMessageBox.confirm(`确定删除选中的 ${selectedDevices.value.length} 台设备吗？`, '批量删除', {
-      type: 'warning',
-    })
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${selectedDevices.value.length} 台设备吗？已分配的 IP 将释放为空闲。`,
+      '批量删除',
+      { type: 'warning' },
+    )
   } catch (error: unknown) {
     if (isMessageBoxCancel(error)) return
     throw error
@@ -1477,9 +1558,10 @@ async function handleBatchDelete() {
   batchBusy.value = true
   try {
     const result = await batchDeleteDevices(selectedDevices.value.map((d) => d.id))
-    ElMessage.success(`删除 ${result.deleted} 台，跳过 ${result.skipped} 台`)
+    ElMessage.success(`删除 ${result.deleted} 台，跳过 ${result.skipped} 台（已释放关联 IP）`)
     if (result.errors.length) ElMessage.warning(result.errors.slice(0, 3).join('; '))
     await loadData()
+    await refreshIpAfterDeviceChange()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '批量删除失败')
@@ -1494,15 +1576,18 @@ async function handleBatchUnmount() {
     ElMessage.warning('请选择已上架设备')
     return
   }
-  await ElMessageBox.confirm(`确定下架选中的 ${mounted.length} 台设备吗？`, '批量下架', {
-    type: 'warning',
-  })
+  await ElMessageBox.confirm(
+    `确定下架选中的 ${mounted.length} 台设备吗？已分配的 IP 将释放为空闲。`,
+    '批量下架',
+    { type: 'warning' },
+  )
   batchBusy.value = true
   try {
     const result = await batchUnmountDevices(mounted.map((d) => d.id))
-    ElMessage.success(`下架 ${result.unmounted} 台，跳过 ${result.skipped} 台`)
+    ElMessage.success(`下架 ${result.unmounted} 台，跳过 ${result.skipped} 台（已释放关联 IP）`)
     if (result.errors.length) ElMessage.warning(result.errors.slice(0, 3).join('; '))
     await loadData()
+    await refreshIpAfterDeviceChange()
   } finally {
     batchBusy.value = false
   }
@@ -1577,9 +1662,25 @@ async function handleMount() {
 }
 
 async function handleUnmount(row: Device) {
-  await unmountDevice(row.id)
-  ElMessage.success('下架成功')
-  await loadData()
+  try {
+    await ElMessageBox.confirm(
+      `确定下架「${row.name || row.hostname}」吗？已分配的 IP 将释放为空闲。`,
+      '确认下架',
+      { type: 'warning' },
+    )
+  } catch (error: unknown) {
+    if (isMessageBoxCancel(error)) return
+    throw error
+  }
+  try {
+    await unmountDevice(row.id)
+    ElMessage.success('下架成功，已释放关联 IP')
+    await loadData()
+    await refreshIpAfterDeviceChange()
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '下架失败')
+  }
 }
 
 function openBatchCreate() {
@@ -1739,12 +1840,6 @@ function openProfileCreate() {
     openModelCreate()
     return
   }
-  if (profileSubTab.value === 'param') {
-    paramEditingId.value = null
-    resetParamForm()
-    paramDialogVisible.value = true
-    return
-  }
   if (profileSubTab.value === 'bmc') {
     bmcEditingId.value = null
     resetBmcForm()
@@ -1765,12 +1860,6 @@ function openProfileEdit(row: ParamProfile | BmcProfile | SystemProfile | Device
     openModelEdit(row as DeviceModel)
     return
   }
-  if (profileSubTab.value === 'param') {
-    paramEditingId.value = row.id
-    fillParamForm(row as ParamProfile)
-    paramDialogVisible.value = true
-    return
-  }
   if (profileSubTab.value === 'bmc') {
     bmcEditingId.value = row.id
     fillBmcForm(row as BmcProfile)
@@ -1780,31 +1869,6 @@ function openProfileEdit(row: ParamProfile | BmcProfile | SystemProfile | Device
   systemEditingId.value = row.id
   fillSystemForm(row as SystemProfile)
   systemDialogVisible.value = true
-}
-
-async function saveParamProfile() {
-  if (!paramForm.code || !paramForm.name) {
-    ElMessage.warning('请填写编码与名称')
-    return
-  }
-  const payload = buildParamPayload()
-  if (paramEditingId.value) {
-    await updateParamProfile(paramEditingId.value, {
-      name: paramForm.name,
-      payload,
-      description: paramForm.description || null,
-    })
-  } else {
-    await createParamProfile({
-      code: paramForm.code,
-      name: paramForm.name,
-      payload,
-      description: paramForm.description || null,
-    })
-  }
-  ElMessage.success('参数档案已保存')
-  paramDialogVisible.value = false
-  await loadProfileRefs()
 }
 
 async function saveBmcProfile() {
@@ -1867,8 +1931,7 @@ async function removeProfile(row: ParamProfile | BmcProfile | SystemProfile | De
     return
   }
   await ElMessageBox.confirm(`确定删除档案「${row.name}」吗？`, '确认删除', { type: 'warning' })
-  if (profileSubTab.value === 'param') await deleteParamProfile(row.id)
-  else if (profileSubTab.value === 'bmc') await deleteBmcProfile(row.id)
+  if (profileSubTab.value === 'bmc') await deleteBmcProfile(row.id)
   else await deleteSystemProfile(row.id)
   ElMessage.success('已删除')
   await loadProfileRefs()
@@ -1887,9 +1950,7 @@ function resetIpForm() {
 }
 
 function openIpCreate() {
-  ipEditingId.value = null
-  resetIpForm()
-  ipDialogVisible.value = true
+  openIpBatchCreate()
 }
 
 function openIpEdit(row: IpAddress) {
@@ -1907,6 +1968,7 @@ function openIpEdit(row: IpAddress) {
 }
 
 async function saveIp() {
+  if (!ipEditingId.value) return
   if (!ipForm.system_ip.trim()) {
     ElMessage.warning('请填写系统 IP')
     return
@@ -1923,14 +1985,10 @@ async function saveIp() {
     description: ipForm.description.trim() || null,
   }
   try {
-    if (ipEditingId.value) {
-      await updateIpAddress(ipEditingId.value, payload)
-      ElMessage.success('已保存')
-    } else {
-      await createIpAddress(payload)
-      ElMessage.success('创建成功')
-    }
+    await updateIpAddress(ipEditingId.value, payload)
+    ElMessage.success('已保存')
     ipDialogVisible.value = false
+    await refreshIpDetail()
     await loadIpData()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string; detail?: string } }; message?: string }
@@ -1944,47 +2002,58 @@ async function handleIpDelete(row: IpAddress) {
   await ElMessageBox.confirm(`确定删除 IP「${row.system_ip}」吗？`, '确认删除', { type: 'warning' })
   await deleteIpAddress(row.id)
   ElMessage.success('删除成功')
+  await refreshIpDetail()
   await loadIpData()
 }
 
 function openIpBatchCreate() {
-  ipBatchForm.start_system_ip = ''
-  ipBatchForm.end_system_ip = ''
-  ipBatchForm.start_bmc_ip = ''
-  ipBatchForm.netmask = '255.255.255.0'
+  ipBatchForm.application = ''
+  ipBatchForm.network = ''
+  ipBatchForm.prefix_len = 24
   ipBatchForm.gateway = ''
+  ipBatchForm.reserved_count = 0
+  ipBatchForm.address_purpose = '业务地址'
+  ipBatchForm.network_type = '互联网'
+  ipBatchForm.location = ''
+  ipBatchForm.remarks = ''
+  ipBatchForm.start_bmc_ip = ''
   ipBatchForm.dns = ''
   ipBatchForm.dns_secondary = ''
-  ipBatchForm.label_prefix = ''
   ipBatchCreateVisible.value = true
 }
 
 async function submitIpBatchCreate(ev?: Event) {
   ev?.preventDefault?.()
-  if (!ipBatchForm.start_system_ip.trim() || !ipBatchForm.end_system_ip.trim()) {
-    ElMessage.warning('请填写系统 IP 起止地址')
+  if (!ipBatchForm.network.trim()) {
+    ElMessage.warning('请填写 IP 地址段，如 172.17.0.0')
+    return
+  }
+  if (!ipBatchForm.prefix_len || ipBatchForm.prefix_len < 8 || ipBatchForm.prefix_len > 30) {
+    ElMessage.warning('请填写有效掩码位数（8–30）')
     return
   }
   ipBatchBusy.value = true
   try {
-    const result = await batchCreateIpAddresses({
-      start_system_ip: ipBatchForm.start_system_ip.trim(),
-      end_system_ip: ipBatchForm.end_system_ip.trim(),
-      start_bmc_ip: ipBatchForm.start_bmc_ip.trim() || null,
-      netmask: ipBatchForm.netmask.trim() || null,
+    const detail = await createIpSegment({
+      application: ipBatchForm.application.trim() || null,
+      network: ipBatchForm.network.trim(),
+      prefix_len: Number(ipBatchForm.prefix_len),
       gateway: ipBatchForm.gateway.trim() || null,
+      reserved_count: Number(ipBatchForm.reserved_count) || 0,
+      address_purpose: ipBatchForm.address_purpose || null,
+      network_type: ipBatchForm.network_type || null,
+      location: ipBatchForm.location.trim() || null,
+      remarks: ipBatchForm.remarks.trim() || null,
+      start_bmc_ip: ipBatchForm.start_bmc_ip.trim() || null,
       dns: ipBatchForm.dns.trim() || null,
       dns_secondary: ipBatchForm.dns_secondary.trim() || null,
-      label_prefix: ipBatchForm.label_prefix.trim() || null,
     })
-    if (!result) {
-      ElMessage.error('生成失败：接口无返回数据')
-      return
-    }
-    ElMessage.success(`生成 ${result.created} 条，跳过 ${result.skipped} 条`)
-    if (result.errors?.length) ElMessage.warning(result.errors.slice(0, 5).join('; '))
+    ElMessage.success(
+      `地址段已创建：已分配 ${detail.allocated_count} · 空闲 ${detail.free_count} · 保留 ${detail.reserved_count}`,
+    )
     ipBatchCreateVisible.value = false
     await loadIpData()
+    await openIpSegmentDetail(detail)
   } catch (error: unknown) {
     const err = error as {
       response?: {
@@ -2005,7 +2074,7 @@ async function submitIpBatchCreate(ev?: Event) {
         || err.response?.data?.message
         || err.response?.data?.detail
         || err.message
-        || '批量生成失败',
+        || '创建地址段失败',
     )
   } finally {
     ipBatchBusy.value = false
@@ -2023,6 +2092,7 @@ async function handleIpBatchDelete() {
     ElMessage.success(`删除 ${result.deleted} 条，跳过 ${result.skipped} 条`)
     if (result.errors.length) ElMessage.warning(result.errors.slice(0, 3).join('; '))
     await loadIpData()
+    if (ipDetailVisible.value) await refreshIpDetail()
   } finally {
     ipBatchBusy.value = false
   }
@@ -2085,6 +2155,7 @@ async function handleIpBatchStatus(status: IpStatus) {
     ElMessage.success(`已更新 ${result.updated} 条，跳过 ${result.skipped} 条`)
     if (result.errors?.length) ElMessage.warning(result.errors.slice(0, 5).join('; '))
     await loadIpData()
+    if (ipDetailVisible.value) await refreshIpDetail()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '状态更新失败')
@@ -2101,6 +2172,7 @@ async function handleIpRelease(row: IpAddress) {
     await bindIpAddress(row.id, { bind_type: 'none' })
     ElMessage.success('已释放，状态已更新')
     await loadIpData()
+    if (ipDetailVisible.value) await refreshIpDetail()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '释放失败')
@@ -2113,6 +2185,7 @@ async function handleIpToggleDisabled(row: IpAddress) {
     await batchSetIpStatus([row.id], next)
     ElMessage.success(next === 'disabled' ? '已禁用' : '已启用')
     await loadIpData()
+    if (ipDetailVisible.value) await refreshIpDetail()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '操作失败')
@@ -2215,6 +2288,7 @@ async function submitIpBind() {
     }
     ipBindVisible.value = false
     await loadIpData()
+    if (ipDetailVisible.value) await refreshIpDetail()
   } finally {
     ipBatchBusy.value = false
   }
@@ -2252,6 +2326,7 @@ async function submitIpAllocate() {
     if (result.errors.length) ElMessage.warning(result.errors.slice(0, 5).join('; '))
     ipAllocateVisible.value = false
     await loadIpData()
+    if (ipDetailVisible.value) await refreshIpDetail()
     await loadData()
   } finally {
     ipBatchBusy.value = false
@@ -2299,7 +2374,6 @@ async function handleImportFile(event: Event) {
 }
 
 const currentProfiles = computed(() => {
-  if (profileSubTab.value === 'param') return paramProfiles.value
   if (profileSubTab.value === 'bmc') return bmcProfiles.value
   return systemProfiles.value
 })
@@ -2471,7 +2545,6 @@ watch(
 
         <el-tab-pane label="关联档案" name="profiles">
           <el-tabs v-model="profileSubTab" type="card">
-            <el-tab-pane label="参数档案" name="param" />
             <el-tab-pane label="BMC 档案" name="bmc" />
             <el-tab-pane label="系统用户档案" name="system" />
             <el-tab-pane label="设备类型" name="type" />
@@ -2565,154 +2638,97 @@ watch(
             <div class="actions">
               <el-input
                 v-model="ipKeyword"
-                placeholder="搜索系统 IP / BMC / VIP / 标签"
+                placeholder="搜索应用 / 地址段 / 网关 / 机房位置"
                 clearable
-                style="width: 220px"
+                style="width: 260px"
                 @keyup.enter="loadIpData"
               />
               <el-select
-                v-model="ipStatusFilter"
+                v-model="ipAppTypeFilter"
                 clearable
-                placeholder="地址状态"
-                style="width: 120px"
+                filterable
+                allow-create
+                placeholder="地址用途"
+                style="width: 140px"
                 @change="loadIpData"
               >
                 <el-option
-                  v-for="o in IP_STATUS_OPTIONS"
+                  v-for="o in IP_PURPOSE_OPTIONS"
                   :key="o.value"
                   :label="o.label"
                   :value="o.value"
                 />
               </el-select>
               <el-button @click="loadIpData">搜索</el-button>
-              <el-button v-if="canUpdate" type="primary" @click="openIpCreate">新建</el-button>
-              <el-button v-if="canUpdate" @click="openIpBatchCreate">批量生成</el-button>
-              <el-button
-                v-if="canDelete"
-                type="danger"
-                :disabled="!selectedIps.length"
-                :loading="ipBatchBusy"
-                @click="handleIpBatchDelete"
-              >
-                批量删除
-              </el-button>
-              <el-button
-                v-if="canUpdate"
-                :disabled="!selectedIps.length"
-                :loading="ipBatchBusy"
-                @click="openIpBindBatch"
-              >
-                关联
-              </el-button>
-              <el-button
-                v-if="canUpdate"
-                type="success"
-                :disabled="!selectedIps.length"
-                :loading="ipBatchBusy"
-                @click="openIpAllocate"
-              >
-                批量分配到机柜
-              </el-button>
-              <el-button
-                v-if="canUpdate"
-                :disabled="!selectedIps.length"
-                :loading="ipBatchBusy"
-                @click="handleIpBatchStatus('disabled')"
-              >
-                批量禁用
-              </el-button>
-              <el-button
-                v-if="canUpdate"
-                :disabled="!selectedIps.length"
-                :loading="ipBatchBusy"
-                @click="handleIpBatchStatus('free')"
-              >
-                批量启用
-              </el-button>
-              <span v-if="selectedIps.length" class="batch-hint">已选 {{ selectedIps.length }} 条</span>
+              <el-button v-if="canUpdate" type="primary" @click="openIpCreate">新建地址段</el-button>
             </div>
           </div>
 
-          <el-table
-            v-loading="ipLoading"
-            :data="ipTableData"
-            stripe
-            @selection-change="onIpSelectionChange"
-          >
-            <el-table-column type="selection" width="48" />
-            <el-table-column prop="system_ip" label="系统 IP" min-width="120" />
-            <el-table-column prop="bmc_ip" label="BMC IP" min-width="120">
+          <el-table v-loading="ipLoading" :data="ipSegmentTable" stripe>
+            <el-table-column type="index" label="序号" width="64" :index="(i: number) => (ipSegmentPagination.page - 1) * ipSegmentPagination.page_size + i + 1" />
+            <el-table-column prop="application" label="应用" min-width="90">
+              <template #default="{ row }">{{ row.application || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="IP地址段" min-width="130">
               <template #default="{ row }">
-                <span :class="{ 'text-muted': !row.bmc_ip }">{{ row.bmc_ip || '—' }}</span>
+                <el-button type="primary" link @click="openIpSegmentDetail(row)">
+                  {{ row.network || row.start_ip }}
+                </el-button>
               </template>
             </el-table-column>
-            <el-table-column prop="vip" label="VIP" min-width="120">
-              <template #default="{ row }">
-                <span :class="row.vip ? 'vip-highlight' : 'text-muted'">{{ row.vip || '—' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="100">
-              <template #default="{ row }">
-                <el-tag :type="ipStatusMeta(row.status).type" size="small">
-                  {{ ipStatusLabel(row.status) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="netmask" label="掩码" min-width="110">
-              <template #default="{ row }">
-                <span :class="{ 'text-muted': !row.netmask }">{{ row.netmask || '—' }}</span>
-              </template>
+            <el-table-column label="掩码" width="72" align="center">
+              <template #default="{ row }">{{ row.prefix_len || row.netmask || '—' }}</template>
             </el-table-column>
             <el-table-column prop="gateway" label="网关" min-width="120">
+              <template #default="{ row }">{{ row.gateway || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="已分配个数" width="100" align="center" prop="allocated_count" />
+            <el-table-column label="空闲可用" width="90" align="center">
               <template #default="{ row }">
-                <span :class="{ 'text-muted': !row.gateway }">{{ row.gateway || '—' }}</span>
+                <span class="ip-free">{{ row.free_count }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="DNS" min-width="140">
+            <el-table-column label="保留个数" width="90" align="center" prop="reserved_count" />
+            <el-table-column label="地址用途" min-width="100">
+              <template #default="{ row }">{{ row.address_purpose || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="网络类型" width="100">
+              <template #default="{ row }">{{ row.network_type || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="所属机房位置" min-width="120">
+              <template #default="{ row }">{{ row.location || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="备注" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.remarks || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="180" fixed="right">
               <template #default="{ row }">
-                <span :class="{ 'text-muted': !row.dns && !row.dns_secondary }">
-                  {{
-                    [row.dns, row.dns_secondary].filter(Boolean).join(' / ') || '—'
-                  }}
-                </span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="label" label="标签" min-width="100">
-              <template #default="{ row }">
-                <span :class="{ 'text-muted': !row.label }">{{ row.label || '—' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="关联类型" width="100">
-              <template #default="{ row }">{{ bindTypeLabel(row.bind_type) }}</template>
-            </el-table-column>
-            <el-table-column label="关联位置" min-width="180">
-              <template #default="{ row }">{{ formatBindLocation(row) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="260" fixed="right">
-              <template #default="{ row }">
-                <el-button v-if="canUpdate" type="primary" link @click="openIpEdit(row)">编辑</el-button>
-                <el-button v-if="canUpdate" type="primary" link @click="openIpBindSingle(row)">关联</el-button>
+                <el-button type="primary" link @click="openIpSegmentDetail(row)">详情</el-button>
                 <el-button
-                  v-if="canUpdate && row.bind_type !== 'none'"
-                  type="warning"
+                  v-if="canUpdate"
+                  type="primary"
                   link
-                  @click="handleIpRelease(row)"
+                  @click="openIpSegmentEdit(row)"
                 >
-                  释放
+                  编辑
                 </el-button>
-                <el-button v-if="canUpdate" type="info" link @click="handleIpToggleDisabled(row)">
-                  {{ row.status === 'disabled' ? '启用' : '禁用' }}
+                <el-button
+                  v-if="canDelete"
+                  type="danger"
+                  link
+                  @click="handleIpSegmentDelete(row)"
+                >
+                  删除
                 </el-button>
-                <el-button v-if="canDelete" type="danger" link @click="handleIpDelete(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
 
           <div class="pager">
             <el-pagination
-              v-model:current-page="ipPagination.page"
-              v-model:page-size="ipPagination.page_size"
-              :total="ipPagination.total"
+              v-model:current-page="ipSegmentPagination.page"
+              v-model:page-size="ipSegmentPagination.page_size"
+              :total="ipSegmentPagination.total"
               layout="total, prev, pager, next"
               @current-change="loadIpData"
             />
@@ -2814,6 +2830,7 @@ watch(
               :total-u="formRackMeta?.total_u || 42"
               :slots="formLayoutSlots"
               :total-power="formLayoutTotalPower"
+              :visual-style="(formRackMeta?.visual_style as any) || 'classic'"
               :selected-u="form.u_position"
               :highlight-device-id="editingId"
               compact
@@ -2822,7 +2839,7 @@ watch(
             <p class="bind-device-hint">点击空闲 U 位选择上架位置；已上架设备会高亮显示</p>
           </div>
         </el-form-item>
-        <el-form-item label="参数档案">
+        <el-form-item label="设备参数">
           <el-select v-model="form.param_profile_id" clearable style="width: 100%" filterable>
             <el-option
               v-for="p in paramProfiles"
@@ -2863,7 +2880,7 @@ watch(
             <el-option
               v-for="c in formContracts"
               :key="c.id"
-              :label="`${c.contract_no} · ${(c.device_items?.length ? c.device_items.map((i) => [i.device_name, i.device_model_name, i.manufacturer_name, i.quantity ? `×${i.quantity}` : null].filter(Boolean).join('/')).join('；') : [c.device_name, c.device_model_name, c.manufacturer_name].filter(Boolean).join(' / ')) || '—'}`"
+              :label="c.contract_no"
               :value="c.id"
             />
           </el-select>
@@ -2871,6 +2888,14 @@ watch(
         <el-form-item label="描述">
           <el-input v-model="form.description" type="textarea" :rows="2" />
         </el-form-item>
+        <template v-if="editingId && editingPanel?.port_layout">
+          <el-divider content-position="left">设备定义面板</el-divider>
+          <DevicePanelPreview
+            :port-layout="editingPanel.port_layout"
+            :network-kind="editingPanel.network_kind"
+            :device-name="editingPanel.device_name"
+          />
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -2915,6 +2940,7 @@ watch(
             :total-u="mountRackMeta?.total_u || 42"
             :slots="mountLayoutSlots"
             :total-power="mountLayoutTotalPower"
+            :visual-style="(mountRackMeta?.visual_style as any) || 'classic'"
             :selected-u="mountForm.u_position"
             :highlight-device-id="mountForm.device_id"
             compact
@@ -2949,6 +2975,7 @@ watch(
           :total-u="rackDetailRack.total_u"
           :slots="rackDetailSlots"
           :total-power="rackDetailPower"
+          :visual-style="(rackDetailRack.visual_style as any) || 'classic'"
           :highlight-device-id="rackDetailDeviceId"
         />
       </div>
@@ -3131,7 +3158,7 @@ watch(
 
     <el-dialog
       v-model="ipDialogVisible"
-      :title="ipEditingId ? '编辑 IP 地址' : '新建 IP 地址'"
+      title="编辑 IP 地址"
       width="560px"
     >
       <el-form label-width="100px" @submit.prevent>
@@ -3171,47 +3198,199 @@ watch(
 
     <el-dialog
       v-model="ipBatchCreateVisible"
-      title="批量生成 IP"
-      width="560px"
+      title="新建地址段"
+      width="600px"
       destroy-on-close
       @closed="ipBatchBusy = false"
     >
-      <el-form label-width="110px" @submit.prevent="submitIpBatchCreate">
-        <el-form-item label="起始系统 IP" required>
-          <el-input v-model="ipBatchForm.start_system_ip" placeholder="如 192.168.1.10" />
+      <el-form label-width="120px" @submit.prevent="submitIpBatchCreate">
+        <el-form-item label="应用">
+          <el-input v-model="ipBatchForm.application" placeholder="如 B" />
         </el-form-item>
-        <el-form-item label="结束系统 IP" required>
-          <el-input v-model="ipBatchForm.end_system_ip" placeholder="如 192.168.1.20" />
+        <el-form-item label="IP地址段" required>
+          <el-input v-model="ipBatchForm.network" placeholder="如 172.17.0.0" />
         </el-form-item>
-        <el-form-item label="起始 BMC IP">
-          <el-input v-model="ipBatchForm.start_bmc_ip" placeholder="可选，与系统 IP 同步递增" />
-        </el-form-item>
-        <el-form-item label="子网掩码">
-          <el-input v-model="ipBatchForm.netmask" placeholder="如 255.255.255.0 或 /24" />
+        <el-form-item label="掩码" required>
+          <el-input-number v-model="ipBatchForm.prefix_len" :min="8" :max="30" controls-position="right" />
+          <span class="field-hint-inline">位数，例如 24 表示 /24</span>
         </el-form-item>
         <el-form-item label="网关">
-          <el-input v-model="ipBatchForm.gateway" placeholder="如 192.168.1.1" />
+          <el-input v-model="ipBatchForm.gateway" placeholder="如 172.17.0.1" />
         </el-form-item>
-        <el-form-item label="DNS">
-          <el-input v-model="ipBatchForm.dns" placeholder="可选" />
+        <el-form-item label="保留个数">
+          <el-input-number v-model="ipBatchForm.reserved_count" :min="0" :max="1024" controls-position="right" />
         </el-form-item>
-        <el-form-item label="备用 DNS">
-          <el-input v-model="ipBatchForm.dns_secondary" placeholder="可选" />
+        <el-form-item label="地址用途">
+          <el-select v-model="ipBatchForm.address_purpose" clearable filterable allow-create style="width: 100%">
+            <el-option v-for="o in IP_PURPOSE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+          </el-select>
         </el-form-item>
-        <el-form-item label="标签前缀">
-          <el-input v-model="ipBatchForm.label_prefix" placeholder="可选" />
+        <el-form-item label="网络类型">
+          <el-select v-model="ipBatchForm.network_type" clearable filterable allow-create style="width: 100%">
+            <el-option v-for="o in IP_NETWORK_TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="所属机房位置">
+          <el-input v-model="ipBatchForm.location" placeholder="如 亦庄" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="ipBatchForm.remarks" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="起始 BMC IP">
+          <el-input v-model="ipBatchForm.start_bmc_ip" placeholder="可选，按序递增" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button native-type="button" @click="ipBatchCreateVisible = false">取消</el-button>
-        <el-button
-          native-type="button"
-          type="primary"
-          :loading="ipBatchBusy"
-          @click.prevent="submitIpBatchCreate"
-        >
-          生成
-        </el-button>
+        <el-button @click="ipBatchCreateVisible = false">取消</el-button>
+        <el-button type="primary" :loading="ipBatchBusy" @click="submitIpBatchCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <el-drawer
+      v-model="ipDetailVisible"
+      :title="ipDetail ? `地址段详情 · ${ipDetail.name}` : '地址段详情'"
+      size="860px"
+      destroy-on-close
+    >
+      <div v-loading="ipDetailLoading" class="ip-segment-detail">
+        <template v-if="ipDetail">
+          <div class="ip-segment-meta">
+            <div class="meta-item"><label>应用</label><span>{{ ipDetail.application || '—' }}</span></div>
+            <div class="meta-item"><label>IP地址段</label><span>{{ ipDetail.network }}/{{ ipDetail.prefix_len }}</span></div>
+            <div class="meta-item"><label>网关</label><span>{{ ipDetail.gateway || '—' }}</span></div>
+            <div class="meta-item"><label>已分配</label><span>{{ ipDetail.allocated_count }}</span></div>
+            <div class="meta-item"><label>空闲可用</label><span class="ip-free">{{ ipDetail.free_count }}</span></div>
+            <div class="meta-item"><label>保留个数</label><span>{{ ipDetail.reserved_count }}</span></div>
+            <div class="meta-item"><label>地址用途</label><span>{{ ipDetail.address_purpose || '—' }}</span></div>
+            <div class="meta-item"><label>网络类型</label><span>{{ ipDetail.network_type || '—' }}</span></div>
+            <div class="meta-item"><label>所属机房位置</label><span>{{ ipDetail.location || '—' }}</span></div>
+            <div class="meta-item"><label>备注</label><span>{{ ipDetail.remarks || '—' }}</span></div>
+          </div>
+          <div class="actions" style="margin-bottom: 12px">
+            <el-button v-if="canUpdate" @click="openIpSegmentEdit">编辑段信息</el-button>
+            <el-button
+              v-if="canUpdate"
+              :disabled="!selectedIps.length"
+              :loading="ipBatchBusy"
+              @click="openIpBindBatch"
+            >
+              关联
+            </el-button>
+            <el-button
+              v-if="canUpdate"
+              type="success"
+              :disabled="!selectedIps.length"
+              :loading="ipBatchBusy"
+              @click="openIpAllocate"
+            >
+              批量分配到机柜
+            </el-button>
+            <el-button
+              v-if="canUpdate"
+              :disabled="!selectedIps.length"
+              :loading="ipBatchBusy"
+              @click="handleIpBatchStatus('disabled')"
+            >
+              批量禁用
+            </el-button>
+            <el-button
+              v-if="canUpdate"
+              :disabled="!selectedIps.length"
+              :loading="ipBatchBusy"
+              @click="handleIpBatchStatus('free')"
+            >
+              批量启用
+            </el-button>
+            <el-button
+              v-if="canDelete"
+              type="danger"
+              :disabled="!selectedIps.length"
+              :loading="ipBatchBusy"
+              @click="handleIpBatchDelete"
+            >
+              批量删除
+            </el-button>
+            <span v-if="selectedIps.length" class="batch-hint">已选 {{ selectedIps.length }} 条</span>
+          </div>
+          <el-table
+            :data="ipDetail.addresses"
+            stripe
+            max-height="560"
+            @selection-change="onIpSelectionChange"
+          >
+            <el-table-column type="selection" width="48" />
+            <el-table-column prop="system_ip" label="系统 IP" min-width="120" />
+            <el-table-column prop="bmc_ip" label="BMC IP" min-width="120">
+              <template #default="{ row }">
+                <span :class="{ 'text-muted': !row.bmc_ip }">{{ row.bmc_ip || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="ipStatusMeta(row.status).type" size="small">
+                  {{ ipStatusLabel(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="分配设备" min-width="140">
+              <template #default="{ row }">
+                <span :class="{ 'text-muted': !row.device_name }">{{ row.device_name || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="关联位置" min-width="160">
+              <template #default="{ row }">{{ formatBindLocation(row) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="220" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="canUpdate" type="primary" link @click="openIpEdit(row)">编辑</el-button>
+                <el-button v-if="canUpdate" type="primary" link @click="openIpBindSingle(row)">关联</el-button>
+                <el-button
+                  v-if="canUpdate && row.bind_type !== 'none'"
+                  type="warning"
+                  link
+                  @click="handleIpRelease(row)"
+                >
+                  释放
+                </el-button>
+                <el-button v-if="canUpdate" type="info" link @click="handleIpToggleDisabled(row)">
+                  {{ row.status === 'disabled' ? '启用' : '禁用' }}
+                </el-button>
+                <el-button v-if="canDelete" type="danger" link @click="handleIpDelete(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+      </div>
+    </el-drawer>
+
+    <el-dialog v-model="ipSegmentEditVisible" title="编辑地址段信息" width="520px">
+      <el-form label-width="120px">
+        <el-form-item label="应用">
+          <el-input v-model="ipSegmentEditForm.application" />
+        </el-form-item>
+        <el-form-item label="网关">
+          <el-input v-model="ipSegmentEditForm.gateway" />
+        </el-form-item>
+        <el-form-item label="地址用途">
+          <el-select v-model="ipSegmentEditForm.address_purpose" clearable filterable allow-create style="width: 100%">
+            <el-option v-for="o in IP_PURPOSE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="网络类型">
+          <el-select v-model="ipSegmentEditForm.network_type" clearable filterable allow-create style="width: 100%">
+            <el-option v-for="o in IP_NETWORK_TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="所属机房位置">
+          <el-input v-model="ipSegmentEditForm.location" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="ipSegmentEditForm.remarks" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="ipSegmentEditVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveIpSegmentEdit">保存</el-button>
       </template>
     </el-dialog>
 
@@ -3398,207 +3577,6 @@ watch(
       <template #footer>
         <el-button @click="ipAllocateVisible = false">取消</el-button>
         <el-button type="primary" :loading="ipBatchBusy" @click="submitIpAllocate">确认分配</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="paramDialogVisible"
-      :title="paramEditingId ? '编辑参数档案' : '新建参数档案'"
-      width="760px"
-      destroy-on-close
-      top="4vh"
-    >
-      <el-form label-width="100px" class="param-form">
-        <el-row :gutter="12">
-          <el-col :span="12">
-            <el-form-item label="编码" required>
-              <el-input v-model="paramForm.code" :disabled="!!paramEditingId" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="名称" required>
-              <el-input v-model="paramForm.name" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="描述">
-          <el-input v-model="paramForm.description" type="textarea" :rows="2" />
-        </el-form-item>
-
-        <div class="param-section-title">CPU</div>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="核心数">
-              <el-input-number v-model="paramForm.cpu_cores" :min="1" :max="1024" controls-position="right" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="架构">
-              <el-select v-model="paramForm.cpu_architecture" clearable style="width: 100%" placeholder="选择架构">
-                <el-option label="C86" value="c86" />
-                <el-option label="ARM" value="arm" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="型号">
-              <el-input v-model="paramForm.cpu_model" placeholder="可选" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <div class="param-section-title">内存</div>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="大小(GB)">
-              <el-input-number v-model="paramForm.memory_size_gb" :min="0" :step="8" controls-position="right" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="DDR 类型">
-              <el-select v-model="paramForm.memory_ddr_type" allow-create filterable style="width: 100%">
-                <el-option v-for="d in DDR_OPTIONS" :key="d" :label="d" :value="d" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="条数">
-              <el-input-number v-model="paramForm.memory_modules" :min="0" :max="128" controls-position="right" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <div class="param-section-title">
-          <span>磁盘规格（默认 {{ DEFAULT_DISK_SPEC_COUNT }} 种，可继续添加）</span>
-          <el-button
-            type="primary"
-            link
-            :disabled="paramForm.disks.length >= MAX_DISK_SPEC_COUNT"
-            @click="addDiskRow"
-          >
-            + 添加磁盘规格
-          </el-button>
-        </div>
-        <p class="disk-hint">
-          每种规格填写：单盘容量、块数、接口与盘类型。未填写的规格不会保存。当前
-          {{ paramForm.disks.length }} / {{ MAX_DISK_SPEC_COUNT }}
-        </p>
-        <div v-for="(disk, idx) in paramForm.disks" :key="idx" class="disk-row">
-          <el-form-item :label="`规格 ${idx + 1}`" label-width="70px">
-            <div class="disk-fields">
-              <el-input-number
-                v-model="disk.size_gb"
-                :min="0"
-                :step="100"
-                placeholder="单盘GB"
-                controls-position="right"
-              />
-              <span class="disk-field-label">GB ×</span>
-              <el-input-number
-                v-model="disk.count"
-                :min="0"
-                :max="100"
-                placeholder="块数"
-                controls-position="right"
-              />
-              <span class="disk-field-label">块</span>
-              <el-select
-                v-model="disk.interface"
-                clearable
-                allow-create
-                filterable
-                placeholder="接口"
-                style="width: 110px"
-              >
-                <el-option v-for="i in DISK_INTERFACE_OPTIONS" :key="i" :label="i" :value="i" />
-              </el-select>
-              <el-select
-                v-model="disk.media_type"
-                clearable
-                placeholder="盘类型"
-                style="width: 110px"
-              >
-                <el-option
-                  v-for="m in DISK_MEDIA_OPTIONS"
-                  :key="m.value"
-                  :label="m.label"
-                  :value="m.value"
-                />
-              </el-select>
-              <el-button type="danger" link @click="removeDiskRow(idx)">删除</el-button>
-            </div>
-          </el-form-item>
-        </div>
-
-        <div class="param-section-title">风扇 / 电源 / RAID</div>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="风扇数量">
-              <el-input-number v-model="paramForm.fan_count" :min="0" :max="64" controls-position="right" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="风扇型号">
-              <el-input v-model="paramForm.fan_model" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="电源(W)">
-              <el-input-number v-model="paramForm.psu_power_w" :min="0" :step="100" controls-position="right" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="12">
-          <el-col :span="10">
-            <el-form-item label="RAID 型号">
-              <el-input v-model="paramForm.raid_model" placeholder="如 PERC H755" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="14">
-            <el-form-item label="RAID 参数">
-              <el-input v-model="paramForm.raid_params" placeholder="如 RAID10 / 缓存 8GB" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <div class="param-section-title">支持的操作系统</div>
-        <el-form-item label="操作系统">
-          <div class="os-editor">
-            <el-tag
-              v-for="os in paramForm.supported_os"
-              :key="os"
-              closable
-              style="margin-right: 6px; margin-bottom: 6px"
-              @close="removeOsTag(os)"
-            >
-              {{ os }}
-            </el-tag>
-            <div class="os-add">
-              <el-input
-                v-model="osInput"
-                placeholder="输入系统名后添加，如 Ubuntu 22.04"
-                style="width: 260px"
-                @keyup.enter="addOsTag"
-              />
-              <el-button @click="addOsTag">添加</el-button>
-            </div>
-          </div>
-        </el-form-item>
-
-        <div class="param-section-title">
-          <span>自定义参数</span>
-          <el-button type="primary" link @click="addCustomRow">+ 手动添加</el-button>
-        </div>
-        <div v-if="!paramForm.custom.length" class="custom-empty">暂无自定义参数，可点击「手动添加」</div>
-        <div v-for="(item, idx) in paramForm.custom" :key="idx" class="custom-row">
-          <el-input v-model="item.key" placeholder="参数名" style="width: 200px" />
-          <el-input v-model="item.value" placeholder="参数值" style="flex: 1" />
-          <el-button type="danger" link @click="removeCustomRow(idx)">删除</el-button>
-        </div>
-      </el-form>
-      <template #footer>
-        <el-button @click="paramDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveParamProfile">保存</el-button>
       </template>
     </el-dialog>
 
@@ -3960,6 +3938,43 @@ watch(
 .vip-highlight {
   color: var(--el-color-primary);
   font-weight: 500;
+}
+.ip-free {
+  color: var(--el-color-success);
+  font-weight: 600;
+}
+.field-hint-inline {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.ip-segment-detail {
+  min-height: 240px;
+}
+.ip-segment-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
+}
+.ip-segment-meta .meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.ip-segment-meta label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.ip-segment-meta span {
+  font-size: 13px;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
 }
 .ip-extra {
   margin-top: 2px;

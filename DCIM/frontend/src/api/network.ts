@@ -3,7 +3,13 @@ import type { ApiResponse } from '@/types/api'
 
 export type NetworkNodeKind = 'switch' | 'server' | 'security'
 export type NetworkLinkType = 'switch_server' | 'switch_switch' | 'switch_security'
-export type SwitchSubtype = 'gigabit' | 'ten_gigabit' | 'core'
+/** 交换机角色/类型：接入千兆、接入万兆、汇聚、核心 */
+export type SwitchSubtype = 'gigabit' | 'ten_gigabit' | 'aggregation' | 'core'
+/** 连线场景角色 */
+export type NetworkLinkRole = 'server' | 'uplink' | 'interconnect' | 'downlink' | 'security'
+export type CableType = 'copper_cat6' | 'fiber_mm' | 'fiber_sm' | 'dac' | 'aoc' | 'other'
+/** 接口类：电口 / 光口 / 高速铜缆 */
+export type InterfaceClass = 'electric' | 'optical' | 'dac' | 'other'
 export type UplinkPosition = 'right' | 'middle'
 export type InterfaceGroupRole = 'main' | 'uplink' | 'mgmt' | 'card'
 export type CoreCardType = 'gigabit' | 'ten_gigabit' | '100g' | 'blank'
@@ -23,6 +29,8 @@ export interface NetworkDeviceBrief {
   device_id: string
   name: string | null
   hostname: string
+  rack_id?: string | null
+  room_id?: string | null
   rack_code: string | null
   room_name: string | null
   u_position: number | null
@@ -30,6 +38,10 @@ export interface NetworkDeviceBrief {
   bmc_ip: string | null
   vip: string | null
   device_type_name: string | null
+  /** 设备管理类型编码：network/compute/storage/security */
+  device_type_code?: string | null
+  device_model_name?: string | null
+  height_u?: number | null
 }
 
 export type PortType = '1g' | '10g' | '40_100g' | 'bmc' | 'other'
@@ -122,11 +134,17 @@ export interface NetworkNode {
   kind: NetworkNodeKind
   name: string
   device_id: string | null
+  /** 关联合同厂商型号采购汇总对应的档案型号 */
+  device_model_id?: string | null
+  /** 合同设备名称：面板按此名称一对多应用到设备清单 */
+  contract_device_name?: string | null
   pos_x: number
   pos_y: number
   switch_port_count: number
   slots: SlotConfig[] | null
   port_layout?: PortLayout | null
+  /** 是否已放置到拓扑画布；新建设备默认为 false */
+  on_canvas?: boolean
   device?: NetworkDeviceBrief | null
 }
 
@@ -139,6 +157,11 @@ export interface NetworkLink {
   target_node_id: string
   target_port: string
   label: string | null
+  source_label?: string | null
+  target_label?: string | null
+  cable_type?: CableType | string | null
+  interface_class?: InterfaceClass | string | null
+  link_role?: NetworkLinkRole | string | null
 }
 
 export interface NetworkTopology {
@@ -170,11 +193,14 @@ export interface CanvasNodeInput {
   kind: NetworkNodeKind
   name: string
   device_id?: string | null
+  device_model_id?: string | null
+  contract_device_name?: string | null
   pos_x: number
   pos_y: number
   switch_port_count?: number
   slots?: SlotConfig[] | null
   port_layout?: PortLayout | null
+  on_canvas?: boolean
 }
 
 export interface CanvasLinkInput {
@@ -185,6 +211,11 @@ export interface CanvasLinkInput {
   target_node_id: string
   target_port: string
   label?: string | null
+  source_label?: string | null
+  target_label?: string | null
+  cable_type?: string | null
+  interface_class?: string | null
+  link_role?: string | null
 }
 
 export function defaultSlots(): SlotConfig[] {
@@ -292,6 +323,42 @@ export async function deleteNetworkTopology(id: string) {
   await api.delete(`/network-topologies/${id}`)
 }
 
+async function downloadBlob(path: string, filename: string) {
+  const response = await api.get(path, { responseType: 'blob' })
+  const blob = new Blob([response.data])
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export async function exportInterfaceDesignExcel(topologyId: string) {
+  await downloadBlob(
+    `/network-topologies/${topologyId}/interface-design/export`,
+    'interface_design.xlsx',
+  )
+}
+
+export async function downloadInterfaceDesignTemplate() {
+  await downloadBlob(
+    '/network-topologies/interface-design/import/template',
+    'interface_design_template.xlsx',
+  )
+}
+
+export async function importInterfaceDesignExcel(topologyId: string, file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await api.post<ApiResponse<{ created: number; failed: number; errors: string[] }>>(
+    `/network-topologies/${topologyId}/interface-design/import`,
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  )
+  return unwrap(response)
+}
+
 export async function listNetworkProjects(params: Record<string, unknown> = {}) {
   const response = await api.get('/network-projects', { params })
   return response.data.data
@@ -356,7 +423,16 @@ export const NODE_KIND_LABELS: Record<NetworkNodeKind, string> = {
 export const SWITCH_SUBTYPE_LABELS: Record<SwitchSubtype, string> = {
   gigabit: '千兆交换机',
   ten_gigabit: '万兆交换机',
+  aggregation: '汇聚交换机',
   core: '核心交换机',
+}
+
+/** 交换机角色层级：数值越大越靠近核心 */
+export const SWITCH_ROLE_TIER: Record<SwitchSubtype, number> = {
+  gigabit: 1,
+  ten_gigabit: 1,
+  aggregation: 2,
+  core: 3,
 }
 
 export const UPLINK_POSITION_LABELS: Record<UplinkPosition, string> = {
@@ -370,7 +446,32 @@ export const SWITCH_SUBTYPE_DEFAULTS: Record<
 > = {
   gigabit: { mainPortCount: 48, uplinkPortCount: 4, mainType: '1g', uplinkType: '10g' },
   ten_gigabit: { mainPortCount: 48, uplinkPortCount: 4, mainType: '10g', uplinkType: '40_100g' },
+  aggregation: { mainPortCount: 48, uplinkPortCount: 8, mainType: '10g', uplinkType: '40_100g' },
   core: { mainPortCount: 48, uplinkPortCount: 0, mainType: '10g', uplinkType: '40_100g' },
+}
+
+export const LINK_ROLE_LABELS: Record<NetworkLinkRole, string> = {
+  server: '交换机→服务器',
+  uplink: '交换机上联',
+  interconnect: '交换机互联',
+  downlink: '交换机下联',
+  security: '交换机→安全',
+}
+
+export const CABLE_TYPE_LABELS: Record<CableType, string> = {
+  copper_cat6: '超六类铜缆',
+  fiber_mm: '多模光纤',
+  fiber_sm: '单模光纤',
+  dac: 'DAC 高速铜缆',
+  aoc: 'AOC 有源光缆',
+  other: '其他',
+}
+
+export const INTERFACE_CLASS_LABELS: Record<InterfaceClass, string> = {
+  electric: '电口',
+  optical: '光口',
+  dac: '高速铜缆',
+  other: '其他',
 }
 
 export const CORE_CARD_TYPE_LABELS: Record<CoreCardType, string> = {

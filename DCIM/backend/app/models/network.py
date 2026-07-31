@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -66,11 +66,20 @@ class NetworkNode(BaseModel):
         nullable=True,
         index=True,
     )
+    # 关联合同「厂商型号采购汇总」对应的档案型号；contract_device_name 用于按设备名称一对多应用面板
+    device_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("device_model.id"),
+        nullable=True,
+        index=True,
+    )
+    contract_device_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     pos_x: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
     pos_y: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
     switch_port_count: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
     slots: Mapped[list | None] = mapped_column(JSON, nullable=True)
     port_layout: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    on_canvas: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     topology: Mapped["NetworkTopology"] = relationship("NetworkTopology", back_populates="nodes")
 
@@ -100,5 +109,10 @@ class NetworkLink(BaseModel):
     )
     target_port: Mapped[str] = mapped_column(String(50), nullable=False)
     label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    target_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cable_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    interface_class: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    link_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     topology: Mapped["NetworkTopology"] = relationship("NetworkTopology", back_populates="links")

@@ -9,15 +9,28 @@ const auth = useAuthStore()
 
 const tabs = computed(() => {
   const items: Array<{ path: string; label: string; permission?: string }> = [
+    { path: '/datacenters', label: '数据中心', permission: 'datacenter:view' },
     { path: '/rooms/manage', label: '机房管理', permission: 'datacenter:view' },
+    { path: '/rooms/simulate', label: '3D 仿真', permission: 'datacenter:view' },
     { path: '/rooms/templates', label: '机柜模板', permission: 'rack:view' },
   ]
-  return items.filter((item) => !item.permission || auth.hasPermission(item.permission))
+  return items.filter((item) => {
+    if (!item.permission) return true
+    if (item.path === '/rooms/simulate') {
+      return auth.hasPermission('datacenter:view') || auth.hasPermission('rack:view')
+    }
+    return auth.hasPermission(item.permission)
+  })
 })
 
 const activeTab = computed(() => route.path)
 
 function onTabClick(path: string) {
+  // 「机房管理」Tab：显示全部机房；其它入口同样清除无关筛选
+  if (path === '/rooms/manage') {
+    void router.push({ path: '/rooms/manage', query: {} })
+    return
+  }
   if (route.path !== path) {
     void router.push(path)
   }
@@ -26,7 +39,7 @@ function onTabClick(path: string) {
 
 <template>
   <div class="room-section">
-    <nav v-if="tabs.length > 1" class="room-tabs" aria-label="机房管理导航">
+    <nav v-if="tabs.length > 1" class="room-tabs" aria-label="数据中心导航">
       <button
         v-for="tab in tabs"
         :key="tab.path"

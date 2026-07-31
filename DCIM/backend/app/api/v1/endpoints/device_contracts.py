@@ -13,6 +13,7 @@ from app.schemas.device_contract import (
     DeviceContractBindResult,
     DeviceContractCreate,
     DeviceContractItemsImportResult,
+    DeviceContractModelSyncResult,
     DeviceContractResponse,
     DeviceContractSummaryItem,
     DeviceContractUpdate,
@@ -68,6 +69,19 @@ async def contract_summary(
     return ApiResponse(data=data, timestamp=datetime.now())
 
 
+@router.post(
+    "/sync-models",
+    response_model=ApiResponse[DeviceContractModelSyncResult],
+)
+async def sync_all_contract_models(
+    service: Annotated[DeviceContractService, Depends(get_device_contract_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:create"))],
+) -> ApiResponse[DeviceContractModelSyncResult]:
+    """按全部合同同步设备型号，并清理已无合同引用的同步型号。"""
+    data = await service.sync_models_all(user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
 @router.get("", response_model=PaginatedResponse[DeviceContractResponse])
 async def list_contracts(
     service: Annotated[DeviceContractService, Depends(get_device_contract_service)],
@@ -116,6 +130,20 @@ async def update_contract(
     current_user: Annotated[User, Depends(require_permissions("device:update"))],
 ) -> ApiResponse[DeviceContractResponse]:
     data = await service.update(contract_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.post(
+    "/{contract_id}/sync-models",
+    response_model=ApiResponse[DeviceContractModelSyncResult],
+)
+async def sync_contract_models(
+    contract_id: uuid.UUID,
+    service: Annotated[DeviceContractService, Depends(get_device_contract_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:create"))],
+) -> ApiResponse[DeviceContractModelSyncResult]:
+    """将指定合同明细同步为设备型号档案。"""
+    data = await service.sync_models_for_contract(contract_id, user_id=current_user.id)
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

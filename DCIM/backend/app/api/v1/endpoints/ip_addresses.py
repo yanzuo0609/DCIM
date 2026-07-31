@@ -20,12 +20,76 @@ from app.schemas.ip_address import (
     IpBindBatchRequest,
     IpBindBatchResult,
     IpBindRequest,
+    IpSegmentCreate,
+    IpSegmentDetail,
+    IpSegmentResponse,
+    IpSegmentUpdate,
     IpStatusBatchRequest,
     IpStatusBatchResult,
 )
 from app.services.ip_address import IpAddressService
 
 router = APIRouter(prefix="/ip-addresses", tags=["ip-addresses"])
+
+
+@router.get("/segments", response_model=PaginatedResponse[IpSegmentResponse])
+async def list_ip_segments(
+    service: Annotated[IpAddressService, Depends(get_ip_address_service)],
+    _: Annotated[User, Depends(require_permissions("device:view"))],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    keyword: str | None = None,
+    application_type: str | None = None,
+) -> PaginatedResponse[IpSegmentResponse]:
+    params = PaginationParams(page=page, page_size=page_size, keyword=keyword)
+    items, pagination = await service.list_segments(
+        params, application_type=application_type
+    )
+    return PaginatedResponse(
+        data=PaginatedData(items=items, pagination=pagination),
+        timestamp=datetime.now(),
+    )
+
+
+@router.post("/segments", response_model=ApiResponse[IpSegmentDetail], status_code=201)
+async def create_ip_segment(
+    payload: IpSegmentCreate,
+    service: Annotated[IpAddressService, Depends(get_ip_address_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:update"))],
+) -> ApiResponse[IpSegmentDetail]:
+    data = await service.create_segment(payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.get("/segments/{segment_id}", response_model=ApiResponse[IpSegmentDetail])
+async def get_ip_segment(
+    segment_id: uuid.UUID,
+    service: Annotated[IpAddressService, Depends(get_ip_address_service)],
+    _: Annotated[User, Depends(require_permissions("device:view"))],
+) -> ApiResponse[IpSegmentDetail]:
+    data = await service.get_segment(segment_id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.put("/segments/{segment_id}", response_model=ApiResponse[IpSegmentDetail])
+async def update_ip_segment(
+    segment_id: uuid.UUID,
+    payload: IpSegmentUpdate,
+    service: Annotated[IpAddressService, Depends(get_ip_address_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:update"))],
+) -> ApiResponse[IpSegmentDetail]:
+    data = await service.update_segment(segment_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.delete("/segments/{segment_id}", response_model=ApiResponse[dict[str, str]])
+async def delete_ip_segment(
+    segment_id: uuid.UUID,
+    service: Annotated[IpAddressService, Depends(get_ip_address_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:update"))],
+) -> ApiResponse[dict[str, str]]:
+    await service.delete_segment(segment_id, user_id=current_user.id)
+    return ApiResponse(data={"message": "deleted"}, timestamp=datetime.now())
 
 
 @router.get("", response_model=PaginatedResponse[IpAddressResponse])
