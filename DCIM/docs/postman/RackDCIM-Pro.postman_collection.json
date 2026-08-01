@@ -1,0 +1,511 @@
+{
+  "info": {
+    "_postman_id": "rackdcim-pro-v1",
+    "name": "RackDCIM Pro API v1",
+    "description": "RackDCIM Pro REST API collection synced with OpenAPI `/api/v1`.\n\nImport together with `RackDCIM-Pro.postman_environment.json`.\n\n1. Select environment **RackDCIM Pro - Local**\n2. Run **Auth → Login**\n3. Run other requests (Bearer uses `{{access_token}}`)\n\nOpenAPI: {{base_url}}/openapi.json",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000/api/v1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('code is 0', () => pm.expect(body.code).to.eql(0));",
+                  "if (body.data && body.data.access_token) {",
+                  "  pm.environment.set('access_token', body.data.access_token);",
+                  "  pm.environment.set('refresh_token', body.data.refresh_token);",
+                  "  console.log('Tokens saved to environment');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"Admin@12345678\"\n}"
+            },
+            "url": "{{base_url}}/auth/login"
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            },
+            "url": "{{base_url}}/auth/refresh"
+          }
+        },
+        {
+          "name": "Get Profile",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/auth/profile"
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/auth/logout"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "API Health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        },
+        {
+          "name": "Root Health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "http://localhost:8000/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "Summary",
+          "request": { "method": "GET", "url": "{{base_url}}/dashboard/summary" }
+        },
+        {
+          "name": "Utilization",
+          "request": { "method": "GET", "url": "{{base_url}}/dashboard/utilization" }
+        }
+      ]
+    },
+    {
+      "name": "Infrastructure",
+      "item": [
+        {
+          "name": "List Datacenters",
+          "request": { "method": "GET", "url": "{{base_url}}/datacenters?page=1&page_size=20" }
+        },
+        {
+          "name": "Create Datacenter",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.data && b.data.id) pm.environment.set('datacenter_id', b.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"DC-TEST-01\",\n  \"name\": \"测试数据中心\",\n  \"location\": \"上海\",\n  \"description\": \"Postman 创建\"\n}"
+            },
+            "url": "{{base_url}}/datacenters"
+          }
+        },
+        {
+          "name": "Update Datacenter",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"已更新\"\n}"
+            },
+            "url": "{{base_url}}/datacenters/{{datacenter_id}}"
+          }
+        },
+        {
+          "name": "Quick Create Room",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.data && b.data.id) pm.environment.set('room_id', b.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"datacenter_id\": \"{{datacenter_id}}\",\n  \"building_no\": \"A\",\n  \"room_no\": \"101\",\n  \"layout_mode\": \"auto\",\n  \"rack_rows\": 3,\n  \"rack_columns\": 6,\n  \"code_mode\": \"auto\",\n  \"code_prefix\": \"A\"\n}"
+            },
+            "url": "{{base_url}}/rooms/quick"
+          }
+        },
+        {
+          "name": "List Rooms",
+          "request": { "method": "GET", "url": "{{base_url}}/rooms?page=1&page_size=20" }
+        }
+      ]
+    },
+    {
+      "name": "Racks",
+      "item": [
+        {
+          "name": "List Rack Templates",
+          "request": { "method": "GET", "url": "{{base_url}}/rack-templates" }
+        },
+        {
+          "name": "Create Rack",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.data && b.data.id) pm.environment.set('rack_id', b.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"room_id\": \"{{room_id}}\",\n  \"code\": \"A01\",\n  \"name\": \"A01\",\n  \"row_no\": 1,\n  \"column_no\": 1,\n  \"total_u\": 42,\n  \"status\": \"active\"\n}"
+            },
+            "url": "{{base_url}}/racks"
+          }
+        },
+        {
+          "name": "Get Rack Layout",
+          "request": { "method": "GET", "url": "{{base_url}}/racks/{{rack_id}}/layout" }
+        },
+        {
+          "name": "Get Rack SVG",
+          "request": { "method": "GET", "url": "{{base_url}}/racks/{{rack_id}}/svg" }
+        },
+        {
+          "name": "Mount on Rack Layout",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_id\": \"{{device_id}}\",\n  \"u_position\": 10\n}"
+            },
+            "url": "{{base_url}}/racks/{{rack_id}}/layout"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Devices",
+      "item": [
+        {
+          "name": "List Devices",
+          "request": { "method": "GET", "url": "{{base_url}}/devices?page=1&page_size=20" }
+        },
+        {
+          "name": "List Device Models",
+          "request": { "method": "GET", "url": "{{base_url}}/device-models" }
+        },
+        {
+          "name": "Create Device",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.data && b.data.id) pm.environment.set('device_id', b.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hostname\": \"srv-test-001\",\n  \"serial_number\": \"SN-TEST-001\",\n  \"device_model_id\": \"REPLACE_WITH_MODEL_ID\",\n  \"height_u\": 2,\n  \"power\": 750\n}"
+            },
+            "url": "{{base_url}}/devices"
+          }
+        },
+        {
+          "name": "Update Device",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"Postman 更新\"\n}"
+            },
+            "url": "{{base_url}}/devices/{{device_id}}"
+          }
+        },
+        {
+          "name": "Download Import Template",
+          "request": { "method": "GET", "url": "{{base_url}}/devices/import/template" }
+        }
+      ]
+    },
+    {
+      "name": "Layout",
+      "item": [
+        {
+          "name": "Validate Layout",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rack_id\": \"{{rack_id}}\",\n  \"u_position\": 10,\n  \"height_u\": 2\n}"
+            },
+            "url": "{{base_url}}/layout/validate"
+          }
+        },
+        {
+          "name": "Auto Layout",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rack_id\": \"{{rack_id}}\",\n  \"device_id\": \"{{device_id}}\"\n}"
+            },
+            "url": "{{base_url}}/layout/auto"
+          }
+        },
+        {
+          "name": "Mount Device",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_id\": \"{{device_id}}\",\n  \"rack_id\": \"{{rack_id}}\",\n  \"u_position\": 10\n}"
+            },
+            "url": "{{base_url}}/layout/mount"
+          }
+        },
+        {
+          "name": "Unmount Device",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_id\": \"{{device_id}}\"\n}"
+            },
+            "url": "{{base_url}}/layout/unmount"
+          }
+        },
+        {
+          "name": "Batch Mount",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"room_id\": \"{{room_id}}\",\n  \"device_ids\": [\"{{device_id}}\"],\n  \"per_rack_count\": 1,\n  \"start_u\": 1,\n  \"gap_u\": 1\n}"
+            },
+            "url": "{{base_url}}/layout/batch-mount"
+          }
+        }
+      ]
+    },
+    {
+      "name": "IP Addresses",
+      "item": [
+        {
+          "name": "List IP Addresses",
+          "request": { "method": "GET", "url": "{{base_url}}/ip-addresses?page=1&page_size=20" }
+        },
+        {
+          "name": "Create IP Address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.data && b.data.id) pm.environment.set('ip_id', b.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"system_ip\": \"10.0.1.100\",\n  \"bmc_ip\": \"10.0.2.100\",\n  \"netmask\": \"255.255.255.0\",\n  \"gateway\": \"10.0.1.1\",\n  \"status\": \"free\"\n}"
+            },
+            "url": "{{base_url}}/ip-addresses"
+          }
+        },
+        {
+          "name": "Batch Create IP Range",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"start_system_ip\": \"10.0.1.1\",\n  \"end_system_ip\": \"10.0.1.10\",\n  \"netmask\": \"255.255.255.0\",\n  \"gateway\": \"10.0.1.1\"\n}"
+            },
+            "url": "{{base_url}}/ip-addresses/batch-create"
+          }
+        },
+        {
+          "name": "Bind IP to Device",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bind_type\": \"device\",\n  \"device_id\": \"{{device_id}}\"\n}"
+            },
+            "url": "{{base_url}}/ip-addresses/{{ip_id}}/bind"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Device Contracts",
+      "item": [
+        {
+          "name": "List Contracts",
+          "request": { "method": "GET", "url": "{{base_url}}/device-contracts" }
+        },
+        {
+          "name": "Create Contract",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.data && b.data.id) pm.environment.set('contract_id', b.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contract_no\": \"PO-TEST-001\",\n  \"device_items\": [\n    {\n      \"device_name\": \"GPU 服务器\",\n      \"device_model_name\": \"PowerEdge R750\",\n      \"manufacturer_name\": \"Dell\",\n      \"quantity\": 2,\n      \"unit_price\": 85000,\n      \"price_unit\": \"yuan\"\n    }\n  ]\n}"
+            },
+            "url": "{{base_url}}/device-contracts"
+          }
+        },
+        {
+          "name": "Bind Devices to Contract",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_ids\": [\"{{device_id}}\"]\n}"
+            },
+            "url": "{{base_url}}/device-contracts/{{contract_id}}/bind-devices"
+          }
+        },
+        {
+          "name": "Contract Summary",
+          "request": { "method": "GET", "url": "{{base_url}}/device-contracts/summary" }
+        }
+      ]
+    },
+    {
+      "name": "Users & Roles",
+      "item": [
+        {
+          "name": "List Users",
+          "request": { "method": "GET", "url": "{{base_url}}/users" }
+        },
+        {
+          "name": "List Roles",
+          "request": { "method": "GET", "url": "{{base_url}}/roles" }
+        },
+        {
+          "name": "List Permissions",
+          "request": { "method": "GET", "url": "{{base_url}}/permissions" }
+        },
+        {
+          "name": "Create User",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser01\",\n  \"email\": \"testuser01@example.com\",\n  \"password\": \"SecurePass@1234\",\n  \"full_name\": \"测试用户\",\n  \"role_ids\": [],\n  \"status\": \"active\"\n}"
+            },
+            "url": "{{base_url}}/users"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Audit",
+      "item": [
+        {
+          "name": "List Audit Logs",
+          "request": { "method": "GET", "url": "{{base_url}}/audit/logs?page=1&page_size=20" }
+        }
+      ]
+    }
+  ]
+}
