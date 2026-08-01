@@ -68,11 +68,22 @@ class Room(BaseModel):
     rack_columns: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
     # Per-row rack counts, e.g. [6, 6, 8, 4]. Empty/null means uniform grid.
     row_layout: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 机房轮廓网格（与机柜编排分离）：宽方向排数 × 长方向列数
+    outline_rows: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
+    outline_cols: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     # auto | custom
     code_mode: Mapped[str] = mapped_column(String(20), default="auto", nullable=False)
     code_prefix: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Per-slot codes matching row_layout, e.g. [["A01","A02"],["B01","B02"]]
     slot_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 3D 立柱布局：{"mode":"auto_middle"|"cells","cells":{"1":["rack","pillar",...]}}
+    pillar_layout: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # production | test | backup | network | storage | other（兼容保留；展示以 attributes 为准）
+    purpose: Mapped[str | None] = mapped_column(String(50), nullable=True, default="production")
+    # critical | high | medium | low
+    importance: Mapped[str | None] = mapped_column(String(20), nullable=True, default="medium")
+    # 机房属性标签：["internet","private_network","自定义"]
+    attributes: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     floor: Mapped[Floor] = relationship(back_populates="rooms")
     # Avoid selectin: room list would otherwise hydrate every rack under each room.
@@ -84,25 +95,14 @@ class Room(BaseModel):
         return [self.rack_columns] * self.rack_rows
 
     def get_slot_codes(self) -> list[list[str]]:
-        from app.schemas.infrastructure import generate_slot_codes
+        from app.utils.room_layout import normalize_stored_slot_codes
 
         layout = self.get_row_layout()
-        if self.slot_codes and isinstance(self.slot_codes, list) and len(self.slot_codes) == len(layout):
-            result: list[list[str]] = []
-            valid = True
-            for row_idx, cols in enumerate(layout):
-                row = self.slot_codes[row_idx]
-                if not isinstance(row, list) or len(row) != cols:
-                    valid = False
-                    break
-                result.append([str(c).strip() for c in row])
-            if valid:
-                return result
-        return generate_slot_codes(
+        return normalize_stored_slot_codes(
             layout,
-            code_mode="auto",
+            self.slot_codes,
+            code_mode=self.code_mode or "auto",
             code_prefix=self.code_prefix or "A",
-            slot_codes=None,
         )
 
     def get_slot_code(self, row_no: int, column_no: int) -> str | None:
@@ -114,6 +114,24 @@ class Room(BaseModel):
             return None
         return row[column_no - 1]
 
+    def get_rack_slots(self) -> list[tuple[int, int, str]]:
+        from app.utils.room_layout import iter_rack_slots
+
+        return iter_rack_slots(
+            self.get_row_layout(),
+            self.get_slot_codes(),
+            self.pillar_layout if isinstance(self.pillar_layout, dict) else None,
+            code_mode=self.code_mode or "auto",
+        )
+
     @property
     def rack_capacity(self) -> int:
-        return sum(self.get_row_layout())
+        """有效机柜位数量（不含立柱占位）。"""
+        from app.utils.room_layout import rack_slot_capacity
+
+        return rack_slot_capacity(
+            self.get_row_layout(),
+            self.slot_codes if isinstance(self.slot_codes, list) else self.get_slot_codes(),
+            self.pillar_layout if isinstance(self.pillar_layout, dict) else None,
+            code_mode=self.code_mode or "auto",
+        )

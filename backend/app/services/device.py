@@ -27,14 +27,19 @@ from app.repositories.device import (
 from app.repositories.device_contract import DeviceContractRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.rack import RackRepository
+from app.services.ip_address import IpAddressService
 from app.schemas.common import PaginationMeta, PaginationParams
 from app.schemas.device import (
     DeviceBatchDeleteRequest,
     DeviceBatchDeleteResult,
     DeviceCreate,
     DeviceModelCreate,
+    DeviceModelPanelApply,
+    DeviceModelPanelApplyResult,
     DeviceModelResponse,
     DeviceModelUpdate,
+    DevicePanelCandidate,
+    DevicePanelCandidateList,
     DeviceResponse,
     DeviceTypeCreate,
     DeviceTypeResponse,
@@ -46,8 +51,11 @@ from app.schemas.device import (
     BmcProfileResponse,
     BmcProfileUpdate,
     ParamProfileCreate,
+    ParamProfileImportResult,
+    ParamDiskSpec,
     ParamProfilePayload,
     ParamProfileResponse,
+    ParamProfileSyncResult,
     ParamProfileUpdate,
     ProfileCreate,
     ProfileResponse,
@@ -61,6 +69,7 @@ from app.schemas.device import (
     normalize_bmc_payload,
     normalize_param_payload,
     normalize_system_payload,
+    param_missing_fields,
     param_payload_summary,
     system_payload_summary,
 )
@@ -80,6 +89,21 @@ def _ip_fields_from_device(device: Device) -> tuple[str | None, str | None, str 
     return primary.system_ip, primary.bmc_ip, primary.vip
 
 
+def _panel_for_device(device: Device) -> tuple[dict | None, str | None, str | None]:
+    """Resolve panel layout only when the device has been explicitly bound."""
+    if not getattr(device, "network_panel_bound", False):
+        return None, None, None
+    model = getattr(device, "model", None)
+    if not model or not getattr(model, "port_layout", None):
+        return None, None, None
+    apply_name = (getattr(model, "apply_device_name", None) or "").strip() or None
+    return (
+        model.port_layout,
+        getattr(model, "network_kind", None),
+        apply_name,
+    )
+
+
 def _to_device_response(
     device: Device,
     *,
@@ -91,6 +115,7 @@ def _to_device_response(
     mfg = model.manufacturer if model else None
     contract = getattr(device, "contract", None)
     system_ip, bmc_ip, vip = _ip_fields_from_device(device)
+    port_layout, network_kind, panel_name = _panel_for_device(device)
     return DeviceResponse(
         id=str(device.id),
         name=device.name or device.hostname,
@@ -102,6 +127,7 @@ def _to_device_response(
         manufacturer_name=mfg.name if mfg else None,
         device_type_id=str(device.device_type_id) if device.device_type_id else None,
         device_type_name=device.device_type.name if device.device_type else None,
+        device_type_code=device.device_type.code if device.device_type else None,
         param_profile_id=str(device.param_profile_id) if device.param_profile_id else None,
         system_profile_id=str(device.system_profile_id) if device.system_profile_id else None,
         bmc_profile_id=str(device.bmc_profile_id) if device.bmc_profile_id else None,
@@ -121,6 +147,10 @@ def _to_device_response(
         power=device.power,
         status=device.status,
         description=device.description,
+        port_layout=port_layout,
+        network_kind=network_kind,
+        panel_apply_device_name=panel_name,
+        network_panel_bound=bool(getattr(device, "network_panel_bound", False)),
         created_at=device.created_at,
         updated_at=device.updated_at,
     )
@@ -140,6 +170,7 @@ class DeviceService:
         self.contract_repo = DeviceContractRepository(session)
         self.rack_repo = RackRepository(session)
         self.room_repo = RoomRepository(session)
+        self.ip_service = IpAddressService(session)
 
     async def _resolve_contract_id(self, contract_id: str | None) -> uuid.UUID | None:
         if not contract_id:
@@ -363,6 +394,7 @@ class DeviceService:
             raise NotFoundError("Device not found", code=10003)
         if device.rack_id:
             raise ConflictError("请先下架设备再删除")
+        await self.ip_service.release_by_device(device_id, user_id=user_id)
         await self.repo.soft_delete(device, deleted_by=user_id)
 
     async def batch_delete(
@@ -370,6 +402,7 @@ class DeviceService:
     ) -> DeviceBatchDeleteResult:
         result = DeviceBatchDeleteResult()
         seen: set[uuid.UUID] = set()
+        to_delete: list[uuid.UUID] = []
         for raw in payload.ids:
             try:
                 device_id = uuid.UUID(raw)
@@ -389,8 +422,16 @@ class DeviceService:
                 result.skipped += 1
                 result.errors.append(f"{device.hostname}: 已上架，无法删除")
                 continue
-            await self.repo.soft_delete(device, deleted_by=user_id)
-            result.deleted += 1
+            to_delete.append(device_id)
+        if to_delete:
+            await self.ip_service.release_by_devices(to_delete, user_id=user_id)
+            for device_id in to_delete:
+                device = await self.repo.get_by_id(device_id)
+                if not device:
+                    result.skipped += 1
+                    continue
+                await self.repo.soft_delete(device, deleted_by=user_id)
+                result.deleted += 1
         await self.session.flush()
         return result
 
@@ -503,13 +544,32 @@ class DeviceService:
                 typed = ParamProfilePayload.model_validate(entity.payload)
             except Exception:  # noqa: BLE001
                 typed = None
+        try:
+            missing = param_missing_fields(typed)
+        except Exception:  # noqa: BLE001
+            missing = ["系统盘", "数据盘"]
+        try:
+            summary = param_payload_summary(typed)
+        except Exception:  # noqa: BLE001
+            summary = None
         return ParamProfileResponse(
             id=str(entity.id),
             code=entity.code,
             name=entity.name,
             payload=typed,
             description=entity.description,
-            summary=param_payload_summary(typed),
+            summary=summary,
+            is_complete=not missing,
+            missing_fields=missing,
+            source_device_name=(typed.source_device_name if typed else None) or entity.name,
+            source_device_model=typed.source_device_model if typed else None,
+            source_manufacturer=typed.source_manufacturer if typed else None,
+            device_type_id=typed.device_type_id if typed else None,
+            detail_params=(
+                (typed.detail_params if typed and typed.detail_params else None)
+                or (typed.source_device_model if typed else None)
+            ),
+            other_params=typed.other_params if typed else None,
             created_at=entity.created_at,
             updated_at=entity.updated_at,
         )
@@ -533,6 +593,116 @@ class DeviceService:
         )
         return [self._to_param_profile_response(i) for i in items], pagination
 
+    @staticmethod
+    def _param_source_key(device_name: str, device_model: str | None = None) -> str:
+        """设备参数与采购汇总按「设备名称」一一对应。"""
+        return (device_name or "").strip().lower()
+
+    @staticmethod
+    def _slug_code(device_name: str, device_model: str | None = None) -> str:
+        """生成仅含 ASCII 的档案编码，避免中文编码在部分环境下异常。"""
+        import hashlib
+        import re
+        import unicodedata
+
+        raw = (device_name or "").strip() or "device"
+        digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+        # 尽量保留可读英文/数字；中文名称用 hash 保证唯一
+        ascii_part = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^A-Za-z0-9_-]+", "-", ascii_part).strip("-_")
+        if not slug:
+            slug = "dev"
+        return f"P-{slug[:24]}-{digest}"[:50]
+
+    def _index_param_profiles(
+        self, entities: list[DeviceParamProfile]
+    ) -> dict[str, DeviceParamProfile]:
+        """以设备名称为唯一键建立索引（与采购汇总一一对应）。"""
+        index: dict[str, DeviceParamProfile] = {}
+        for entity in entities:
+            typed: ParamProfilePayload | None = None
+            if entity.payload and isinstance(entity.payload, dict):
+                try:
+                    typed = ParamProfilePayload.model_validate(entity.payload)
+                except Exception:  # noqa: BLE001
+                    typed = None
+            name = (
+                (typed.source_device_name if typed and typed.source_device_name else None)
+                or entity.name
+                or ""
+            ).strip()
+            key = self._param_source_key(name)
+            if key and key not in index:
+                index[key] = entity
+        return index
+
+    async def sync_param_profiles_from_contracts(
+        self, user_id: uuid.UUID | None = None
+    ) -> ParamProfileSyncResult:
+        """按采购汇总「设备名称」新建空待填参数；已存在同名则跳过。"""
+        from app.services.device_contract import DeviceContractService
+
+        contract_service = DeviceContractService(self.session)
+        summary = await contract_service.summary()
+
+        unique_names: dict[str, str] = {}
+        for row in summary:
+            device_name = (row.device_name or "").strip()
+            if not device_name:
+                continue
+            # 名称字段最长 100
+            device_name = device_name[:100]
+            key = self._param_source_key(device_name)
+            unique_names.setdefault(key, device_name)
+
+        existing = await self.param_repo.list_all()
+        index = self._index_param_profiles(existing)
+        created = 0
+        skipped = 0
+        messages: list[str] = []
+
+        for key, device_name in unique_names.items():
+            if key in index:
+                skipped += 1
+                continue
+
+            code = self._slug_code(device_name)
+            suffix = 1
+            while await self.param_repo.get_by_code(code):
+                code = f"{self._slug_code(device_name)[:40]}-{suffix}"[:50]
+                suffix += 1
+
+            # 空待填：仅溯源名称 + 磁盘占位，无 CPU/内存/容量
+            payload = ParamProfilePayload(
+                source_device_name=device_name,
+                disks=[
+                    ParamDiskSpec(role="system"),
+                    ParamDiskSpec(role="data"),
+                    ParamDiskSpec(role="data"),
+                ],
+            )
+            entity = DeviceParamProfile(
+                code=code,
+                name=device_name,
+                payload=payload.model_dump(mode="json"),
+                description="待完善：由采购汇总设备名称同步生成",
+                created_by=user_id,
+                updated_by=user_id,
+            )
+            await self.param_repo.create(entity)
+            created += 1
+            messages.append(f"已新建待完善项：{device_name}")
+            index[key] = entity
+
+        await self.session.flush()
+        return ParamProfileSyncResult(
+            created=created,
+            updated=0,
+            skipped=skipped,
+            total_summary=len(unique_names),
+            messages=messages[:50],
+        )
+
     async def create_param_profile(
         self, payload: ParamProfileCreate, user_id: uuid.UUID | None = None
     ) -> ParamProfileResponse:
@@ -551,6 +721,7 @@ class DeviceService:
             updated_by=user_id,
         )
         created = await self.param_repo.create(entity)
+        await self.session.refresh(created)
         return self._to_param_profile_response(created)
 
     async def update_param_profile(
@@ -571,12 +742,119 @@ class DeviceService:
         entity.updated_by = user_id
         entity.version += 1
         await self.session.flush()
+        await self.session.refresh(entity)
         return self._to_param_profile_response(entity)
 
     async def delete_param_profile(
         self, entity_id: uuid.UUID, user_id: uuid.UUID | None = None
     ) -> None:
         await self._delete_profile(self.param_repo, entity_id, user_id)
+
+    async def export_param_profiles_excel(self, *, incomplete_only: bool = False) -> bytes:
+        from app.services.param_profile_export import ParamProfileExportService
+
+        entities = await self.param_repo.list_all()
+        profiles = []
+        for entity in entities:
+            resp = self._to_param_profile_response(entity)
+            profiles.append(
+                {
+                    "code": resp.code,
+                    "name": resp.name,
+                    "description": resp.description,
+                    "payload": resp.payload.model_dump(mode="json") if resp.payload else {},
+                    "is_complete": resp.is_complete,
+                    "missing_fields": resp.missing_fields,
+                }
+            )
+        return ParamProfileExportService().export_excel(
+            profiles, incomplete_only=incomplete_only
+        )
+
+    async def import_param_profiles_excel(
+        self, content: bytes, user_id: uuid.UUID | None = None
+    ) -> ParamProfileImportResult:
+        from app.services.param_profile_export import (
+            ParamProfileExportService,
+            row_to_payload_patch,
+            _cell_str,
+        )
+
+        rows, parse_errors = ParamProfileExportService().parse_excel(content)
+        entities = await self.param_repo.list_all()
+        by_code = {e.code: e for e in entities}
+        index = self._index_param_profiles(entities)
+
+        updated = 0
+        created = 0
+        skipped = 0
+        errors = list(parse_errors)
+
+        for row in rows:
+            row_no = row.get("_row_no", "?")
+            code = _cell_str(row.get("code"))
+            name = _cell_str(row.get("name"))
+            model = _cell_str(row.get("source_device_model"))
+            entity = by_code.get(code) if code else None
+            if entity is None and name:
+                entity = index.get(self._param_source_key(name))
+
+            existing_payload: ParamProfilePayload | None = None
+            if entity and isinstance(entity.payload, dict):
+                try:
+                    existing_payload = ParamProfilePayload.model_validate(entity.payload)
+                except Exception:  # noqa: BLE001
+                    existing_payload = None
+
+            try:
+                merged = row_to_payload_patch(row, existing_payload)
+                if name:
+                    merged.source_device_name = merged.source_device_name or name
+                raw = normalize_param_payload(merged)
+            except ValueError as exc:
+                errors.append(f"第{row_no}行：{exc}")
+                skipped += 1
+                continue
+
+            description = _cell_str(row.get("description")) or None
+            if entity is None:
+                if not name:
+                    errors.append(f"第{row_no}行：新建时必须提供设备名称")
+                    skipped += 1
+                    continue
+                new_code = code or self._slug_code(name, model)
+                if await self.param_repo.get_by_code(new_code):
+                    new_code = f"{new_code[:43]}-i{created + 1}"[:50]
+                entity = DeviceParamProfile(
+                    code=new_code,
+                    name=name,
+                    payload=raw,
+                    description=description or "参数导入创建",
+                    created_by=user_id,
+                    updated_by=user_id,
+                )
+                await self.param_repo.create(entity)
+                by_code[entity.code] = entity
+                index[self._param_source_key(name)] = entity
+                created += 1
+                continue
+
+            entity.payload = raw
+            if name:
+                entity.name = name
+            if description is not None:
+                entity.description = description
+            entity.updated_by = user_id
+            entity.version += 1
+            updated += 1
+
+        await self.session.flush()
+        return ParamProfileImportResult(
+            updated=updated,
+            created=created,
+            skipped=skipped,
+            errors=errors[:100],
+        )
 
     def _to_system_profile_response(self, entity: DeviceSystemProfile) -> SystemProfileResponse:
         raw = entity.payload if isinstance(entity.payload, dict) else None
@@ -916,6 +1194,9 @@ class DeviceService:
             power=created.power,
             depth=created.depth,
             description=created.description,
+            port_layout=getattr(created, "port_layout", None),
+            apply_device_name=getattr(created, "apply_device_name", None),
+            network_kind=getattr(created, "network_kind", None),
             created_at=created.created_at,
         )
 
@@ -934,6 +1215,9 @@ class DeviceService:
             power=entity.power,
             depth=entity.depth,
             description=entity.description,
+            port_layout=getattr(entity, "port_layout", None),
+            apply_device_name=getattr(entity, "apply_device_name", None),
+            network_kind=getattr(entity, "network_kind", None),
             created_at=entity.created_at,
         )
 
@@ -965,11 +1249,206 @@ class DeviceService:
             entity.power = payload.power
         if payload.description is not None:
             entity.description = payload.description
+        if payload.port_layout is not None:
+            entity.port_layout = payload.port_layout
+        if payload.apply_device_name is not None:
+            name = payload.apply_device_name.strip()
+            entity.apply_device_name = name or None
+        if payload.network_kind is not None:
+            kind = payload.network_kind.strip()
+            entity.network_kind = kind or None
         entity.updated_by = user_id
         entity.version += 1
         await self.session.flush()
         mfg_name = entity.manufacturer.name if entity.manufacturer else None
         return self._to_model_response(entity, mfg_name)
+
+    async def list_panel_candidates(
+        self,
+        *,
+        apply_device_name: str,
+        model_id: uuid.UUID | None = None,
+    ) -> DevicePanelCandidateList:
+        name = apply_device_name.strip()
+        if not name and not model_id:
+            raise ValidationError("设备名称不能为空", code=10004)
+        devices = await self.repo.list_for_panel_apply(
+            apply_device_name=name or None,
+            model_id=model_id,
+        )
+        items: list[DevicePanelCandidate] = []
+        unbound = 0
+        bound = 0
+        for d in devices:
+            is_bound = bool(getattr(d, "network_panel_bound", False))
+            if is_bound:
+                bound += 1
+            else:
+                unbound += 1
+            model = getattr(d, "model", None)
+            items.append(
+                DevicePanelCandidate(
+                    id=str(d.id),
+                    name=d.name,
+                    hostname=d.hostname,
+                    serial_number=d.serial_number,
+                    device_model_id=str(d.device_model_id),
+                    device_model_name=model.name if model else None,
+                    network_panel_bound=is_bound,
+                    rack_code=None,
+                    room_name=None,
+                    u_position=d.u_position,
+                    status=d.status,
+                )
+            )
+        # Enrich rack/room labels
+        rack_ids = [d.rack_id for d in devices if d.rack_id]
+        if rack_ids:
+            racks = await self.rack_repo.list_by_ids(list({r for r in rack_ids if r}))
+            rack_map = {r.id: r for r in racks}
+            room_ids = list({r.room_id for r in racks})
+            rooms = await self.room_repo.list_by_ids(room_ids)
+            room_map = {r.id: r for r in rooms}
+            for i, d in enumerate(devices):
+                if not d.rack_id:
+                    continue
+                rack = rack_map.get(d.rack_id)
+                if not rack:
+                    continue
+                items[i].rack_code = rack.code
+                room = room_map.get(rack.room_id)
+                items[i].room_name = room.name if room else None
+        return DevicePanelCandidateList(
+            apply_device_name=name,
+            items=items,
+            unbound_count=unbound,
+            bound_count=bound,
+        )
+
+    async def apply_device_model_panel(
+        self,
+        model_id: uuid.UUID,
+        payload: DeviceModelPanelApply,
+        user_id: uuid.UUID | None = None,
+    ) -> DeviceModelPanelApplyResult:
+        """Apply or modify network panel for selected inventory devices."""
+        entity = await self.model_repo.get_by_id_with_mfg(model_id)
+        if not entity:
+            raise NotFoundError("设备型号不存在")
+        apply_name = payload.apply_device_name.strip()
+        if not apply_name:
+            raise ValidationError("应用设备名称不能为空", code=10004)
+        mode = payload.mode or "apply"
+
+        # Always refresh shared layout on the catalog model
+        entity.port_layout = payload.port_layout
+        entity.apply_device_name = apply_name
+        if payload.network_kind is not None:
+            kind = payload.network_kind.strip()
+            entity.network_kind = kind or None
+        height = None
+        if isinstance(payload.port_layout, dict):
+            raw_h = payload.port_layout.get("height_u")
+            if isinstance(raw_h, int) and 1 <= raw_h <= 10:
+                height = raw_h
+                entity.height_u = raw_h
+        entity.updated_by = user_id
+        entity.version += 1
+
+        candidates = await self.repo.list_for_panel_apply(
+            apply_device_name=apply_name,
+            model_id=entity.id,
+        )
+        if not candidates and payload.device_ids:
+            # 允许直接按所选 ID 应用（前端已列出）
+            try:
+                ids = [uuid.UUID(i) for i in payload.device_ids]
+            except ValueError as exc:
+                raise ValidationError("设备 ID 格式无效", code=10004) from exc
+            candidates = await self.repo.list_by_ids_for_list(ids)
+        if not candidates:
+            raise ValidationError(
+                f"未找到与采购汇总设备名称「{apply_name}」对应的台账设备",
+                code=10004,
+            )
+
+        selected_ids: set[uuid.UUID] | None = None
+        if payload.device_ids:
+            try:
+                selected_ids = {uuid.UUID(i) for i in payload.device_ids}
+            except ValueError as exc:
+                raise ValidationError("设备 ID 格式无效", code=10004) from exc
+            # 补齐不在候选集中的所选设备
+            missing = selected_ids - {d.id for d in candidates}
+            if missing:
+                extra = await self.repo.list_by_ids_for_list(list(missing))
+                candidates = [*candidates, *extra]
+            unknown = selected_ids - {d.id for d in candidates}
+            if unknown:
+                raise ValidationError("所选设备不存在或已删除", code=10004)
+
+        applied_ids: list[str] = []
+        modified_ids: list[str] = []
+        skipped_ids: list[str] = []
+
+        for device in candidates:
+            if selected_ids is not None and device.id not in selected_ids:
+                continue
+            is_bound = bool(getattr(device, "network_panel_bound", False))
+            if mode == "apply":
+                if is_bound:
+                    skipped_ids.append(str(device.id))
+                    continue
+                device.device_model_id = entity.id
+                device.network_panel_bound = True
+                if height is not None:
+                    device.height_u = height
+                device.updated_by = user_id
+                device.version += 1
+                applied_ids.append(str(device.id))
+            else:  # modify
+                if not is_bound:
+                    skipped_ids.append(str(device.id))
+                    continue
+                # 已绑定设备：更新型号指向与高度，布局已写到 model
+                if device.device_model_id != entity.id:
+                    device.device_model_id = entity.id
+                if height is not None:
+                    device.height_u = height
+                device.updated_by = user_id
+                device.version += 1
+                modified_ids.append(str(device.id))
+
+        if mode == "apply" and not applied_ids and skipped_ids and selected_ids is not None:
+            raise ValidationError("所选设备均已应用面板，请使用「修改」更新", code=10004)
+        if mode == "apply" and not applied_ids and selected_ids is None and skipped_ids:
+            raise ValidationError("同名设备均已应用面板，请使用「修改」更新", code=10004)
+        if mode == "modify" and not modified_ids:
+            raise ValidationError("没有可修改的已应用设备", code=10004)
+
+        await self.session.flush()
+        touched = applied_ids if mode == "apply" else modified_ids
+        if mode == "apply":
+            msg = f"已应用面板到 {len(applied_ids)} 台设备"
+            if skipped_ids:
+                msg += f"，跳过已应用 {len(skipped_ids)} 台"
+        else:
+            msg = f"已修改 {len(modified_ids)} 台已应用设备的面板"
+            if skipped_ids:
+                msg += f"，跳过未应用 {len(skipped_ids)} 台"
+
+        return DeviceModelPanelApplyResult(
+            device_model_id=str(entity.id),
+            apply_device_name=apply_name,
+            mode=mode,
+            matched_device_count=len(touched),
+            matched_device_ids=touched,
+            applied_count=len(applied_ids),
+            modified_count=len(modified_ids),
+            skipped_count=len(skipped_ids),
+            skipped_device_ids=skipped_ids,
+            message=msg,
+        )
 
     async def delete_device_model(
         self, model_id: uuid.UUID, user_id: uuid.UUID | None = None
@@ -1016,6 +1495,9 @@ class DeviceService:
                     power=i.power,
                     depth=i.depth,
                     description=i.description,
+                    port_layout=getattr(full or i, "port_layout", None),
+                    apply_device_name=getattr(full or i, "apply_device_name", None),
+                    network_kind=getattr(full or i, "network_kind", None),
                     created_at=i.created_at,
                 )
             )

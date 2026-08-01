@@ -42,6 +42,8 @@ export async function updateDatacenter(
   return unwrap(response)
 }
 
-export async function deleteDatacenter(id: string): Promise<void> {
-  await api.delete(`/datacenters/${id}`)
+export async function deleteDatacenter(id: string, options: { force?: boolean } = {}): Promise<void> {
+  await api.delete(`/datacenters/${id}`, {
+    params: options.force ? { force: true } : undefined,
+  })
 }

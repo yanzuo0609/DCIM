@@ -4,7 +4,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
 
-from app.core.dependencies import get_layout_service, get_rack_service, get_svg_service, require_permissions
+from app.core.dependencies import (
+    get_layout_service,
+    get_rack_service,
+    get_svg_service,
+    require_any_permission,
+    require_permissions,
+)
 from app.models.user import User
 from app.schemas.common import ApiResponse, PaginatedData, PaginatedResponse, PaginationParams
 from app.schemas.layout import RackMountBody, ValidateLayoutResponse
@@ -29,7 +35,14 @@ router = APIRouter(prefix="/racks")
 @router.get("", response_model=PaginatedResponse[RackResponse])
 async def list_racks(
     service: Annotated[RackService, Depends(get_rack_service)],
-    _: Annotated[User, Depends(require_permissions("rack:view"))],
+    _: Annotated[
+        User,
+        Depends(
+            require_any_permission(
+                "rack:view", "network:view", "network:update", "device:view", "datacenter:view"
+            )
+        ),
+    ],
     room_id: uuid.UUID | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=500),
@@ -91,7 +104,19 @@ async def get_rack(
 async def get_rack_layout(
     rack_id: uuid.UUID,
     service: Annotated[RackService, Depends(get_rack_service)],
-    _: Annotated[User, Depends(require_permissions("rack:view"))],
+    _: Annotated[
+        User,
+        Depends(
+            require_any_permission(
+                "rack:view",
+                "network:view",
+                "network:update",
+                "device:view",
+                "device:update",
+                "dashboard:view",
+            )
+        ),
+    ],
 ) -> ApiResponse[RackLayoutResponse]:
     data = await service.get_layout(rack_id)
     return ApiResponse(data=data, timestamp=datetime.now())

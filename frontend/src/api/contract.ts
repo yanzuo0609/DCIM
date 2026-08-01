@@ -2,18 +2,72 @@ import api, { unwrap } from '@/api'
 import type { ApiResponse, PaginatedResponse } from '@/types/api'
 
 export type QuantityUnit = '台' | '个' | '件' | '套'
+export type ContractItemKind = 'hardware' | 'software'
+export type PriceUnit = 'yuan' | 'wan'
+
+/** 合同金额默认单位：万元 */
+export const DEFAULT_PRICE_UNIT: PriceUnit = 'wan'
 
 export const QUANTITY_UNIT_OPTIONS: QuantityUnit[] = ['台', '个', '件', '套']
+
+export const ITEM_KIND_OPTIONS: Array<{ value: ContractItemKind; label: string }> = [
+  { value: 'hardware', label: '硬件' },
+  { value: 'software', label: '软件' },
+]
+
+export const PRICE_UNIT_OPTIONS: Array<{ value: PriceUnit; label: string }> = [
+  { value: 'wan', label: '万元' },
+  { value: 'yuan', label: '元' },
+]
 
 export function normalizeQuantityUnit(value: string | null | undefined): QuantityUnit {
   const text = (value || '台').trim()
   return QUANTITY_UNIT_OPTIONS.includes(text as QuantityUnit) ? (text as QuantityUnit) : '台'
 }
 
+export function normalizeItemKind(value: string | null | undefined): ContractItemKind {
+  const text = (value || 'hardware').trim().toLowerCase()
+  if (['software', '软', '软件', '许可', 'license'].includes(text)) return 'software'
+  return 'hardware'
+}
+
+export function normalizePriceUnit(value: string | null | undefined): PriceUnit {
+  const text = (value || '').trim().toLowerCase()
+  if (['yuan', '元', 'rmb', 'cny'].includes(text)) return 'yuan'
+  // 缺省及「万元」均按万元
+  return 'wan'
+}
+
+export function itemKindLabel(value: string | null | undefined) {
+  return normalizeItemKind(value) === 'software' ? '软件' : '硬件'
+}
+
+export function priceUnitLabel(unit: string | null | undefined) {
+  return normalizePriceUnit(unit) === 'wan' ? '万元' : '元'
+}
+
+/** 展示金额（数值本身已按 unit 计价） */
+export function formatMoney(value: number | null | undefined, unit?: string | null) {
+  if (value === null || value === undefined) return '—'
+  const amount = Number(value).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  return `${amount} ${priceUnitLabel(unit)}`
+}
+
+/** 将「元」口径金额按万元展示（采购汇总等后端统一换算为元的场景） */
+export function formatMoneyFromYuan(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—'
+  const wan = Math.round((Number(value) / 10000) * 100) / 100
+  return formatMoney(wan, 'wan')
+}
+
 export interface DeviceContractItem {
   device_name: string
   device_model_name: string
   manufacturer_name?: string | null
+  item_kind?: ContractItemKind | string
   quantity?: number
   quantity_unit?: QuantityUnit
   unit_price?: number | null
@@ -50,10 +104,13 @@ export interface DeviceContractSummary {
   manufacturer_name: string | null
   device_name?: string | null
   device_model_name: string
+  item_kind?: ContractItemKind | string
   purchase_quantity: number
+  purchase_amount?: number | null
   linked_count: number
   contract_count: number
   avg_unit_price: number | null
+  remaining_quantity?: number
 }
 
 export interface DeviceContractPayload {
@@ -72,13 +129,21 @@ export interface BindResult {
   errors: string[]
 }
 
+export interface ContractModelSyncResult {
+  created: number
+  skipped: number
+  deleted: number
+  kept_in_use: number
+  messages: string[]
+}
+
 export function formatItemLabel(item: DeviceContractItem): string {
   const parts = [item.device_name, item.device_model_name]
   if (item.manufacturer_name) parts.push(item.manufacturer_name)
   const qty = Number(item.quantity || 0)
   if (qty > 0) parts.push(`×${qty}${normalizeQuantityUnit(item.quantity_unit)}`)
   if (item.unit_price !== null && item.unit_price !== undefined) {
-    const unit = item.price_unit === 'wan' ? '万元' : '元'
+    const unit = priceUnitLabel(item.price_unit)
     parts.push(`单价${Number(item.unit_price)}${unit}`)
   }
   return parts.filter(Boolean).join(' / ')
@@ -116,11 +181,12 @@ export function normalizeContractItems(contract: {
       device_name: i.device_name,
       device_model_name: i.device_model_name,
       manufacturer_name: i.manufacturer_name || null,
+      item_kind: normalizeItemKind(i.item_kind),
       quantity: Number(i.quantity || 0),
       quantity_unit: normalizeQuantityUnit(i.quantity_unit),
       unit_price:
         i.unit_price === null || i.unit_price === undefined ? null : Number(i.unit_price),
-      price_unit: i.price_unit === 'wan' ? 'wan' : 'yuan',
+      price_unit: normalizePriceUnit(i.price_unit),
       line_amount: i.line_amount ?? null,
     }))
   }
@@ -153,10 +219,11 @@ export function normalizeContractItems(contract: {
       device_name: name || model,
       device_model_name: model || name,
       manufacturer_name: mfg,
+      item_kind: 'hardware',
       quantity: i === 0 ? fallbackQty : 0,
       quantity_unit: '台',
       unit_price: i === 0 ? fallbackPrice : null,
-      price_unit: 'yuan' as const,
+      price_unit: DEFAULT_PRICE_UNIT,
     })
   }
   return items
@@ -170,7 +237,7 @@ export function calcItemsAmount(items: DeviceContractItem[]): number | null {
     const price = item.unit_price
     if (price === null || price === undefined || !qty) continue
     const line = qty * Number(price)
-    const yuan = item.price_unit === 'wan' ? line * 10000 : line
+    const yuan = normalizePriceUnit(item.price_unit) === 'wan' ? line * 10000 : line
     total += yuan
     has = true
   }
@@ -237,6 +304,22 @@ export async function deleteDeviceContract(id: string) {
 
 export async function getContractSummary() {
   const response = await api.get<ApiResponse<DeviceContractSummary[]>>('/device-contracts/summary')
+  return unwrap(response)
+}
+
+/** 全量：按合同同步型号，并清理已无合同引用的同步型号 */
+export async function syncContractModels() {
+  const response = await api.post<ApiResponse<ContractModelSyncResult>>(
+    '/device-contracts/sync-models',
+  )
+  return unwrap(response)
+}
+
+/** 将指定合同明细同步为设备型号 */
+export async function syncContractModelsById(id: string) {
+  const response = await api.post<ApiResponse<ContractModelSyncResult>>(
+    `/device-contracts/${id}/sync-models`,
+  )
   return unwrap(response)
 }
 

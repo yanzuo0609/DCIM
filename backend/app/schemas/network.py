@@ -126,6 +126,8 @@ class NetworkDeviceBrief(BaseModel):
     device_id: uuid.UUID
     name: str | None
     hostname: str
+    rack_id: uuid.UUID | None = None
+    room_id: uuid.UUID | None = None
     rack_code: str | None
     room_name: str | None
     u_position: int | None
@@ -133,6 +135,9 @@ class NetworkDeviceBrief(BaseModel):
     bmc_ip: str | None
     vip: str | None
     device_type_name: str | None
+    device_type_code: str | None = None
+    device_model_name: str | None = None
+    height_u: int | None = None
 
 
 class NetworkNodeResponse(BaseModel):
@@ -141,11 +146,14 @@ class NetworkNodeResponse(BaseModel):
     kind: NetworkNodeKind
     name: str
     device_id: uuid.UUID | None
+    device_model_id: uuid.UUID | None = None
+    contract_device_name: str | None = None
     pos_x: float
     pos_y: float
     switch_port_count: int
     slots: list[SlotConfig] | None
     port_layout: PortLayout | None = None
+    on_canvas: bool = True
     device: NetworkDeviceBrief | None = None
 
     model_config = {"from_attributes": True}
@@ -160,6 +168,11 @@ class NetworkLinkResponse(BaseModel):
     target_node_id: uuid.UUID
     target_port: str
     label: str | None
+    source_label: str | None = None
+    target_label: str | None = None
+    cable_type: str | None = None
+    interface_class: str | None = None
+    link_role: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -329,11 +342,14 @@ class CanvasNodeInput(BaseModel):
     kind: NetworkNodeKind
     name: str = Field(min_length=1, max_length=200)
     device_id: uuid.UUID | None = None
+    device_model_id: uuid.UUID | None = None
+    contract_device_name: str | None = Field(default=None, max_length=100)
     pos_x: float = 100.0
     pos_y: float = 100.0
     switch_port_count: int = Field(default=48, ge=1, le=128)
     slots: list[SlotConfig] | None = None
     port_layout: PortLayout | None = None
+    on_canvas: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -351,6 +367,9 @@ class CanvasNodeInput(BaseModel):
             self.slots = slots
         else:
             self.slots = None
+        if self.contract_device_name is not None:
+            name = self.contract_device_name.strip()
+            self.contract_device_name = name or None
         return self
 
 
@@ -380,6 +399,11 @@ class CanvasLinkInput(BaseModel):
     target_node_id: uuid.UUID
     target_port: str = Field(min_length=1, max_length=50)
     label: str | None = Field(default=None, max_length=200)
+    source_label: str | None = Field(default=None, max_length=200)
+    target_label: str | None = Field(default=None, max_length=200)
+    cable_type: str | None = Field(default=None, max_length=30)
+    interface_class: str | None = Field(default=None, max_length=30)
+    link_role: str | None = Field(default=None, max_length=30)
 
 
 class CanvasSaveRequest(BaseModel):

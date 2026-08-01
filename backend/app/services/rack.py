@@ -117,8 +117,11 @@ def _to_rack_response(
         total_u=rack.total_u,
         width=rack.width,
         depth=rack.depth,
+        visual_style=getattr(rack, "visual_style", None) or "classic",
         status=rack.status,
         description=rack.description,
+        app_usage=getattr(rack, "app_usage", None),
+        app_color=getattr(rack, "app_color", None),
         occupied_u=occupied,
         free_u=free,
         utilization=utilization,
@@ -151,6 +154,7 @@ def _to_template_response(
         total_u=entity.total_u,
         width=entity.width,
         depth=entity.depth,
+        visual_style=getattr(entity, "visual_style", None) or "classic",
         description=entity.description,
         created_at=entity.created_at,
         updated_at=entity.updated_at,
@@ -184,22 +188,22 @@ def _resolve_rack_position(
     column_no: int | None,
 ) -> tuple[int, int]:
     occupied = {(rack.row_no, rack.column_no) for rack in existing_racks}
-    row_layout = room.get_row_layout()
+    rack_slots = room.get_rack_slots()
+    slot_keys = {(r, c) for r, c, _ in rack_slots}
 
     if row_no is not None and column_no is not None:
-        if row_no < 1 or row_no > len(row_layout) or column_no < 1 or column_no > row_layout[row_no - 1]:
+        if (row_no, column_no) not in slot_keys:
             raise ValidationError(
-                f"Position exceeds room layout (row {row_no} has {row_layout[row_no - 1] if 1 <= row_no <= len(row_layout) else 0} racks)",
+                f"位置 R{row_no}-C{column_no} 不是有效机柜位（可能是立柱占位或超出布局）",
                 code=10004,
             )
         if (row_no, column_no) in occupied:
             raise ConflictError("Rack position already occupied", code=10002)
         return row_no, column_no
 
-    for r, cols in enumerate(row_layout, start=1):
-        for c in range(1, cols + 1):
-            if (r, c) not in occupied:
-                return r, c
+    for r, c, _code in rack_slots:
+        if (r, c) not in occupied:
+            return r, c
 
     raise ConflictError("No available rack slots in this room", code=10002)
 
@@ -360,6 +364,7 @@ class RackTemplateService:
             total_u=payload.total_u,
             width=payload.width,
             depth=payload.depth,
+            visual_style=payload.visual_style or "classic",
             description=payload.description,
             created_by=user_id,
             updated_by=user_id,
@@ -384,6 +389,8 @@ class RackTemplateService:
             entity.width = payload.width
         if payload.depth is not None:
             entity.depth = payload.depth
+        if payload.visual_style is not None:
+            entity.visual_style = payload.visual_style
         if payload.description is not None:
             entity.description = payload.description
         entity.updated_by = user_id
@@ -413,6 +420,11 @@ class RackTemplateService:
 
         result = ApplyTemplateToRoomResult()
         existing_racks = await self.rack_repo.list_by_room(room_id)
+        visual_style = (
+            payload.visual_style
+            or getattr(template, "visual_style", None)
+            or "classic"
+        )
 
         for rack in existing_racks:
             full = await self.rack_repo.get_by_id_with_positions(rack.id)
@@ -424,6 +436,7 @@ class RackTemplateService:
                     full.total_u = template.total_u
                 full.width = template.width
                 full.depth = template.depth
+                full.visual_style = visual_style
                 full.rack_template_id = template.id
                 full.updated_by = user_id
                 full.version += 1
@@ -436,43 +449,37 @@ class RackTemplateService:
 
         if payload.fill_empty_slots:
             occupied = {(r.row_no, r.column_no) for r in await self.rack_repo.list_by_room(room_id)}
-            row_layout = room.get_row_layout()
-            codes = room.get_slot_codes()
-            for row_idx, cols in enumerate(row_layout):
-                row_no = row_idx + 1
-                for col_no in range(1, cols + 1):
-                    if (row_no, col_no) in occupied:
-                        continue
-                    slot_code = (
-                        codes[row_idx][col_no - 1]
-                        if row_idx < len(codes) and col_no - 1 < len(codes[row_idx])
-                        else f"R{row_no:02d}{col_no:02d}"
+            for row_no, col_no, slot_code in room.get_rack_slots():
+                if (row_no, col_no) in occupied:
+                    continue
+                if not (slot_code or "").strip():
+                    continue
+                try:
+                    code, name = await _slot_identity(self.rack_repo, room_id, slot_code)
+                    entity = Rack(
+                        room_id=room_id,
+                        rack_template_id=template.id,
+                        code=code,
+                        name=name,
+                        row_no=row_no,
+                        column_no=col_no,
+                        total_u=template.total_u,
+                        width=template.width,
+                        depth=template.depth,
+                        visual_style=visual_style,
+                        status="active",
+                        created_by=user_id,
+                        updated_by=user_id,
                     )
-                    try:
-                        code, name = await _slot_identity(self.rack_repo, room_id, slot_code)
-                        entity = Rack(
-                            room_id=room_id,
-                            rack_template_id=template.id,
-                            code=code,
-                            name=name,
-                            row_no=row_no,
-                            column_no=col_no,
-                            total_u=template.total_u,
-                            width=template.width,
-                            depth=template.depth,
-                            status="active",
-                            created_by=user_id,
-                            updated_by=user_id,
-                        )
-                        created = await self.rack_repo.create(entity)
-                        await _init_rack_positions(self.session, created, user_id)
-                        result.created += 1
-                    except ConflictError as exc:
-                        result.skipped += 1
-                        result.errors.append(f"R{row_no}-C{col_no}: {exc.message}")
-                    except Exception as exc:  # noqa: BLE001
-                        result.skipped += 1
-                        result.errors.append(f"R{row_no}-C{col_no}: {exc}")
+                    created = await self.rack_repo.create(entity)
+                    await _init_rack_positions(self.session, created, user_id)
+                    result.created += 1
+                except ConflictError as exc:
+                    result.skipped += 1
+                    result.errors.append(f"R{row_no}-C{col_no}: {exc.message}")
+                except Exception as exc:  # noqa: BLE001
+                    result.skipped += 1
+                    result.errors.append(f"R{row_no}-C{col_no}: {exc}")
 
         await self.session.flush()
         return result
@@ -700,6 +707,12 @@ class RackService:
             existing = await self.repo.get_by_position_in_room(
                 room_id, payload.row_no, payload.column_no
             )
+            slot_keys = {(r, c) for r, c, _ in room.get_rack_slots()}
+            if (payload.row_no, payload.column_no) not in slot_keys:
+                raise ValidationError(
+                    f"位置 R{payload.row_no}-C{payload.column_no} 不是有效机柜位（立柱占位不可建柜）",
+                    code=10004,
+                )
             if existing:
                 if payload.update_existing:
                     try:
@@ -742,6 +755,7 @@ class RackService:
                     total_u=template.total_u,
                     width=template.width,
                     depth=template.depth,
+                    visual_style=getattr(template, "visual_style", None) or "classic",
                     status="active",
                     created_by=user_id,
                     updated_by=user_id,
@@ -766,64 +780,61 @@ class RackService:
             (r.row_no, r.column_no): r for r in await self.repo.list_by_room(room_id)
         }
 
-        for row_idx, cols in enumerate(row_layout):
-            row_no = row_idx + 1
-            for col_no in range(1, cols + 1):
-                template = await resolve_template(row_no, col_no)
-                if not template:
-                    result.skipped += 1
-                    result.errors.append(f"R{row_no}-C{col_no}: 未指定模板")
-                    continue
+        for row_no, col_no, slot_code in room.get_rack_slots():
+            template = await resolve_template(row_no, col_no)
+            if not template:
+                result.skipped += 1
+                result.errors.append(f"R{row_no}-C{col_no}: 未指定模板")
+                continue
 
-                existing = existing_map.get((row_no, col_no))
-                slot_code = (
-                    codes[row_idx][col_no - 1]
-                    if row_idx < len(codes) and col_no - 1 < len(codes[row_idx])
-                    else f"R{row_no:02d}{col_no:02d}"
-                )
-                if existing:
-                    if not payload.update_existing:
-                        continue
-                    try:
-                        await apply_template_to_rack(existing, template)
-                        code, name = await _slot_identity(
-                            self.repo, room_id, slot_code, exclude_id=existing.id
-                        )
-                        existing.code = code
-                        existing.name = name
-                        result.updated += 1
-                    except Exception as exc:  # noqa: BLE001
-                        result.skipped += 1
-                        result.errors.append(f"{existing.code}: {exc}")
-                    continue
+            if not (slot_code or "").strip():
+                continue
 
-                if not payload.fill_empty_slots:
+            existing = existing_map.get((row_no, col_no))
+            if existing:
+                if not payload.update_existing:
                     continue
-
                 try:
-                    code, name = await _slot_identity(self.repo, room_id, slot_code)
-                except ConflictError as exc:
+                    await apply_template_to_rack(existing, template)
+                    code, name = await _slot_identity(
+                        self.repo, room_id, slot_code, exclude_id=existing.id
+                    )
+                    existing.code = code
+                    existing.name = name
+                    result.updated += 1
+                except Exception as exc:  # noqa: BLE001
                     result.skipped += 1
-                    result.errors.append(f"R{row_no}-C{col_no}: {exc.message}")
-                    continue
-                entity = Rack(
-                    room_id=room_id,
-                    rack_template_id=template.id,
-                    code=code,
-                    name=name,
-                    row_no=row_no,
-                    column_no=col_no,
-                    total_u=template.total_u,
-                    width=template.width,
-                    depth=template.depth,
-                    status="active",
-                    created_by=user_id,
-                    updated_by=user_id,
-                )
-                created = await self.repo.create(entity)
-                await _init_rack_positions(self.session, created, user_id)
-                result.created += 1
-                existing_map[(row_no, col_no)] = created
+                    result.errors.append(f"{existing.code}: {exc}")
+                continue
+
+            if not payload.fill_empty_slots:
+                continue
+
+            try:
+                code, name = await _slot_identity(self.repo, room_id, slot_code)
+            except ConflictError as exc:
+                result.skipped += 1
+                result.errors.append(f"R{row_no}-C{col_no}: {exc.message}")
+                continue
+            entity = Rack(
+                room_id=room_id,
+                rack_template_id=template.id,
+                code=code,
+                name=name,
+                row_no=row_no,
+                column_no=col_no,
+                total_u=template.total_u,
+                width=template.width,
+                depth=template.depth,
+                visual_style=getattr(template, "visual_style", None) or "classic",
+                status="active",
+                created_by=user_id,
+                updated_by=user_id,
+            )
+            created = await self.repo.create(entity)
+            await _init_rack_positions(self.session, created, user_id)
+            result.created += 1
+            existing_map[(row_no, col_no)] = created
 
         await self.session.flush()
         return result
@@ -920,6 +931,7 @@ class RackService:
         total_u = payload.total_u
         width = payload.width
         depth = payload.depth
+        visual_style = payload.visual_style or "classic"
         template_id: uuid.UUID | None = None
 
         if payload.rack_template_id:
@@ -930,6 +942,7 @@ class RackService:
             total_u = template.total_u
             width = template.width
             depth = template.depth
+            visual_style = getattr(template, "visual_style", None) or "classic"
 
         entity = Rack(
             room_id=room_id,
@@ -941,6 +954,7 @@ class RackService:
             total_u=total_u,
             width=width,
             depth=depth,
+            visual_style=visual_style,
             status=payload.status.value,
             description=payload.description,
             created_by=user_id,
@@ -995,10 +1009,16 @@ class RackService:
             rack.width = payload.width
         if payload.depth is not None:
             rack.depth = payload.depth
+        if payload.visual_style is not None:
+            rack.visual_style = payload.visual_style
         if payload.status is not None:
             rack.status = payload.status.value
         if payload.description is not None:
             rack.description = payload.description
+        if "app_usage" in payload.model_fields_set:
+            rack.app_usage = payload.app_usage
+        if "app_color" in payload.model_fields_set:
+            rack.app_color = payload.app_color
 
         if payload.total_u is not None and payload.total_u != rack.total_u:
             await self._resize_rack_positions(rack, payload.total_u, user_id)

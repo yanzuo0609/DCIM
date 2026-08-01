@@ -119,6 +119,10 @@ def _normalize_kind(kind: str | NetworkNodeKind) -> str:
     return kind.value if isinstance(kind, NetworkNodeKind) else kind
 
 
+DEFAULT_PROJECT_CODE = "DEFAULT"
+DEFAULT_PROJECT_NAME = "默认项目"
+
+
 class NetworkDesignService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -129,6 +133,31 @@ class NetworkDesignService:
         self.device_repo = DeviceRepository(session)
         self.rack_repo = RackRepository(session)
         self.room_repo = RoomRepository(session)
+
+    async def ensure_default_project(
+        self, user_id: uuid.UUID | None = None
+    ) -> NetworkProject:
+        """确保系统默认项目存在。"""
+        existing = await self.project_repo.get_by_code(DEFAULT_PROJECT_CODE)
+        if existing:
+            return existing
+        project = NetworkProject(
+            code=DEFAULT_PROJECT_CODE,
+            name=DEFAULT_PROJECT_NAME,
+            description="系统默认项目，不可删除",
+            created_by=user_id,
+            updated_by=user_id,
+        )
+        created = await self.project_repo.create(project)
+        topology = NetworkTopology(
+            name=DEFAULT_PROJECT_NAME,
+            description="默认项目拓扑",
+            project_id=created.id,
+            created_by=user_id,
+            updated_by=user_id,
+        )
+        await self.topology_repo.create(topology)
+        return created
 
     def _to_project_response(
         self, project: NetworkProject, topology_id: uuid.UUID | None = None
@@ -146,6 +175,7 @@ class NetworkDesignService:
     async def list_projects(
         self, params: PaginationParams
     ) -> tuple[list[NetworkProjectResponse], PaginationMeta]:
+        await self.ensure_default_project()
         items, total = await self.project_repo.list_paginated(
             page=params.page,
             page_size=params.page_size,
@@ -153,6 +183,11 @@ class NetworkDesignService:
             sort=params.sort or "updated_at",
             order=params.order,
             search_fields=["code", "name", "description"],
+        )
+        # 默认项目始终置顶
+        items = sorted(
+            items,
+            key=lambda p: (0 if (p.code or "").upper() == DEFAULT_PROJECT_CODE else 1, p.name or ""),
         )
         pagination = PaginationMeta(
             page=params.page,
@@ -180,6 +215,8 @@ class NetworkDesignService:
         name = payload.name.strip()
         if not code or not name:
             raise ValidationError("Project code and name are required")
+        if code == DEFAULT_PROJECT_CODE:
+            raise ValidationError("DEFAULT 为系统保留编码，请使用其他项目编码")
         existing = await self.project_repo.get_by_code(code)
         if existing:
             raise ValidationError(f"Project code already exists: {code}")
@@ -215,6 +252,16 @@ class NetworkDesignService:
             code = payload.code.strip().upper()
             if not code:
                 raise ValidationError("Project code is required")
+            if (
+                entity.code.upper() == DEFAULT_PROJECT_CODE
+                and code != DEFAULT_PROJECT_CODE
+            ):
+                raise ValidationError("不可修改系统默认项目编码 DEFAULT")
+            if (
+                entity.code.upper() != DEFAULT_PROJECT_CODE
+                and code == DEFAULT_PROJECT_CODE
+            ):
+                raise ValidationError("DEFAULT 为系统保留编码")
             conflict = await self.project_repo.get_by_code(code)
             if conflict and conflict.id != project_id:
                 raise ValidationError(f"Project code already exists: {code}")
@@ -245,6 +292,8 @@ class NetworkDesignService:
         entity = await self.project_repo.get_by_id(project_id)
         if not entity:
             raise NotFoundError("Network project not found")
+        if (entity.code or "").upper() == DEFAULT_PROJECT_CODE:
+            raise ValidationError("系统默认项目（DEFAULT）不可删除")
         topologies = await self.topology_repo.list_by_project(project_id)
         for topo in topologies:
             await self.delete_topology(topo.id, user_id=user_id)
@@ -252,6 +301,8 @@ class NetworkDesignService:
         entity.deleted_at = now
         entity.deleted_by = user_id
         await self.session.flush()
+        # 删除后确保默认项目仍存在
+        await self.ensure_default_project(user_id=user_id)
 
     async def list_topologies(
         self, params: PaginationParams, project_id: uuid.UUID | None = None
@@ -377,20 +428,23 @@ class NetworkDesignService:
             slots_payload = None
             port_layout_payload = None
             if item.port_layout:
-                port_layout_payload = item.port_layout.model_dump()
+                port_layout_payload = item.port_layout.model_dump(mode="json")
             if item.kind in (NetworkNodeKind.SERVER, NetworkNodeKind.SECURITY):
-                slots_payload = [slot.model_dump() for slot in (item.slots or default_slots())]
+                slots_payload = [slot.model_dump(mode="json") for slot in (item.slots or default_slots())]
 
             if item.id and item.id in nodes_by_id:
                 node = nodes_by_id[item.id]
                 node.kind = item.kind.value
                 node.name = item.name.strip()
                 node.device_id = item.device_id
+                node.device_model_id = item.device_model_id
+                node.contract_device_name = item.contract_device_name
                 node.pos_x = item.pos_x
                 node.pos_y = item.pos_y
                 node.switch_port_count = item.switch_port_count
                 node.slots = slots_payload
                 node.port_layout = port_layout_payload
+                node.on_canvas = bool(item.on_canvas)
                 node.deleted_at = None
                 node.deleted_by = None
                 node.updated_by = user_id
@@ -404,11 +458,14 @@ class NetworkDesignService:
                     kind=item.kind.value,
                     name=item.name.strip(),
                     device_id=item.device_id,
+                    device_model_id=item.device_model_id,
+                    contract_device_name=item.contract_device_name,
                     pos_x=item.pos_x,
                     pos_y=item.pos_y,
                     switch_port_count=item.switch_port_count,
                     slots=slots_payload,
                     port_layout=port_layout_payload,
+                    on_canvas=bool(item.on_canvas),
                     created_by=user_id,
                     updated_by=user_id,
                 )
@@ -455,6 +512,11 @@ class NetworkDesignService:
                     target_node_id=target_id,
                     target_port=link_input.target_port,
                     label=link_input.label,
+                    source_label=link_input.source_label,
+                    target_label=link_input.target_label,
+                    cable_type=link_input.cable_type,
+                    interface_class=link_input.interface_class,
+                    link_role=link_input.link_role,
                     created_by=user_id,
                     updated_by=user_id,
                 )
@@ -530,19 +592,26 @@ class NetworkDesignService:
 
         result: dict[uuid.UUID, NetworkDeviceBrief] = {}
         for device in devices:
+            rack_id = device.rack_id
+            room_id = None
             rack_code = None
             room_name = None
             if device.rack_id and device.rack_id in rack_map:
                 rack = rack_map[device.rack_id]
                 rack_code = rack.code
+                room_id = rack.room_id
                 room = room_map.get(rack.room_id)
                 room_name = room.name if room else None
             device_type_name = device.device_type.name if device.device_type else None
+            device_type_code = device.device_type.code if device.device_type else None
+            model_name = device.model.name if getattr(device, "model", None) else None
             system_ip, bmc_ip, vip = _ip_fields_from_device(device)
             result[device.id] = NetworkDeviceBrief(
                 device_id=device.id,
-                name=device.name,
+                name=device.name or device.hostname,
                 hostname=device.hostname,
+                rack_id=rack_id,
+                room_id=room_id,
                 rack_code=rack_code,
                 room_name=room_name,
                 u_position=device.u_position,
@@ -550,6 +619,9 @@ class NetworkDesignService:
                 bmc_ip=bmc_ip,
                 vip=vip,
                 device_type_name=device_type_name,
+                device_type_code=device_type_code,
+                device_model_name=model_name,
+                height_u=device.height_u,
             )
         return result
 
@@ -568,10 +640,13 @@ class NetworkDesignService:
             kind=NetworkNodeKind(node.kind),
             name=node.name,
             device_id=node.device_id,
+            device_model_id=getattr(node, "device_model_id", None),
+            contract_device_name=getattr(node, "contract_device_name", None),
             pos_x=node.pos_x,
             pos_y=node.pos_y,
             switch_port_count=node.switch_port_count,
             slots=slots,
             port_layout=port_layout,
+            on_canvas=bool(getattr(node, "on_canvas", True)),
             device=device,
         )

@@ -64,6 +64,24 @@ async def _ensure_sqlite_room_columns(connection) -> None:
         ("code_mode", "ALTER TABLE room ADD COLUMN code_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"),
         ("code_prefix", "ALTER TABLE room ADD COLUMN code_prefix VARCHAR(50)"),
         ("slot_codes", "ALTER TABLE room ADD COLUMN slot_codes JSON"),
+        ("pillar_layout", "ALTER TABLE room ADD COLUMN pillar_layout JSON"),
+        ("purpose", "ALTER TABLE room ADD COLUMN purpose VARCHAR(50) DEFAULT 'production'"),
+        ("importance", "ALTER TABLE room ADD COLUMN importance VARCHAR(20) DEFAULT 'medium'"),
+    ]
+    for col, sql in alters:
+        if col not in columns:
+            await connection.exec_driver_sql(sql)
+
+
+async def _ensure_sqlite_rack_columns(connection) -> None:
+    """Add rack usage/color columns for existing SQLite databases."""
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    result = await connection.exec_driver_sql("PRAGMA table_info(rack)")
+    columns = {row[1] for row in result.fetchall()}
+    alters = [
+        ("app_usage", "ALTER TABLE rack ADD COLUMN app_usage VARCHAR(100)"),
+        ("app_color", "ALTER TABLE rack ADD COLUMN app_color VARCHAR(20)"),
     ]
     for col, sql in alters:
         if col not in columns:
@@ -175,6 +193,10 @@ async def _ensure_sqlite_device_columns(connection) -> None:
         ("system_profile_id", "ALTER TABLE device ADD COLUMN system_profile_id CHAR(36)"),
         ("bmc_profile_id", "ALTER TABLE device ADD COLUMN bmc_profile_id CHAR(36)"),
         ("contract_id", "ALTER TABLE device ADD COLUMN contract_id CHAR(36)"),
+        (
+            "network_panel_bound",
+            "ALTER TABLE device ADD COLUMN network_panel_bound BOOLEAN NOT NULL DEFAULT 0",
+        ),
     ]
     for col, sql in alters:
         if col not in columns:
@@ -390,6 +412,7 @@ async def _ensure_sqlite_ip_address_columns(connection) -> None:
         ("dns", "ALTER TABLE ip_address ADD COLUMN dns VARCHAR(64)"),
         ("dns_secondary", "ALTER TABLE ip_address ADD COLUMN dns_secondary VARCHAR(64)"),
         ("status", "ALTER TABLE ip_address ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'free'"),
+        ("segment_id", "ALTER TABLE ip_address ADD COLUMN segment_id CHAR(36)"),
     ]
     for col, sql in alters:
         if col not in columns:
@@ -408,6 +431,85 @@ async def _ensure_sqlite_ip_address_columns(connection) -> None:
     )
 
 
+async def _ensure_sqlite_ip_segment(connection) -> None:
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    result = await connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ip_segment'"
+    )
+    if not result.fetchone():
+        await connection.exec_driver_sql(
+            """
+            CREATE TABLE ip_segment (
+                application VARCHAR(100),
+                network VARCHAR(64) NOT NULL DEFAULT '',
+                prefix_len INTEGER NOT NULL DEFAULT 24,
+                gateway VARCHAR(64),
+                address_purpose VARCHAR(50),
+                network_type VARCHAR(50),
+                location VARCHAR(100),
+                remarks TEXT,
+                name VARCHAR(100) NOT NULL,
+                start_ip VARCHAR(64) NOT NULL,
+                end_ip VARCHAR(64) NOT NULL,
+                netmask VARCHAR(64),
+                dns VARCHAR(64),
+                dns_secondary VARCHAR(64),
+                application_type VARCHAR(50),
+                label VARCHAR(100),
+                description TEXT,
+                id CHAR(36) NOT NULL,
+                created_at DATETIME NOT NULL,
+                created_by CHAR(36),
+                updated_at DATETIME NOT NULL,
+                updated_by CHAR(36),
+                deleted_at DATETIME,
+                deleted_by CHAR(36),
+                version INTEGER NOT NULL,
+                PRIMARY KEY (id)
+            )
+            """
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_ip_segment_start_ip ON ip_segment (start_ip)"
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_ip_segment_end_ip ON ip_segment (end_ip)"
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_ip_segment_application_type ON ip_segment (application_type)"
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_ip_segment_network ON ip_segment (network)"
+        )
+        return
+
+    info = await connection.exec_driver_sql("PRAGMA table_info(ip_segment)")
+    columns = {row[1] for row in info.fetchall()}
+    alters = [
+        ("application", "ALTER TABLE ip_segment ADD COLUMN application VARCHAR(100)"),
+        ("network", "ALTER TABLE ip_segment ADD COLUMN network VARCHAR(64) DEFAULT ''"),
+        ("prefix_len", "ALTER TABLE ip_segment ADD COLUMN prefix_len INTEGER DEFAULT 24"),
+        ("address_purpose", "ALTER TABLE ip_segment ADD COLUMN address_purpose VARCHAR(50)"),
+        ("network_type", "ALTER TABLE ip_segment ADD COLUMN network_type VARCHAR(50)"),
+        ("location", "ALTER TABLE ip_segment ADD COLUMN location VARCHAR(100)"),
+        ("remarks", "ALTER TABLE ip_segment ADD COLUMN remarks TEXT"),
+    ]
+    for col, sql in alters:
+        if col not in columns:
+            await connection.exec_driver_sql(sql)
+    await connection.exec_driver_sql(
+        """
+        UPDATE ip_segment
+        SET network = COALESCE(NULLIF(network, ''), start_ip),
+            prefix_len = COALESCE(prefix_len, 24),
+            address_purpose = COALESCE(address_purpose, application_type),
+            remarks = COALESCE(remarks, description)
+        WHERE deleted_at IS NULL
+        """
+    )
+
+
 async def _ensure_sqlite_network_node_columns(connection) -> None:
     if not str(settings.database_url).startswith("sqlite"):
         return
@@ -415,6 +517,47 @@ async def _ensure_sqlite_network_node_columns(connection) -> None:
     columns = {row[1] for row in result.fetchall()}
     if "port_layout" not in columns:
         await connection.exec_driver_sql("ALTER TABLE network_node ADD COLUMN port_layout JSON")
+    if "on_canvas" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN on_canvas BOOLEAN NOT NULL DEFAULT 1"
+        )
+    if "device_model_id" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN device_model_id CHAR(36)"
+        )
+    if "contract_device_name" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN contract_device_name VARCHAR(100)"
+        )
+
+
+async def _ensure_sqlite_device_model_panel_columns(connection) -> None:
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    result = await connection.exec_driver_sql("PRAGMA table_info(device_model)")
+    columns = {row[1] for row in result.fetchall()}
+    if "port_layout" not in columns:
+        await connection.exec_driver_sql("ALTER TABLE device_model ADD COLUMN port_layout JSON")
+    if "apply_device_name" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE device_model ADD COLUMN apply_device_name VARCHAR(100)"
+        )
+    if "network_kind" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE device_model ADD COLUMN network_kind VARCHAR(20)"
+        )
+
+
+async def _ensure_sqlite_network_link_columns(connection) -> None:
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    result = await connection.exec_driver_sql("PRAGMA table_info(network_link)")
+    columns = {row[1] for row in result.fetchall()}
+    for name in ("source_label", "target_label", "cable_type", "interface_class", "link_role"):
+        if name not in columns:
+            await connection.exec_driver_sql(
+                f"ALTER TABLE network_link ADD COLUMN {name} VARCHAR(200)"
+            )
 
 
 async def _ensure_sqlite_network_project(connection) -> None:
@@ -488,12 +631,16 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_sqlite_room_columns(conn)
+        await _ensure_sqlite_rack_columns(conn)
         await _ensure_sqlite_rack_code_unique_per_room(conn)
         await _ensure_sqlite_device_columns(conn)
         await _ensure_sqlite_device_contract_columns(conn)
         await _ensure_sqlite_ip_address_columns(conn)
+        await _ensure_sqlite_ip_segment(conn)
         await _ensure_sqlite_network_node_columns(conn)
+        await _ensure_sqlite_network_link_columns(conn)
         await _ensure_sqlite_network_project(conn)
+        await _ensure_sqlite_device_model_panel_columns(conn)
 
     async with async_session_factory() as session:
         await seed_defaults(session)

@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ManufacturerCreate(BaseModel):
@@ -109,11 +109,16 @@ class ParamDiskSpec(BaseModel):
     media_type: Literal["ssd", "hdd", "nvme"] | None = Field(
         default=None, description="盘类型：ssd / hdd(机械) / nvme"
     )
+    role: Literal["system", "data"] | None = Field(
+        default=None,
+        description="磁盘用途：system=系统盘 / data=数据盘，便于资源统计",
+    )
 
 
-# 前端新建参数档案时默认展示 3 种磁盘规格行，可继续添加（最多 20）
+# 前端默认：1 行系统盘 + 2 行数据盘；最多 20
 PARAM_DISK_SPEC_DEFAULT_COUNT = 3
 PARAM_DISK_SPEC_MAX_COUNT = 20
+PARAM_DATA_DISK_EXPORT_SLOTS = 3
 
 
 class ParamRaidSpec(BaseModel):
@@ -131,21 +136,49 @@ class ParamProfilePayload(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    # 来自采购汇总的溯源信息（按设备名称同步时写入）
+    source_device_name: str | None = Field(default=None, max_length=100)
+    source_device_model: str | None = Field(default=None, max_length=100)
+    source_manufacturer: str | None = Field(default=None, max_length=100)
+    # 关联档案中的设备类型
+    device_type_id: str | None = Field(default=None, max_length=64)
+    # 详细参数（原参考型号/参数型号，可自由填写）
+    detail_params: str | None = Field(default=None, max_length=1000)
+    # 其他参数：风扇/电源/RAID/操作系统等合并文本
+    other_params: str | None = Field(default=None, max_length=3000)
+
     cpu: ParamCpuSpec | None = None
     memory: ParamMemorySpec | None = None
     disks: list[ParamDiskSpec] = Field(
         default_factory=list,
         max_length=PARAM_DISK_SPEC_MAX_COUNT,
-        description=f"磁盘规格列表，支持多种规格组合；前端默认 {PARAM_DISK_SPEC_DEFAULT_COUNT} 行",
+        description=(
+            f"磁盘规格列表；建议区分系统盘/数据盘（role）；"
+            f"前端默认 {PARAM_DISK_SPEC_DEFAULT_COUNT} 行"
+        ),
     )
-    fan_count: int | None = Field(default=None, ge=0, description="风扇数量")
-    fan_model: str | None = Field(default=None, max_length=100, description="风扇型号")
-    psu_power_w: float | None = Field(default=None, ge=0, description="电源功率(W)")
+    fan_count: int | None = Field(default=None, ge=0, description="风扇数量（兼容旧数据）")
+    fan_model: str | None = Field(default=None, max_length=100, description="风扇型号（兼容旧数据）")
+    psu_power_w: float | None = Field(default=None, ge=0, description="电源功率(W)（兼容旧数据）")
     raid: ParamRaidSpec | None = None
-    supported_os: list[str] = Field(default_factory=list, description="支持的操作系统")
+    supported_os: list[str] = Field(default_factory=list, description="支持的操作系统（兼容旧数据）")
     custom: list[ParamCustomField] = Field(
         default_factory=list, description="手动添加的自定义参数"
     )
+
+    @field_validator("device_type_id", mode="before")
+    @classmethod
+    def empty_type_to_none(cls, value: object) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @field_validator("detail_params", "other_params", "source_device_model", "source_manufacturer", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class ParamProfileCreate(BaseModel):
@@ -170,8 +203,31 @@ class ParamProfileResponse(BaseModel):
     payload: ParamProfilePayload | None = None
     description: str | None
     summary: str | None = None
+    is_complete: bool = False
+    missing_fields: list[str] = Field(default_factory=list)
+    source_device_name: str | None = None
+    source_device_model: str | None = None
+    source_manufacturer: str | None = None
+    device_type_id: str | None = None
+    detail_params: str | None = None
+    other_params: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ParamProfileSyncResult(BaseModel):
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    total_summary: int = 0
+    messages: list[str] = Field(default_factory=list)
+
+
+class ParamProfileImportResult(BaseModel):
+    updated: int = 0
+    created: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
 
 
 def normalize_param_payload(raw: Any) -> dict[str, Any] | None:
@@ -209,7 +265,9 @@ def param_payload_summary(payload: ParamProfilePayload | dict | None) -> str | N
             mem += f"×{data.memory.modules}"
         parts.append(f"内存 {mem}")
     if data.disks:
-        disk_parts = []
+        system_parts: list[str] = []
+        data_parts: list[str] = []
+        other_parts: list[str] = []
         for d in data.disks:
             bit: list[str] = []
             if d.count and d.size_gb is not None:
@@ -222,19 +280,71 @@ def param_payload_summary(payload: ParamProfilePayload | dict | None) -> str | N
                 bit.append(d.media_type.upper())
             if d.interface:
                 bit.append(d.interface)
-            if bit:
-                disk_parts.append(" ".join(bit))
-        if disk_parts:
-            parts.append("磁盘 " + " + ".join(disk_parts))
-    if data.psu_power_w is not None:
-        parts.append(f"电源 {data.psu_power_w:g}W")
-    if data.raid and data.raid.model:
-        parts.append(f"RAID {data.raid.model}")
-    if data.supported_os:
-        parts.append("OS " + "/".join(data.supported_os[:3]))
-    if data.custom:
-        parts.append(f"+{len(data.custom)}自定义")
+            if not bit:
+                continue
+            text = " ".join(bit)
+            if d.role == "system":
+                system_parts.append(text)
+            elif d.role == "data":
+                data_parts.append(text)
+            else:
+                other_parts.append(text)
+        if system_parts:
+            parts.append("系统盘 " + " + ".join(system_parts))
+        if data_parts:
+            parts.append("数据盘 " + " + ".join(data_parts))
+        if other_parts and not system_parts and not data_parts:
+            parts.append("磁盘 " + " + ".join(other_parts))
+        elif other_parts:
+            parts.append("其他盘 " + " + ".join(other_parts))
+    if data.detail_params:
+        parts.append(f"详细 {data.detail_params[:40]}")
+    if data.other_params:
+        parts.append(f"其他 {data.other_params[:40]}")
+    elif data.psu_power_w is not None or (data.raid and data.raid.model) or data.supported_os:
+        # 兼容旧结构化字段摘要
+        if data.psu_power_w is not None:
+            parts.append(f"电源 {data.psu_power_w:g}W")
+        if data.raid and data.raid.model:
+            parts.append(f"RAID {data.raid.model}")
+        if data.supported_os:
+            parts.append("OS " + "/".join(data.supported_os[:3]))
     return " · ".join(parts) if parts else None
+
+
+def _disk_filled(disk: ParamDiskSpec | None) -> bool:
+    if disk is None:
+        return False
+    return disk.size_gb is not None
+
+
+def param_missing_fields(payload: ParamProfilePayload | dict | None) -> list[str]:
+    """待完善判定：系统盘、数据盘。"""
+    if not payload:
+        return ["系统盘", "数据盘"]
+    data = (
+        payload
+        if isinstance(payload, ParamProfilePayload)
+        else ParamProfilePayload.model_validate(payload)
+    )
+    missing: list[str] = []
+    disks = list(data.disks or [])
+    has_system = any(d.role == "system" and _disk_filled(d) for d in disks)
+    has_data = any(d.role == "data" and _disk_filled(d) for d in disks)
+    if not has_system and not has_data:
+        filled = [d for d in disks if _disk_filled(d)]
+        if filled:
+            has_system = True
+            has_data = len(filled) >= 2
+    if not has_system:
+        missing.append("系统盘")
+    if not has_data:
+        missing.append("数据盘")
+    return missing
+
+
+def param_is_complete(payload: ParamProfilePayload | dict | None) -> bool:
+    return not param_missing_fields(payload)
 
 
 CredentialRole = Literal["admin", "readonly", "operator", "custom"]
@@ -470,6 +580,9 @@ class DeviceModelUpdate(BaseModel):
     height_u: int | None = Field(default=None, ge=1, le=10)
     power: Decimal | None = None
     description: str | None = None
+    port_layout: dict | None = None
+    apply_device_name: str | None = Field(default=None, max_length=100)
+    network_kind: str | None = Field(default=None, max_length=20)
 
 
 class DeviceModelResponse(BaseModel):
@@ -486,7 +599,58 @@ class DeviceModelResponse(BaseModel):
     power: Decimal | None
     depth: int | None
     description: str | None
+    port_layout: dict | None = None
+    apply_device_name: str | None = None
+    network_kind: str | None = None
     created_at: datetime
+
+
+class DeviceModelPanelApply(BaseModel):
+    """将网络设备定义面板应用到设备清单。
+
+    mode=apply：仅可绑定尚未应用面板的设备（可指定 device_ids，空则全部未绑定）。
+    mode=modify：仅可更新已应用面板的设备对应布局（可指定 device_ids，空则全部已绑定）。
+    """
+
+    port_layout: dict
+    apply_device_name: str = Field(min_length=1, max_length=100)
+    network_kind: str | None = Field(default=None, max_length=20)
+    mode: Literal["apply", "modify"] = "apply"
+    device_ids: list[str] = Field(default_factory=list)
+
+
+class DeviceModelPanelApplyResult(BaseModel):
+    device_model_id: str
+    apply_device_name: str
+    mode: str
+    matched_device_count: int
+    matched_device_ids: list[str] = Field(default_factory=list)
+    applied_count: int = 0
+    modified_count: int = 0
+    skipped_count: int = 0
+    skipped_device_ids: list[str] = Field(default_factory=list)
+    message: str | None = None
+
+
+class DevicePanelCandidate(BaseModel):
+    id: str
+    name: str | None = None
+    hostname: str
+    serial_number: str
+    device_model_id: str
+    device_model_name: str | None = None
+    network_panel_bound: bool = False
+    rack_code: str | None = None
+    room_name: str | None = None
+    u_position: int | None = None
+    status: str
+
+
+class DevicePanelCandidateList(BaseModel):
+    apply_device_name: str
+    items: list[DevicePanelCandidate]
+    unbound_count: int = 0
+    bound_count: int = 0
 
 
 class DeviceCreate(BaseModel):
@@ -535,6 +699,7 @@ class DeviceResponse(BaseModel):
     manufacturer_name: str | None = None
     device_type_id: str | None = None
     device_type_name: str | None = None
+    device_type_code: str | None = None
     param_profile_id: str | None = None
     system_profile_id: str | None = None
     bmc_profile_id: str | None = None
@@ -554,6 +719,10 @@ class DeviceResponse(BaseModel):
     power: Decimal | None
     status: str
     description: str | None
+    port_layout: dict | None = None
+    network_kind: str | None = None
+    panel_apply_device_name: str | None = None
+    network_panel_bound: bool = False
     created_at: datetime
     updated_at: datetime
 

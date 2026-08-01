@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,6 +17,7 @@ class RackTemplateCreate(BaseModel):
     total_u: int = Field(default=42, ge=1, le=60)
     width: int = Field(default=600, ge=400, le=1200)
     depth: int = Field(default=1000, ge=600, le=1500)
+    visual_style: Literal["classic", "schematic", "realistic", "grid"] = "classic"
     description: str | None = None
 
 
@@ -24,6 +26,7 @@ class RackTemplateUpdate(BaseModel):
     total_u: int | None = Field(default=None, ge=1, le=60)
     width: int | None = Field(default=None, ge=400, le=1200)
     depth: int | None = Field(default=None, ge=600, le=1500)
+    visual_style: Literal["classic", "schematic", "realistic", "grid"] | None = None
     description: str | None = None
 
 
@@ -43,6 +46,7 @@ class RackTemplateResponse(BaseModel):
     total_u: int
     width: int
     depth: int
+    visual_style: str = "classic"
     description: str | None
     created_at: datetime
     updated_at: datetime
@@ -55,6 +59,10 @@ class ApplyTemplateToRoomRequest(BaseModel):
     fill_empty_slots: bool = Field(
         default=True,
         description="为空闲机柜位创建机柜并套用模板；已有机柜更新为该模板规格",
+    )
+    visual_style: Literal["classic", "schematic", "realistic", "grid"] | None = Field(
+        default=None,
+        description="应用到机柜的视觉样式；为空则沿用模板默认样式",
     )
 
 
@@ -154,6 +162,7 @@ class RackCreate(BaseModel):
     total_u: int = Field(default=42, ge=1, le=60)
     width: int = Field(default=600, ge=400, le=1200)
     depth: int = Field(default=1000, ge=600, le=1500)
+    visual_style: Literal["classic", "schematic", "realistic", "grid"] | None = None
     status: RackStatus = RackStatus.ACTIVE
     description: str | None = None
 
@@ -165,8 +174,11 @@ class RackUpdate(BaseModel):
     total_u: int | None = Field(default=None, ge=1, le=60)
     width: int | None = Field(default=None, ge=400, le=1200)
     depth: int | None = Field(default=None, ge=600, le=1500)
+    visual_style: Literal["classic", "schematic", "realistic", "grid"] | None = None
     status: RackStatus | None = None
     description: str | None = None
+    app_usage: str | None = Field(default=None, max_length=100)
+    app_color: str | None = Field(default=None, max_length=20)
 
 
 class RackResponse(BaseModel):
@@ -182,8 +194,11 @@ class RackResponse(BaseModel):
     total_u: int
     width: int
     depth: int
+    visual_style: str = "classic"
     status: str
     description: str | None
+    app_usage: str | None = None
+    app_color: str | None = None
     occupied_u: int = 0
     free_u: int = 0
     utilization: float = 0.0

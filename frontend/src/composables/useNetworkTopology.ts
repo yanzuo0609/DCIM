@@ -77,11 +77,14 @@ function toCanvasNodes(nodes: NetworkNode[]): CanvasNodeInput[] {
       kind: n.kind,
       name: n.name,
       device_id: n.device_id,
+      device_model_id: n.device_model_id ?? null,
+      contract_device_name: n.contract_device_name ?? null,
       pos_x: n.pos_x,
       pos_y: n.pos_y,
       switch_port_count: Math.max(1, Math.min(128, n.switch_port_count || 48)),
       slots,
       port_layout,
+      on_canvas: n.on_canvas !== false,
     }
   })
 }
@@ -95,6 +98,11 @@ function toCanvasLinks(links: NetworkLink[]): CanvasLinkInput[] {
     target_node_id: l.target_node_id,
     target_port: l.target_port,
     label: l.label,
+    source_label: l.source_label ?? null,
+    target_label: l.target_label ?? null,
+    cable_type: l.cable_type ?? null,
+    interface_class: l.interface_class ?? null,
+    link_role: l.link_role ?? null,
   }))
 }
 
@@ -121,7 +129,11 @@ export function useNetworkTopology() {
   function applyDetail(detail: Awaited<ReturnType<typeof getNetworkTopologyDetail>>) {
     currentId.value = detail.id
     if (detail.project_id) currentProjectId.value = detail.project_id
-    nodes.value = detail.nodes.map((n) => ({ ...n, slots: n.slots || defaultSlots() }))
+    nodes.value = detail.nodes.map((n) => ({
+      ...n,
+      slots: n.slots || defaultSlots(),
+      on_canvas: n.on_canvas !== false,
+    }))
     links.value = detail.links
   }
 
@@ -200,16 +212,28 @@ export function useNetworkTopology() {
     }
   }
 
-  async function loadProjects(preferId?: string | null) {
+  async function loadProjects(preferId?: string | null, opts?: { preferDefault?: boolean }) {
     loading.value = true
     try {
       const data = await listNetworkProjects({ page_size: 100, sort: 'updated_at', order: 'desc' })
-      projects.value = data.items || []
+      // 再次过滤，避免偶发返回已删除项；DEFAULT 置顶
+      const items = (data.items || []).filter((p) => !!p?.id)
+      items.sort((a, b) => {
+        const aDef = a.code?.toUpperCase() === 'DEFAULT' ? 0 : 1
+        const bDef = b.code?.toUpperCase() === 'DEFAULT' ? 0 : 1
+        if (aDef !== bDef) return aDef - bDef
+        return (a.name || '').localeCompare(b.name || '', 'zh-CN')
+      })
+      projects.value = items
+
+      const defaultProject = projects.value.find((p) => p.code?.toUpperCase() === 'DEFAULT')
       const queryProject =
         preferId ??
-        (route.query.project_id as string | undefined) ??
+        (opts?.preferDefault ? null : (route.query.project_id as string | undefined)) ??
         null
-      const queryTopology = (route.query.topology_id as string | undefined) ?? null
+      const queryTopology = opts?.preferDefault
+        ? null
+        : ((route.query.topology_id as string | undefined) ?? null)
 
       let targetProject =
         queryProject && projects.value.some((p) => p.id === queryProject)
@@ -219,6 +243,9 @@ export function useNetworkTopology() {
       if (!targetProject && queryTopology) {
         const matched = projects.value.find((p) => p.topology_id === queryTopology)
         if (matched) targetProject = matched.id
+      }
+      if (!targetProject && (opts?.preferDefault || !preferId)) {
+        targetProject = defaultProject?.id ?? projects.value[0]?.id ?? null
       }
       if (!targetProject) targetProject = projects.value[0]?.id ?? null
 
@@ -299,20 +326,42 @@ export function useNetworkTopology() {
   }
 
   async function removeProject() {
-    if (!currentProjectId.value) return
-    await ElMessageBox.confirm(
-      '确定删除当前项目？将同时删除其拓扑与设备定义。',
-      '提示',
-      { type: 'warning' },
-    )
-    await deleteNetworkProject(currentProjectId.value)
-    currentProjectId.value = null
-    currentId.value = null
-    nodes.value = []
-    links.value = []
-    syncRouteQuery({ projectId: null, topologyId: null })
-    await loadProjects()
-    ElMessage.success('项目已删除')
+    if (!currentProjectId.value) {
+      ElMessage.warning('请先选择要删除的项目')
+      return
+    }
+    const project = currentProject.value
+    if (project?.code?.toUpperCase() === 'DEFAULT') {
+      ElMessage.warning('系统默认项目（DEFAULT）不可删除')
+      return
+    }
+    const label = project ? `「${project.name}」` : '当前项目'
+    try {
+      await ElMessageBox.confirm(
+        `确定删除项目${label}？将同时删除其下的拓扑与设备定义，此操作不可恢复。`,
+        '删除项目',
+        { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+    const deletingId = currentProjectId.value
+    try {
+      await deleteNetworkProject(deletingId)
+      // 立即从下拉选项中移除，避免残留
+      projects.value = projects.value.filter((p) => p.id !== deletingId)
+      currentProjectId.value = null
+      currentId.value = null
+      nodes.value = []
+      links.value = []
+      syncRouteQuery({ projectId: null, topologyId: null })
+      // 重新加载并回落到默认项目
+      await loadProjects(null, { preferDefault: true })
+      ElMessage.success('项目已删除，已切换到默认项目')
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      ElMessage.error(err.response?.data?.message || err.message || '删除项目失败')
+    }
   }
 
   async function createTopology(name: string, description?: string | null) {

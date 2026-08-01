@@ -151,7 +151,7 @@ def _persist_items(
             "quantity": int(i.quantity or 0),
             "quantity_unit": i.quantity_unit if i.quantity_unit in ("台", "个", "件", "套") else "台",
             "unit_price": str(i.unit_price) if i.unit_price is not None else None,
-            "price_unit": i.price_unit if i.price_unit in ("yuan", "wan") else "yuan",
+            "price_unit": i.price_unit if i.price_unit in ("yuan", "wan") else "wan",
         }
         for i in items
     ]
@@ -509,7 +509,7 @@ class DeviceContractService:
             quantity=total_qty,
             unit_price=None,
             contract_total=contract_total,
-            price_unit=payload.price_unit or "yuan",
+            price_unit=payload.price_unit or "wan",
             purchase_date=payload.purchase_date,
             description=payload.description,
             created_by=user_id,
@@ -704,7 +704,7 @@ class DeviceContractService:
                 qty = int(item.quantity or 0)
                 bucket["qty"] += qty
                 bucket["contract_ids"].add(entity.id)
-                unit = item.price_unit if item.price_unit in ("yuan", "wan") else "yuan"
+                unit = item.price_unit if item.price_unit in ("yuan", "wan") else "wan"
                 if item.unit_price is not None and qty > 0:
                     unit_yuan = (
                         item.unit_price * Decimal("10000")

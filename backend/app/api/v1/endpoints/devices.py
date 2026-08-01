@@ -5,7 +5,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import Response
 
-from app.core.dependencies import get_device_export_service, get_device_service, require_permissions
+from app.core.dependencies import (
+    get_device_export_service,
+    get_device_service,
+    require_any_permission,
+    require_permissions,
+)
 from app.models.user import User
 from app.schemas.common import ApiResponse, PaginatedData, PaginatedResponse, PaginationParams
 from app.schemas.device import (
@@ -13,8 +18,11 @@ from app.schemas.device import (
     DeviceBatchDeleteResult,
     DeviceCreate,
     DeviceModelCreate,
+    DeviceModelPanelApply,
+    DeviceModelPanelApplyResult,
     DeviceModelResponse,
     DeviceModelUpdate,
+    DevicePanelCandidateList,
     DeviceResponse,
     DeviceTypeCreate,
     DeviceTypeResponse,
@@ -26,7 +34,9 @@ from app.schemas.device import (
     BmcProfileResponse,
     BmcProfileUpdate,
     ParamProfileCreate,
+    ParamProfileImportResult,
     ParamProfileResponse,
+    ParamProfileSyncResult,
     ParamProfileUpdate,
     ProfileCreate,
     ProfileResponse,
@@ -38,8 +48,10 @@ from app.schemas.device import (
 from app.schemas.export import ImportResult
 from app.services.device import DeviceService
 from app.services.export import DeviceExportService
+from app.services.param_profile_export import ParamProfileExportService
 
 router = APIRouter()
+param_export_service = ParamProfileExportService()
 
 
 @router.get("/devices", response_model=PaginatedResponse[DeviceResponse])
@@ -213,7 +225,7 @@ async def list_param_profiles(
     service: Annotated[DeviceService, Depends(get_device_service)],
     _: Annotated[User, Depends(require_permissions("device:view"))],
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=100, ge=1, le=100),
+    page_size: int = Query(default=100, ge=1, le=200),
     keyword: str | None = None,
 ) -> PaginatedResponse[ParamProfileResponse]:
     params = PaginationParams(page=page, page_size=page_size, keyword=keyword)
@@ -222,6 +234,67 @@ async def list_param_profiles(
         data=PaginatedData(items=items, pagination=pagination),
         timestamp=datetime.now(),
     )
+
+
+@router.post(
+    "/device-param-profiles/sync-from-contracts",
+    response_model=ApiResponse[ParamProfileSyncResult],
+)
+async def sync_param_profiles_from_contracts(
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    current_user: Annotated[
+        User, Depends(require_any_permission("device:update", "device:create"))
+    ],
+) -> ApiResponse[ParamProfileSyncResult]:
+    data = await service.sync_param_profiles_from_contracts(user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.get("/device-param-profiles/export")
+async def export_param_profiles(
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    _: Annotated[User, Depends(require_permissions("device:view"))],
+    incomplete_only: bool = Query(default=False, description="仅导出未完善参数"),
+) -> Response:
+    content = await service.export_param_profiles_excel(incomplete_only=incomplete_only)
+    filename = (
+        "device_param_profiles_incomplete.xlsx"
+        if incomplete_only
+        else "device_param_profiles.xlsx"
+    )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/device-param-profiles/import/template")
+async def download_param_profiles_template(
+    _: Annotated[User, Depends(require_permissions("device:view"))],
+) -> Response:
+    content = param_export_service.template_excel()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="device_param_profiles_template.xlsx"'
+        },
+    )
+
+
+@router.post(
+    "/device-param-profiles/import",
+    response_model=ApiResponse[ParamProfileImportResult],
+)
+async def import_param_profiles(
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:update"))],
+    file: UploadFile = File(...),
+) -> ApiResponse[ParamProfileImportResult]:
+    content = await file.read()
+    data = await service.import_param_profiles_excel(content, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
 
 
 @router.post(
@@ -428,6 +501,39 @@ async def update_device_model(
     current_user: Annotated[User, Depends(require_permissions("device:update"))],
 ) -> ApiResponse[DeviceModelResponse]:
     data = await service.update_device_model(model_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.post(
+    "/device-models/{model_id}/apply-panel",
+    response_model=ApiResponse[DeviceModelPanelApplyResult],
+)
+async def apply_device_model_panel(
+    model_id: uuid.UUID,
+    payload: DeviceModelPanelApply,
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    current_user: Annotated[
+        User, Depends(require_any_permission("device:update", "network:update"))
+    ],
+) -> ApiResponse[DeviceModelPanelApplyResult]:
+    data = await service.apply_device_model_panel(model_id, payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.get(
+    "/device-models/{model_id}/panel-candidates",
+    response_model=ApiResponse[DevicePanelCandidateList],
+)
+async def list_panel_candidates(
+    model_id: uuid.UUID,
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    _: Annotated[User, Depends(require_any_permission("device:view", "network:view", "network:update"))],
+    apply_device_name: str = Query(..., min_length=1, max_length=100),
+) -> ApiResponse[DevicePanelCandidateList]:
+    data = await service.list_panel_candidates(
+        apply_device_name=apply_device_name,
+        model_id=model_id,
+    )
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

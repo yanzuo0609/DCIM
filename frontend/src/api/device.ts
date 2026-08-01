@@ -12,6 +12,7 @@ export interface Device {
   manufacturer_name: string | null
   device_type_id: string | null
   device_type_name: string | null
+  device_type_code?: string | null
   param_profile_id: string | null
   system_profile_id: string | null
   bmc_profile_id: string | null
@@ -31,6 +32,12 @@ export interface Device {
   power: number | null
   status: string
   description: string | null
+  /** 来自设备定义/型号的面板布局（按设备名称匹配） */
+  port_layout?: Record<string, unknown> | null
+  network_kind?: string | null
+  panel_apply_device_name?: string | null
+  /** 是否已绑定网络设备定义面板 */
+  network_panel_bound?: boolean
   created_at: string
   updated_at: string
 }
@@ -51,6 +58,9 @@ export interface DeviceModel {
   height_u: number
   power: number | null
   description?: string | null
+  port_layout?: Record<string, unknown> | null
+  apply_device_name?: string | null
+  network_kind?: string | null
 }
 
 export interface DeviceType {
@@ -71,6 +81,7 @@ export interface Profile {
 
 export type CpuArchitecture = 'c86' | 'arm'
 export type DiskMediaType = 'ssd' | 'hdd' | 'nvme'
+export type DiskRole = 'system' | 'data'
 
 export interface ParamCpuSpec {
   cores?: number | null
@@ -89,6 +100,8 @@ export interface ParamDiskSpec {
   count?: number | null
   interface?: string | null
   media_type?: DiskMediaType | null
+  /** system=系统盘 / data=数据盘 */
+  role?: DiskRole | null
 }
 
 export interface ParamRaidSpec {
@@ -102,6 +115,14 @@ export interface ParamCustomField {
 }
 
 export interface ParamProfilePayload {
+  source_device_name?: string | null
+  source_device_model?: string | null
+  source_manufacturer?: string | null
+  device_type_id?: string | null
+  /** 详细参数（可自由编辑的文本） */
+  detail_params?: string | null
+  /** 其他参数：风扇/电源/RAID/操作系统等合并文本 */
+  other_params?: string | null
   cpu?: ParamCpuSpec | null
   memory?: ParamMemorySpec | null
   disks?: ParamDiskSpec[]
@@ -120,6 +141,29 @@ export interface ParamProfile {
   payload: ParamProfilePayload | null
   description: string | null
   summary?: string | null
+  is_complete?: boolean
+  missing_fields?: string[]
+  source_device_name?: string | null
+  source_device_model?: string | null
+  source_manufacturer?: string | null
+  device_type_id?: string | null
+  detail_params?: string | null
+  other_params?: string | null
+}
+
+export interface ParamProfileSyncResult {
+  created: number
+  updated: number
+  skipped: number
+  total_summary: number
+  messages: string[]
+}
+
+export interface ParamProfileImportResult {
+  updated: number
+  created: number
+  skipped: number
+  errors: string[]
 }
 
 export type CredentialRole = 'admin' | 'readonly' | 'operator' | 'custom'
@@ -286,9 +330,67 @@ export async function updateDeviceModel(
     height_u?: number
     power?: number | null
     description?: string | null
+    port_layout?: Record<string, unknown> | null
+    apply_device_name?: string | null
+    network_kind?: string | null
   },
 ) {
   const response = await api.put<ApiResponse<DeviceModel>>(`/device-models/${id}`, payload)
+  return unwrap(response)
+}
+
+export async function applyDeviceModelPanel(
+  modelId: string,
+  payload: {
+    port_layout: Record<string, unknown>
+    apply_device_name: string
+    network_kind?: string | null
+    mode?: 'apply' | 'modify'
+    device_ids?: string[]
+  },
+) {
+  const response = await api.post<
+    ApiResponse<{
+      device_model_id: string
+      apply_device_name: string
+      mode: string
+      matched_device_count: number
+      matched_device_ids: string[]
+      applied_count: number
+      modified_count: number
+      skipped_count: number
+      skipped_device_ids: string[]
+      message?: string | null
+    }>
+  >(`/device-models/${modelId}/apply-panel`, payload)
+  return unwrap(response)
+}
+
+export interface DevicePanelCandidate {
+  id: string
+  name: string | null
+  hostname: string
+  serial_number: string
+  device_model_id: string
+  device_model_name: string | null
+  network_panel_bound: boolean
+  rack_code: string | null
+  room_name: string | null
+  u_position: number | null
+  status: string
+}
+
+export async function listPanelCandidates(modelId: string, applyDeviceName: string) {
+  const response = await api.get<
+    ApiResponse<{
+      apply_device_name: string
+      items: DevicePanelCandidate[]
+      unbound_count: number
+      bound_count: number
+    }>
+  >(`/device-models/${modelId}/panel-candidates`, {
+    params: { apply_device_name: applyDeviceName },
+  })
   return unwrap(response)
 }
 
@@ -320,7 +422,117 @@ export async function deleteDeviceType(id: string) {
 
 export async function listParamProfiles() {
   const response = await api.get('/device-param-profiles', { params: { page_size: 100 } })
-  return response.data.data.items as ParamProfile[]
+  const data = response.data?.data
+  const items = data?.items
+  if (!Array.isArray(items)) {
+    throw new Error('设备参数列表响应格式异常')
+  }
+  return items as ParamProfile[]
+}
+
+function makeParamCode(deviceName: string): string {
+  let hash = 0
+  const text = deviceName || 'device'
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash << 5) - hash + text.charCodeAt(i)
+    hash |= 0
+  }
+  const digest = Math.abs(hash).toString(16).padStart(8, '0').slice(0, 8)
+  const ascii = text
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '')
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const slug = ascii || 'dev'
+  return `P-${slug.slice(0, 24)}-${digest}`.slice(0, 50)
+}
+
+/**
+ * 按采购汇总「设备名称」同步空待填参数：
+ * - 不存在同名 → 新建空表（待完善）
+ * - 已存在同名 → 跳过
+ * 直接走前端编排（采购汇总 + 创建），避免专用接口异常导致整页失败。
+ */
+export async function syncParamProfilesFromContracts(): Promise<ParamProfileSyncResult> {
+  const { getContractSummary } = await import('@/api/contract')
+  const [summary, profiles] = await Promise.all([getContractSummary(), listParamProfiles()])
+  const existing = new Set(
+    profiles
+      .map((p) => (p.source_device_name || p.name || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const uniqueNames = new Map<string, string>()
+  for (const row of summary || []) {
+    const name = (row.device_name || '').trim().slice(0, 100)
+    if (!name) continue
+    const key = name.toLowerCase()
+    if (!uniqueNames.has(key)) uniqueNames.set(key, name)
+  }
+
+  let created = 0
+  let skipped = 0
+  const messages: string[] = []
+  const usedCodes = new Set(profiles.map((p) => p.code))
+
+  for (const [key, deviceName] of uniqueNames) {
+    if (existing.has(key)) {
+      skipped += 1
+      continue
+    }
+    let code = makeParamCode(deviceName)
+    let n = 1
+    while (usedCodes.has(code)) {
+      code = `${makeParamCode(deviceName).slice(0, 40)}-${n}`.slice(0, 50)
+      n += 1
+    }
+    await createParamProfile({
+      code,
+      name: deviceName,
+      description: '待完善：由采购汇总设备名称同步生成',
+      payload: {
+        source_device_name: deviceName,
+        disks: [{ role: 'system' }, { role: 'data' }, { role: 'data' }],
+      },
+    })
+    usedCodes.add(code)
+    existing.add(key)
+    created += 1
+    messages.push(`已新建待完善项：${deviceName}`)
+  }
+
+  return {
+    created,
+    updated: 0,
+    skipped,
+    total_summary: uniqueNames.size,
+    messages: messages.slice(0, 50),
+  }
+}
+
+export async function downloadParamProfilesTemplate() {
+  await downloadBlob(
+    '/device-param-profiles/import/template',
+    'device_param_profiles_template.xlsx',
+  )
+}
+
+export async function exportParamProfiles(incompleteOnly = false) {
+  const qs = incompleteOnly ? '?incomplete_only=true' : ''
+  const filename = incompleteOnly
+    ? 'device_param_profiles_incomplete.xlsx'
+    : 'device_param_profiles.xlsx'
+  await downloadBlob(`/device-param-profiles/export${qs}`, filename)
+}
+
+export async function importParamProfiles(file: File) {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await api.post<ApiResponse<ParamProfileImportResult>>(
+    '/device-param-profiles/import',
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  )
+  return unwrap(response)
 }
 
 export async function createParamProfile(payload: {

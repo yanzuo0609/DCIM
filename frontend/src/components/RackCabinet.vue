@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import type { RackLayoutDevice, RackLayoutSlot } from '@/api/rack'
 
+export type RackVisualStyle = 'classic' | 'schematic' | 'realistic' | 'grid'
+
 const props = withDefaults(
   defineProps<{
     code: string
@@ -12,6 +14,8 @@ const props = withDefaults(
     selectable?: boolean
     selectedU?: number | null
     highlightDeviceId?: string | null
+    /** classic=原深色立面(默认) | schematic=线框 | realistic=正面面板 | grid=表格占位 */
+    visualStyle?: RackVisualStyle
   }>(),
   {
     slots: () => [],
@@ -20,6 +24,7 @@ const props = withDefaults(
     selectable: false,
     selectedU: null,
     highlightDeviceId: null,
+    visualStyle: 'classic',
   },
 )
 
@@ -31,6 +36,12 @@ function onSlotClick(slot: RackLayoutSlot) {
   if (!props.selectable || slot.occupied) return
   emit('select-u', slot.u_position)
 }
+
+const styleKey = computed<RackVisualStyle>(() => {
+  const v = props.visualStyle
+  if (v === 'realistic' || v === 'grid' || v === 'schematic' || v === 'classic') return v
+  return 'classic'
+})
 
 const displaySlots = computed(() => {
   if (props.slots.length) return props.slots
@@ -47,7 +58,11 @@ const displaySlots = computed(() => {
   return empty
 })
 
-const unitPx = computed(() => (props.compact ? 22 : 28))
+const unitPx = computed(() => {
+  if (styleKey.value === 'grid') return props.compact ? 16 : 20
+  if (styleKey.value === 'realistic') return props.compact ? 18 : 24
+  return props.compact ? 22 : 28
+})
 
 function heightClass(device: RackLayoutDevice | null | undefined) {
   if (!device) return ''
@@ -75,99 +90,243 @@ function rowStyle(_slot: RackLayoutSlot) {
 function isContinuation(slot: RackLayoutSlot) {
   return slot.occupied && !slot.is_span_start && !!slot.device
 }
+
+function panelKind(device: RackLayoutDevice | null | undefined) {
+  if (!device) return 'empty'
+  const text = `${device.hostname || ''} ${device.model_name || ''}`.toLowerCase()
+  if (/pdu|电源|power/.test(text)) return 'pdu'
+  if (/switch|交换|sw/.test(text)) return 'switch'
+  if (/monitor|显示|kvm|lcd/.test(text)) return 'monitor'
+  if (/amp|功放|audio/.test(text)) return 'amp'
+  if (/storage|存储|nas|disk/.test(text)) return 'storage'
+  return 'server'
+}
+
+function showSectionDivider(u: number) {
+  return u === 10 || u === 18 || u === 29
+}
+
+const rowState = (slot: RackLayoutSlot) => ({
+  empty: !slot.occupied,
+  occupied: !!slot.device,
+  continuation: isContinuation(slot),
+  'span-start': slot.is_span_start,
+  selectable: props.selectable && !slot.occupied,
+  selected: props.selectable && props.selectedU === slot.u_position,
+  highlighted: !!props.highlightDeviceId && slot.device?.device_id === props.highlightDeviceId,
+})
 </script>
 
 <template>
-  <div class="cabinet" :class="{ compact }">
-    <div class="cabinet-ears">
-      <span class="ear left" />
-      <div class="cabinet-body">
-        <header class="cabinet-header">
-          <div class="power-chip" title="机柜设备总功率">
-            <span class="power-label">功率</span>
-            <span class="power-value">{{ formatPower(totalPower) }}</span>
+  <div class="cabinet" :class="[`style-${styleKey}`, { compact }]">
+    <!-- ========== 表格占位 (grid) ========== -->
+    <template v-if="styleKey === 'grid'">
+      <div class="grid-title">{{ code || '机柜' }}</div>
+      <div class="grid-body">
+        <div
+          v-for="slot in displaySlots"
+          :key="slot.u_position"
+          class="grid-row"
+          :class="[{ divider: showSectionDivider(slot.u_position) }, rowState(slot)]"
+          :style="rowStyle(slot)"
+          @click="onSlotClick(slot)"
+        >
+          <span class="grid-u">{{ slot.u_position }}U</span>
+          <div class="grid-cell">
+            <template v-if="slot.is_span_start && slot.device">
+              {{ slot.device.hostname || '设备' }}
+            </template>
           </div>
-          <div class="rack-code" :title="code || '机柜编号'">
-            {{ code || '未命名' }}
-          </div>
-          <div class="u-chip">{{ totalU }}U</div>
-        </header>
-
-        <div class="col-headers">
-          <span class="col-u">U</span>
-          <span class="col-device">设备 / 空闲</span>
-          <span class="col-ip">IP</span>
-          <span class="col-power">功率</span>
+          <span class="grid-u">{{ slot.u_position }}U</span>
         </div>
+      </div>
+    </template>
 
-        <div class="cabinet-rails">
-          <div
-            v-for="slot in displaySlots"
-            :key="slot.u_position"
-            class="u-row"
-            :class="[
-              {
-                empty: !slot.occupied,
-                occupied: !!slot.device,
-                continuation: isContinuation(slot),
-                'span-start': slot.is_span_start,
-                selectable: selectable && !slot.occupied,
-                selected: selectable && selectedU === slot.u_position,
-                highlighted:
-                  !!highlightDeviceId && slot.device?.device_id === highlightDeviceId,
-              },
-              heightClass(slot.device),
-            ]"
-            :style="rowStyle(slot)"
-            @click="onSlotClick(slot)"
-          >
-            <div class="cell-u">U{{ slot.u_position }}</div>
-
-            <div class="cell-device">
+    <!-- ========== 正面面板 (realistic) ========== -->
+    <template v-else-if="styleKey === 'realistic'">
+      <div class="realistic-frame">
+        <div class="realistic-top">{{ totalU }}U</div>
+        <div class="realistic-main">
+          <div class="u-scale">
+            <span
+              v-for="u in displaySlots.filter((_, i) => i % 2 === 0)"
+              :key="u.u_position"
+              class="u-tick"
+            >{{ u.u_position }}U</span>
+          </div>
+          <div class="realistic-rails">
+            <div
+              v-for="slot in displaySlots"
+              :key="slot.u_position"
+              class="face-row"
+              :class="[rowState(slot), `panel-${panelKind(slot.device)}`, heightClass(slot.device)]"
+              :style="rowStyle(slot)"
+              @click="onSlotClick(slot)"
+            >
               <template v-if="slot.is_span_start && slot.device">
-                <span class="height-badge">{{ heightBadge(slot.device) }}</span>
-                <div class="device-meta">
-                  <span class="hostname">{{ slot.device.hostname }}</span>
-                  <span v-if="slot.device.model_name" class="model">{{ slot.device.model_name }}</span>
+                <div class="faceplate" :data-kind="panelKind(slot.device)">
+                  <span class="face-badge">{{ heightBadge(slot.device) }}</span>
+                  <span class="face-name">{{ slot.device.hostname }}</span>
+                  <span v-if="slot.device.model_name" class="face-model">{{ slot.device.model_name }}</span>
                 </div>
               </template>
               <template v-else-if="isContinuation(slot)">
-                <span class="cont-mark">│</span>
+                <div class="faceplate cont" :data-kind="panelKind(slot.device)" />
               </template>
               <template v-else>
-                <span class="idle">空闲</span>
+                <div class="bay-empty" />
               </template>
-            </div>
-
-            <div class="cell-ip">
-              <template v-if="slot.is_span_start && slot.device">
-                <div>{{ slot.device.ip_summary || '—' }}</div>
-                <div v-if="slot.device.bmc_ip" class="ip-sub">BMC {{ slot.device.bmc_ip }}</div>
-                <div v-if="slot.device.vip" class="ip-sub vip">VIP {{ slot.device.vip }}</div>
-              </template>
-              <template v-else-if="isContinuation(slot)" />
-              <template v-else>—</template>
-            </div>
-
-            <div class="cell-power">
-              <template v-if="slot.is_span_start && slot.device">
-                {{ formatPower(slot.device.power) }}
-              </template>
-              <template v-else-if="isContinuation(slot)" />
-              <template v-else>—</template>
             </div>
           </div>
         </div>
-
-        <footer class="cabinet-footer">
-          <span class="legend h-2u">2U</span>
-          <span class="legend h-4u">4U</span>
-          <span class="legend h-other">其它 U 高</span>
-          <span class="legend idle-legend">空闲</span>
-        </footer>
+        <div class="realistic-foot">正面 · {{ code || '未命名' }}</div>
       </div>
-      <span class="ear right" />
-    </div>
+    </template>
+
+    <!-- ========== 线框立面 (schematic) ========== -->
+    <template v-else-if="styleKey === 'schematic'">
+      <div class="sch-ears">
+        <span class="sch-ear" />
+        <div class="sch-body">
+          <header class="sch-header">
+            <div class="sch-power">
+              <span class="sch-power-label">功率</span>
+              <span class="sch-power-value">{{ formatPower(totalPower) }}</span>
+            </div>
+            <div class="sch-code">{{ code || '未命名' }}</div>
+            <div class="sch-u">{{ totalU }}U</div>
+          </header>
+          <div class="sch-col-headers">
+            <span>U</span><span>设备 / 空闲</span><span>IP</span><span>功率</span><span>U</span>
+          </div>
+          <div class="sch-rails">
+            <div
+              v-for="slot in displaySlots"
+              :key="slot.u_position"
+              class="sch-row"
+              :class="[
+                rowState(slot),
+                heightClass(slot.device),
+                { divider: showSectionDivider(slot.u_position) },
+              ]"
+              :style="rowStyle(slot)"
+              @click="onSlotClick(slot)"
+            >
+              <div class="sch-cell-u">{{ slot.u_position }}</div>
+              <div class="sch-cell-device">
+                <template v-if="slot.is_span_start && slot.device">
+                  <span class="sch-badge">{{ heightBadge(slot.device) }}</span>
+                  <div class="sch-meta">
+                    <span class="sch-host">{{ slot.device.hostname }}</span>
+                    <span v-if="slot.device.model_name" class="sch-model">{{ slot.device.model_name }}</span>
+                  </div>
+                </template>
+                <template v-else-if="isContinuation(slot)"><span class="sch-cont">│</span></template>
+                <template v-else><span class="sch-idle">空闲</span></template>
+              </div>
+              <div class="sch-cell-ip">
+                <template v-if="slot.is_span_start && slot.device">
+                  <div>{{ slot.device.ip_summary || '—' }}</div>
+                </template>
+                <template v-else-if="!isContinuation(slot)">—</template>
+              </div>
+              <div class="sch-cell-power">
+                <template v-if="slot.is_span_start && slot.device">
+                  {{ formatPower(slot.device.power) }}
+                </template>
+                <template v-else-if="!isContinuation(slot)">—</template>
+              </div>
+              <div class="sch-cell-u">{{ slot.u_position }}</div>
+            </div>
+          </div>
+          <footer class="sch-footer">
+            <span class="sch-legend h-2u">2U</span>
+            <span class="sch-legend h-4u">4U</span>
+            <span class="sch-legend h-other">其它 U 高</span>
+            <span class="sch-legend idle">空闲</span>
+          </footer>
+        </div>
+        <span class="sch-ear" />
+      </div>
+    </template>
+
+    <!-- ========== 经典深色立面 (classic，默认) ========== -->
+    <template v-else>
+      <div class="cabinet-ears">
+        <span class="ear left" />
+        <div class="cabinet-body">
+          <header class="cabinet-header">
+            <div class="power-chip" title="机柜设备总功率">
+              <span class="power-label">功率</span>
+              <span class="power-value">{{ formatPower(totalPower) }}</span>
+            </div>
+            <div class="rack-code" :title="code || '机柜编号'">
+              {{ code || '未命名' }}
+            </div>
+            <div class="u-chip">{{ totalU }}U</div>
+          </header>
+
+          <div class="col-headers">
+            <span class="col-u">U</span>
+            <span class="col-device">设备 / 空闲</span>
+            <span class="col-ip">IP</span>
+            <span class="col-power">功率</span>
+          </div>
+
+          <div class="cabinet-rails">
+            <div
+              v-for="slot in displaySlots"
+              :key="slot.u_position"
+              class="u-row"
+              :class="[rowState(slot), heightClass(slot.device)]"
+              :style="rowStyle(slot)"
+              @click="onSlotClick(slot)"
+            >
+              <div class="cell-u">U{{ slot.u_position }}</div>
+              <div class="cell-device">
+                <template v-if="slot.is_span_start && slot.device">
+                  <span class="height-badge">{{ heightBadge(slot.device) }}</span>
+                  <div class="device-meta">
+                    <span class="hostname">{{ slot.device.hostname }}</span>
+                    <span v-if="slot.device.model_name" class="model">{{ slot.device.model_name }}</span>
+                  </div>
+                </template>
+                <template v-else-if="isContinuation(slot)">
+                  <span class="cont-mark">│</span>
+                </template>
+                <template v-else>
+                  <span class="idle">空闲</span>
+                </template>
+              </div>
+              <div class="cell-ip">
+                <template v-if="slot.is_span_start && slot.device">
+                  <div>{{ slot.device.ip_summary || '—' }}</div>
+                  <div v-if="slot.device.bmc_ip" class="ip-sub">BMC {{ slot.device.bmc_ip }}</div>
+                  <div v-if="slot.device.vip" class="ip-sub vip">VIP {{ slot.device.vip }}</div>
+                </template>
+                <template v-else-if="isContinuation(slot)" />
+                <template v-else>—</template>
+              </div>
+              <div class="cell-power">
+                <template v-if="slot.is_span_start && slot.device">
+                  {{ formatPower(slot.device.power) }}
+                </template>
+                <template v-else-if="isContinuation(slot)" />
+                <template v-else>—</template>
+              </div>
+            </div>
+          </div>
+
+          <footer class="cabinet-footer">
+            <span class="legend h-2u">2U</span>
+            <span class="legend h-4u">4U</span>
+            <span class="legend h-other">其它 U 高</span>
+            <span class="legend idle-legend">空闲</span>
+          </footer>
+        </div>
+        <span class="ear right" />
+      </div>
+    </template>
   </div>
 </template>
 
@@ -196,13 +355,14 @@ function isContinuation(slot: RackLayoutSlot) {
   font-size: 12px;
 }
 
-.cabinet-ears {
+/* ===== classic (原深色立面) ===== */
+.style-classic .cabinet-ears {
   display: flex;
   align-items: stretch;
   gap: 0;
 }
 
-.ear {
+.style-classic .ear {
   width: 14px;
   background: linear-gradient(180deg, #4a5568 0%, #2d3544 40%, #1f2530 100%);
   border-radius: 3px;
@@ -210,8 +370,8 @@ function isContinuation(slot: RackLayoutSlot) {
   position: relative;
 }
 
-.ear::before,
-.ear::after {
+.style-classic .ear::before,
+.style-classic .ear::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -223,15 +383,10 @@ function isContinuation(slot: RackLayoutSlot) {
   box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
 }
 
-.ear::before {
-  top: 18%;
-}
+.style-classic .ear::before { top: 18%; }
+.style-classic .ear::after { bottom: 18%; }
 
-.ear::after {
-  bottom: 18%;
-}
-
-.cabinet-body {
+.style-classic .cabinet-body {
   flex: 1;
   background: linear-gradient(180deg, #242b38 0%, var(--panel) 12%, #12161e 100%);
   border: 1px solid var(--frame);
@@ -243,7 +398,7 @@ function isContinuation(slot: RackLayoutSlot) {
   overflow: hidden;
 }
 
-.cabinet-header {
+.style-classic .cabinet-header {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
@@ -253,7 +408,7 @@ function isContinuation(slot: RackLayoutSlot) {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.rack-code {
+.style-classic .rack-code {
   justify-self: center;
   font-family: 'IBM Plex Mono', 'Consolas', monospace;
   font-weight: 700;
@@ -271,38 +426,35 @@ function isContinuation(slot: RackLayoutSlot) {
   white-space: nowrap;
 }
 
-.power-chip,
-.u-chip {
+.style-classic .power-chip,
+.style-classic .u-chip {
   display: flex;
   flex-direction: column;
   line-height: 1.15;
   font-size: 11px;
 }
 
-.power-chip {
-  align-items: flex-start;
-}
-
-.u-chip {
+.style-classic .power-chip { align-items: flex-start; }
+.style-classic .u-chip {
   align-items: flex-end;
   color: var(--muted);
   font-weight: 600;
 }
 
-.power-label {
+.style-classic .power-label {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 10px;
 }
 
-.power-value {
+.style-classic .power-value {
   color: #7ddea8;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-.col-headers {
+.style-classic .col-headers {
   display: grid;
   grid-template-columns: 52px 1.4fr 0.9fr 0.7fr;
   gap: 4px;
@@ -315,7 +467,7 @@ function isContinuation(slot: RackLayoutSlot) {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.cabinet-rails {
+.style-classic .cabinet-rails {
   padding: 6px 8px 8px;
   max-height: min(62vh, 720px);
   overflow-y: auto;
@@ -323,7 +475,7 @@ function isContinuation(slot: RackLayoutSlot) {
   scrollbar-color: #4a5568 transparent;
 }
 
-.u-row {
+.style-classic .u-row {
   display: grid;
   grid-template-columns: 52px 1.4fr 0.9fr 0.7fr;
   gap: 4px;
@@ -336,77 +488,49 @@ function isContinuation(slot: RackLayoutSlot) {
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
-.u-row.empty {
+.style-classic .u-row.empty {
   background: var(--idle-bg);
   border-color: rgba(255, 255, 255, 0.04);
 }
 
-.u-row.selectable {
-  cursor: pointer;
-}
-
-.u-row.selectable:hover {
+.style-classic .u-row.selectable { cursor: pointer; }
+.style-classic .u-row.selectable:hover {
   box-shadow: inset 0 0 0 1px rgba(64, 158, 255, 0.55);
 }
+.style-classic .u-row.selected { box-shadow: inset 0 0 0 2px #409eff; }
+.style-classic .u-row.highlighted { box-shadow: inset 0 0 0 2px #e6a23c; }
+.style-classic .u-row.occupied { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08); }
 
-.u-row.selected {
-  box-shadow: inset 0 0 0 2px #409eff;
-}
-
-.u-row.highlighted {
-  box-shadow: inset 0 0 0 2px #e6a23c;
-}
-
-.u-row.occupied {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-
-.u-row.h-2u {
+.style-classic .u-row.h-2u {
   background: linear-gradient(90deg, rgba(31, 111, 106, 0.95), rgba(31, 111, 106, 0.7));
   border-color: var(--u2-border);
 }
-
-.u-row.h-4u {
+.style-classic .u-row.h-4u {
   background: linear-gradient(90deg, rgba(138, 90, 30, 0.95), rgba(138, 90, 30, 0.7));
   border-color: var(--u4-border);
 }
-
-.u-row.h-other {
+.style-classic .u-row.h-other {
   background: linear-gradient(90deg, rgba(47, 77, 122, 0.95), rgba(47, 77, 122, 0.7));
   border-color: var(--uother-border);
 }
 
-.u-row.continuation {
+.style-classic .u-row.continuation {
   margin-top: -2px;
   border-top-color: transparent;
   border-radius: 0;
 }
-
-.u-row.span-start {
-  border-radius: 3px 3px 0 0;
-}
-
-.u-row.span-start:not(:has(+ .continuation)) {
-  border-radius: 3px;
-}
-
-.u-row.continuation:last-child,
-.u-row.occupied + .u-row.empty {
-  border-radius: 0 0 3px 3px;
-}
-
-.cont-mark {
+.style-classic .u-row.span-start { border-radius: 3px 3px 0 0; }
+.style-classic .cont-mark {
   color: rgba(255, 255, 255, 0.35);
   font-size: 12px;
   padding-left: 18px;
 }
-
-.u-row.occupied:hover {
+.style-classic .u-row.occupied:hover {
   transform: translateX(1px);
   filter: brightness(1.06);
 }
 
-.cell-u {
+.style-classic .cell-u {
   font-family: 'IBM Plex Mono', 'Consolas', monospace;
   font-size: 11px;
   font-weight: 600;
@@ -416,20 +540,14 @@ function isContinuation(slot: RackLayoutSlot) {
   justify-content: center;
 }
 
-.u-range-sub {
-  font-size: 9px;
-  color: rgba(255, 255, 255, 0.55);
-  font-weight: 500;
-}
-
-.cell-device {
+.style-classic .cell-device {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.height-badge {
+.style-classic .height-badge {
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 700;
@@ -439,14 +557,14 @@ function isContinuation(slot: RackLayoutSlot) {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
-.device-meta {
+.style-classic .device-meta {
   min-width: 0;
   display: flex;
   flex-direction: column;
   line-height: 1.2;
 }
 
-.hostname {
+.style-classic .hostname {
   font-weight: 600;
   font-size: 12px;
   overflow: hidden;
@@ -454,7 +572,7 @@ function isContinuation(slot: RackLayoutSlot) {
   white-space: nowrap;
 }
 
-.model {
+.style-classic .model {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.65);
   overflow: hidden;
@@ -462,13 +580,13 @@ function isContinuation(slot: RackLayoutSlot) {
   white-space: nowrap;
 }
 
-.idle {
+.style-classic .idle {
   color: var(--muted);
   font-size: 12px;
 }
 
-.cell-ip,
-.cell-power {
+.style-classic .cell-ip,
+.style-classic .cell-power {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: #d5dce8;
@@ -476,28 +594,20 @@ function isContinuation(slot: RackLayoutSlot) {
   text-overflow: ellipsis;
 }
 
-.cell-ip {
-  white-space: normal;
-  line-height: 1.25;
-}
-
-.cell-ip .ip-sub {
+.style-classic .cell-ip { white-space: normal; line-height: 1.25; }
+.style-classic .cell-ip .ip-sub {
   font-size: 10px;
   color: #9aa6b8;
   margin-top: 1px;
 }
-
-.cell-ip .ip-sub.vip {
-  color: #c9a86c;
-}
-
-.cell-power {
+.style-classic .cell-ip .ip-sub.vip { color: #c9a86c; }
+.style-classic .cell-power {
   text-align: right;
   font-weight: 600;
   white-space: nowrap;
 }
 
-.cabinet-footer {
+.style-classic .cabinet-footer {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -506,31 +616,330 @@ function isContinuation(slot: RackLayoutSlot) {
   background: rgba(0, 0, 0, 0.2);
 }
 
-.legend {
+.style-classic .legend {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid transparent;
 }
-
-.legend.h-2u {
-  background: var(--u2);
-  border-color: var(--u2-border);
-}
-
-.legend.h-4u {
-  background: var(--u4);
-  border-color: var(--u4-border);
-}
-
-.legend.h-other {
-  background: var(--uother);
-  border-color: var(--uother-border);
-}
-
-.legend.idle-legend {
+.style-classic .legend.h-2u { background: var(--u2); border-color: var(--u2-border); }
+.style-classic .legend.h-4u { background: var(--u4); border-color: var(--u4-border); }
+.style-classic .legend.h-other { background: var(--uother); border-color: var(--uother-border); }
+.style-classic .legend.idle-legend {
   background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
   border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* ===== schematic ===== */
+.style-schematic { color: #1f2937; }
+.style-schematic .sch-ears {
+  display: flex;
+  border: 3px solid #3a4252;
+  border-radius: 4px;
+  background: #2b3240;
+  overflow: hidden;
+}
+.style-schematic .sch-ear {
+  width: 14px;
+  background: linear-gradient(90deg, #252b36, #3a4252);
+  flex-shrink: 0;
+}
+.style-schematic .sch-body {
+  flex: 1;
+  min-width: 0;
+  background: #f7f8fa;
+}
+.style-schematic .sch-header {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 8px 10px;
+  background: #3a4252;
+  color: #e8edf5;
+}
+.style-schematic .sch-power {
+  display: flex;
+  gap: 4px;
+  font-size: 11px;
+  color: #cbd5e1;
+}
+.style-schematic .sch-power-value,
+.style-schematic .sch-u { font-weight: 600; color: #fff; text-align: right; }
+.style-schematic .sch-code {
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+}
+.style-schematic .sch-col-headers {
+  display: grid;
+  grid-template-columns: 36px 1fr 88px 56px 36px;
+  padding: 4px 0;
+  font-size: 10px;
+  color: #64748b;
+  background: #eef1f5;
+  text-align: center;
+  border-bottom: 1px solid #d5dbe3;
+}
+.style-schematic .sch-rails { background: #fff; }
+.style-schematic .sch-row {
+  display: grid;
+  grid-template-columns: 36px 1fr 88px 56px 36px;
+  align-items: center;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 11px;
+  box-sizing: border-box;
+}
+.style-schematic .sch-row.divider { border-bottom: 2px solid #111827; }
+.style-schematic .sch-row.occupied.h-2u { background: #d1fae5; }
+.style-schematic .sch-row.occupied.h-4u { background: #fef3c7; }
+.style-schematic .sch-row.occupied.h-other { background: #dbeafe; }
+.style-schematic .sch-row.selectable { cursor: pointer; }
+.style-schematic .sch-row.selectable:hover { background: #eff6ff; }
+.style-schematic .sch-row.selected { outline: 2px solid #3b82f6; outline-offset: -2px; }
+.style-schematic .sch-cell-u {
+  text-align: center;
+  font-size: 10px;
+  color: #fff;
+  background: #4b5563;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.style-schematic .sch-cell-device {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  min-width: 0;
+}
+.style-schematic .sch-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #111827;
+  color: #fff;
+}
+.style-schematic .sch-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+.style-schematic .sch-host {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.style-schematic .sch-model { font-size: 10px; color: #64748b; }
+.style-schematic .sch-idle { color: #94a3b8; }
+.style-schematic .sch-cont { color: #94a3b8; padding-left: 8px; }
+.style-schematic .sch-cell-ip,
+.style-schematic .sch-cell-power {
+  font-size: 10px;
+  color: #475569;
+  padding: 0 4px;
+}
+.style-schematic .sch-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #eef1f5;
+  border-top: 1px solid #d5dbe3;
+}
+.style-schematic .sch-legend {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+.style-schematic .sch-legend.h-2u { background: #d1fae5; border-color: #6ee7b7; }
+.style-schematic .sch-legend.h-4u { background: #fef3c7; border-color: #fcd34d; }
+.style-schematic .sch-legend.h-other { background: #dbeafe; border-color: #93c5fd; }
+.style-schematic .sch-legend.idle { background: #fff; border-color: #e5e7eb; color: #64748b; }
+
+/* ===== grid ===== */
+.style-grid {
+  max-width: 280px;
+  color: #111;
+  background: #fff;
+  --grid-line: 1px solid #111;
+}
+.style-grid.compact { max-width: 240px; }
+.grid-title {
+  text-align: center;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 6px 0 8px;
+  color: #111827;
+}
+.grid-body {
+  border: var(--grid-line);
+  box-sizing: border-box;
+}
+.grid-row {
+  display: grid;
+  grid-template-columns: 36px 1fr 36px;
+  border-bottom: var(--grid-line);
+  box-sizing: border-box;
+}
+.grid-row:last-child { border-bottom: none; }
+.grid-u {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  background: #f3f4f6;
+  border-right: var(--grid-line);
+  box-sizing: border-box;
+  color: #374151;
+}
+.grid-row .grid-u:last-child {
+  border-right: none;
+  border-left: var(--grid-line);
+}
+.grid-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  background: #fff;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 4px;
+  box-sizing: border-box;
+}
+.grid-row.occupied .grid-cell,
+.grid-row.continuation .grid-cell { background: #facc15; }
+.grid-row.selectable { cursor: pointer; }
+.grid-row.selectable:hover .grid-cell { background: #fef9c3; }
+.grid-row.selected .grid-cell {
+  box-shadow: inset 0 0 0 1px #2563eb;
+}
+
+/* ===== realistic ===== */
+.style-realistic { max-width: 300px; }
+.style-realistic.compact { max-width: 260px; }
+.realistic-frame {
+  border: 4px solid #2f3542;
+  border-radius: 3px;
+  background: #1c212b;
+  overflow: hidden;
+}
+.realistic-top {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #cbd5e1;
+  padding: 6px;
+  background: #2f3542;
+}
+.realistic-main {
+  display: flex;
+  background: #111827;
+}
+.u-scale {
+  width: 34px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 4px 0;
+  background: #1f2937;
+  border-right: 1px solid #374151;
+}
+.u-tick {
+  font-size: 8px;
+  color: #9ca3af;
+  text-align: center;
+  line-height: 1;
+}
+.realistic-rails {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.face-row {
+  border-radius: 2px;
+  overflow: hidden;
+}
+.face-row.selectable { cursor: pointer; }
+.face-row.selected { outline: 2px solid #60a5fa; }
+.bay-empty {
+  height: 100%;
+  background: linear-gradient(180deg, #2a303c, #1f2430);
+  border: 1px solid #3b4454;
+  border-radius: 2px;
+}
+.faceplate {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 2px;
+  border: 1px solid #4b5563;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 40%),
+    #2d3442;
+  color: #e5e7eb;
+  font-size: 10px;
+  min-width: 0;
+}
+.faceplate.cont { opacity: 0.7; }
+.faceplate[data-kind='switch'] {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 35%),
+    repeating-linear-gradient(90deg, #1e293b 0 3px, #334155 3px 5px);
+}
+.faceplate[data-kind='pdu'] {
+  background: linear-gradient(90deg, #374151, #1f2937 30%, #374151);
+}
+.faceplate[data-kind='monitor'] {
+  background: linear-gradient(180deg, #0f172a, #1e293b);
+}
+.faceplate[data-kind='amp'] {
+  background: linear-gradient(180deg, #111827, #0b1220);
+  border-color: #2563eb;
+}
+.faceplate[data-kind='storage'] {
+  background: linear-gradient(180deg, #1f2937, #111827);
+}
+.face-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: #0ea5e9;
+  color: #fff;
+}
+.face-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.face-model {
+  margin-left: auto;
+  color: #94a3b8;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.realistic-foot {
+  text-align: center;
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 6px;
+  background: #2f3542;
+  border-top: 1px solid #3b4454;
 }
 </style>
