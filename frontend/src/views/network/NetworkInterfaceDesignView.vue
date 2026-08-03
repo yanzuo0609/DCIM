@@ -635,12 +635,17 @@ watch(currentId, () => {
               <span v-else>{{ row.targetLabel }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="88" fixed="right" align="center">
             <template #default="{ row }">
-              <template v-if="canEdit">
-                <el-button type="primary" link @click="openEditDialog(row)">编辑</el-button>
-                <el-button type="danger" link @click="removeLink(row)">删除</el-button>
-              </template>
+              <el-dropdown v-if="canEdit" trigger="click">
+                <el-button type="primary" link>操作</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item @click="openEditDialog(row)">编辑</el-dropdown-item>
+                    <el-dropdown-item divided @click="removeLink(row)">删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
           </el-table-column>
         </el-table>

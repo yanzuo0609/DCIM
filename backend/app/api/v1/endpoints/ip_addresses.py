@@ -66,8 +66,9 @@ async def get_ip_segment(
     segment_id: uuid.UUID,
     service: Annotated[IpAddressService, Depends(get_ip_address_service)],
     _: Annotated[User, Depends(require_permissions("device:view"))],
+    include_addresses: bool = Query(default=True),
 ) -> ApiResponse[IpSegmentDetail]:
-    data = await service.get_segment(segment_id)
+    data = await service.get_segment(segment_id, include_addresses=include_addresses)
     return ApiResponse(data=data, timestamp=datetime.now())
 
 
@@ -102,6 +103,7 @@ async def list_ip_addresses(
     room_id: uuid.UUID | None = None,
     rack_id: uuid.UUID | None = None,
     device_id: uuid.UUID | None = None,
+    segment_id: uuid.UUID | None = None,
     bind_type: str | None = None,
     status: str | None = None,
 ) -> PaginatedResponse[IpAddressResponse]:
@@ -111,6 +113,7 @@ async def list_ip_addresses(
         room_id=room_id,
         rack_id=rack_id,
         device_id=device_id,
+        segment_id=segment_id,
         bind_type=bind_type,
         status=status,
     )

@@ -33,6 +33,25 @@ class IpAddressRepository(BaseRepository[IpAddress]):
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    async def map_by_system_ips(
+        self, system_ips: list[str], *, include_deleted: bool = False
+    ) -> dict[str, IpAddress]:
+        if not system_ips:
+            return {}
+        stmt = select(IpAddress).where(IpAddress.system_ip.in_(system_ips))
+        if not include_deleted:
+            stmt = stmt.where(IpAddress.deleted_at.is_(None))
+        rows = list((await self.session.execute(stmt)).scalars().all())
+        # 同 IP 多行时优先保留未删除记录
+        result: dict[str, IpAddress] = {}
+        for row in rows:
+            existing = result.get(row.system_ip)
+            if existing is None:
+                result[row.system_ip] = row
+            elif existing.deleted_at is not None and row.deleted_at is None:
+                result[row.system_ip] = row
+        return result
+
     async def get_by_id_full(self, entity_id: uuid.UUID) -> IpAddress | None:
         stmt = (
             select(IpAddress)

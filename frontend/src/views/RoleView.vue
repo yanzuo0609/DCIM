@@ -134,10 +134,23 @@ onMounted(loadData)
             <span v-if="row.permissions.length > 4">+{{ row.permissions.length - 4 }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="88" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button v-if="canUpdate" type="primary" link @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="canDelete && row.code !== 'admin'" type="danger" link @click="handleDelete(row)">删除</el-button>
+            <el-dropdown trigger="click">
+              <el-button type="primary" link>操作</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
+                  <el-dropdown-item
+                    v-if="canDelete && row.code !== 'admin'"
+                    divided
+                    @click="handleDelete(row)"
+                  >
+                    删除
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>

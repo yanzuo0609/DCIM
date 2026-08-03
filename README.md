@@ -14,20 +14,23 @@ RackDCIM Pro 是一款企业级、私有化部署的数据中心基础设施管�
 
 ## Tech Stack
 
-| Layer    | Technology                          |
-| -------- | ----------------------------------- |
-| Backend  | Python 3.12, FastAPI, SQLAlchemy    |
-| Frontend | Vue 3, TypeScript, Element Plus     |
-| Database | SQLite (dev) / PostgreSQL 16 (prod) |
-| Queue    | Celery + Redis                      |
-| Deploy   | Docker, Docker Compose, Nginx       |
+| Layer     | Technology                          |
+| --------- | ----------------------------------- |
+| Backend   | Python 3.12, FastAPI, SQLAlchemy    |
+| Frontend  | Vue 3, TypeScript, Element Plus     |
+| Database  | SQLite (dev) / PostgreSQL 16 (prod) |
+| Queue     | Celery + Redis                      |
+| Deploy    | Docker, Docker Compose, Nginx       |
 
 ## Project Structure
 
 ```text
 rackdcim-pro/
-├── backend/          # FastAPI backend
-├── frontend/         # Vue 3 frontend
+├── backend/          # FastAPI backend (唯一后端入口)
+│   ├── app/          # api / core / domains / models / repos / schemas / services
+│   ├── alembic/      # DB migrations
+│   └── requirements.txt
+├── frontend/         # Vue 3 frontend (唯一前端入口)
 ├── deployment/       # Docker & Nginx configs
 ├── docs/             # Single Source of Truth
 ├── tests/            # Unit & integration tests
@@ -43,7 +46,23 @@ rackdcim-pro/
 - Node.js 20+
 - (Optional) Docker & Docker Compose
 
-### Development
+### One-command development
+
+**Windows:**
+
+```powershell
+.\scripts\dev.ps1
+```
+
+**Linux / macOS:**
+
+```bash
+./scripts/dev.sh
+```
+
+脚本会按需创建虚拟环境、仅在依赖变更时安装包，并探测端口与健康状态。
+
+### Manual development
 
 **Backend:**
 
@@ -52,7 +71,7 @@ cd backend
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
@@ -65,20 +84,20 @@ npm install
 npm run dev
 ```
 
-**Or use the dev script (Windows):**
+**Seed defaults (from repo root):**
 
 ```powershell
-.\scripts\dev.ps1
+.\backend\.venv\Scripts\python.exe .\scripts\seed.py
 ```
 
 ### URLs
 
-| Service   | URL                              |
-| --------- | -------------------------------- |
-| Frontend  | http://localhost:5173            |
-| Backend   | http://localhost:8000            |
+| Service   | URL                               |
+| --------- | --------------------------------- |
+| Frontend  | http://localhost:5173             |
+| Backend   | http://localhost:8000             |
 | API Docs  | http://localhost:8000/api/v1/docs |
-| Health    | http://localhost:8000/health     |
+| Health    | http://localhost:8000/api/v1/health |
 
 ### Docker (Production-like)
 
@@ -91,9 +110,9 @@ docker compose up -d --build
 
 All development follows docs as Single Source of Truth:
 
-| Doc | Description        |
-| --- | ------------------ |
-| [00-Project.md](docs/00-Project.md) | Project overview   |
+| Doc | Description          |
+| --- | -------------------- |
+| [00-Project.md](docs/00-Project.md) | Project overview     |
 | [01-PRD.md](docs/01-PRD.md)         | Product requirements |
 | [14-Roadmap.md](docs/14-Roadmap.md) | Milestones & roadmap |
 
@@ -110,4 +129,3 @@ Git Flow: `main` / `release` / `develop` / `feature/*` / `bugfix/*` / `hotfix/*`
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE)
-"# DICM" 

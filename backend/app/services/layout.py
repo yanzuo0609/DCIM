@@ -8,6 +8,7 @@ from app.domains.layout.engine import find_first_available, occupied_range, vali
 from app.models.device import Device, DeviceStatus
 from app.models.ip_address import IpBindType, IpStatus
 from app.repositories.device import DeviceModelRepository, DeviceRepository
+from app.repositories.device_contract import DeviceContractRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.ip_address import IpAddressRepository
 from app.repositories.rack import RackPositionRepository, RackRepository
@@ -42,6 +43,7 @@ class LayoutService:
         self.position_repo = RackPositionRepository(session)
         self.device_repo = DeviceRepository(session)
         self.model_repo = DeviceModelRepository(session)
+        self.contract_repo = DeviceContractRepository(session)
         self.room_repo = RoomRepository(session)
         self.ip_repo = IpAddressRepository(session)
         self.ip_service = IpAddressService(session)
@@ -233,39 +235,67 @@ class LayoutService:
 
         for item in payload.new_devices:
             try:
-                model = await self.model_repo.get_by_id(uuid.UUID(item.device_model_id))
-                if not model:
-                    result.skipped += 1
-                    result.errors.append(f"{item.serial_number}: 型号不存在")
-                    continue
-                if await self.device_repo.get_by_serial(item.serial_number):
-                    result.skipped += 1
-                    result.errors.append(f"{item.serial_number}: 序列号已存在")
-                    continue
-                name = (item.name or item.hostname or item.serial_number).strip()
-                hostname = (item.hostname or name).strip()
-                if await self.device_repo.get_by_hostname(hostname):
-                    result.skipped += 1
-                    result.errors.append(f"{hostname}: 主机名已存在")
-                    continue
-                type_id = uuid.UUID(item.device_type_id) if item.device_type_id else None
-                entity = Device(
-                    name=name,
-                    hostname=hostname,
-                    serial_number=item.serial_number,
-                    device_model_id=model.id,
-                    device_type_id=type_id,
-                    height_u=item.height_u or model.height_u,
-                    power=item.power or model.power,
-                    weight=model.weight,
-                    status=DeviceStatus.STOCK.value,
-                    description=item.description,
-                    created_by=user_id,
-                    updated_by=user_id,
-                )
-                created = await self.device_repo.create(entity)
-                result.created += 1
-                queue.append(created.id)
+                async with self.session.begin_nested():
+                    model = await self.model_repo.get_by_id(uuid.UUID(item.device_model_id))
+                    if not model:
+                        result.skipped += 1
+                        result.errors.append(f"{item.serial_number}: 型号不存在")
+                        continue
+                    existing_sn = await self.device_repo.get_by_serial_including_deleted(
+                        item.serial_number
+                    )
+                    if existing_sn and existing_sn.deleted_at is None:
+                        result.skipped += 1
+                        result.errors.append(f"{item.serial_number}: 序列号已存在")
+                        continue
+                    if existing_sn and existing_sn.deleted_at is not None:
+                        await self.device_repo.free_unique_for_soft_deleted(existing_sn)
+
+                    name = (item.name or item.hostname or item.serial_number).strip()
+                    hostname = (item.hostname or name).strip()
+                    existing_hn = await self.device_repo.get_by_hostname_including_deleted(
+                        hostname
+                    )
+                    if existing_hn and existing_hn.deleted_at is None:
+                        result.skipped += 1
+                        result.errors.append(f"{hostname}: 主机名已存在")
+                        continue
+                    if existing_hn and existing_hn.deleted_at is not None:
+                        await self.device_repo.free_unique_for_soft_deleted(existing_hn)
+
+                    type_id = uuid.UUID(item.device_type_id) if item.device_type_id else None
+                    contract_id = None
+                    if item.contract_id:
+                        try:
+                            cid = uuid.UUID(item.contract_id)
+                        except ValueError as exc:
+                            raise ValidationError(
+                                f"{item.serial_number}: 无效合同 ID", code=10004
+                            ) from exc
+                        contract = await self.contract_repo.get_by_id(cid)
+                        if not contract:
+                            raise ValidationError(
+                                f"{item.serial_number}: 采购合同不存在", code=10004
+                            )
+                        contract_id = contract.id
+                    entity = Device(
+                        name=name,
+                        hostname=hostname,
+                        serial_number=item.serial_number,
+                        device_model_id=model.id,
+                        device_type_id=type_id,
+                        contract_id=contract_id,
+                        height_u=item.height_u or model.height_u,
+                        power=item.power or model.power,
+                        weight=model.weight,
+                        status=DeviceStatus.STOCK.value,
+                        description=item.description,
+                        created_by=user_id,
+                        updated_by=user_id,
+                    )
+                    created = await self.device_repo.create(entity)
+                    result.created += 1
+                    queue.append(created.id)
             except Exception as exc:  # noqa: BLE001
                 result.skipped += 1
                 result.errors.append(f"{item.serial_number}: {exc}")
@@ -273,28 +303,39 @@ class LayoutService:
         if not queue:
             return result
 
-        ip_queue: list = []
-        if payload.ip_ids:
+        async def _build_ip_queue(raw_ids: list[str], *, role: str) -> list:
+            built: list = []
+            if not raw_ids:
+                return built
             try:
-                wanted_ids = [uuid.UUID(x) for x in payload.ip_ids]
+                wanted_ids = [uuid.UUID(x) for x in raw_ids]
             except ValueError as exc:
-                raise ValidationError("存在无效 IP ID", code=10004) from exc
+                raise ValidationError(f"存在无效{role} ID", code=10004) from exc
             ips = await self.ip_repo.list_by_ids(wanted_ids)
             ip_map = {i.id: i for i in ips}
-            ordered = sorted(
-                [ip_map[i] for i in wanted_ids if i in ip_map],
-                key=lambda x: _ip_sort_key(x.system_ip),
-            )
+            # 保持请求顺序，便于与设备 1:1 配对
+            ordered = [ip_map[i] for i in wanted_ids if i in ip_map]
             for missing in [i for i in wanted_ids if i not in ip_map]:
-                result.errors.append(f"{missing}: IP 不存在")
+                result.errors.append(f"{missing}: {role}不存在")
             for ip_entity in ordered:
                 if getattr(ip_entity, "status", None) == IpStatus.DISABLED.value:
-                    result.errors.append(f"{ip_entity.system_ip}: IP 已禁用，已跳过")
+                    result.errors.append(f"{ip_entity.system_ip}: {role}已禁用，已跳过")
                     continue
                 if ip_entity.device_id or getattr(ip_entity, "status", None) == IpStatus.ALLOCATED.value:
-                    result.errors.append(f"{ip_entity.system_ip}: IP 已分配，已跳过")
+                    result.errors.append(f"{ip_entity.system_ip}: {role}已分配，已跳过")
                     continue
-                ip_queue.append(ip_entity)
+                built.append(ip_entity)
+            return built
+
+        business_queue = await _build_ip_queue(payload.ip_ids, role="业务IP")
+        bmc_queue = await _build_ip_queue(payload.bmc_ip_ids, role="BMC地址")
+        business_ids = {ip.id for ip in business_queue}
+        overlap = [ip.system_ip for ip in bmc_queue if ip.id in business_ids]
+        if overlap:
+            raise ValidationError(
+                f"业务IP与BMC地址不可重复：{', '.join(overlap[:5])}",
+                code=10004,
+            )
 
         room_id = uuid.UUID(payload.room_id)
         start_u = payload.start_u
@@ -325,44 +366,67 @@ class LayoutService:
                 if u_position is None:
                     break
                 try:
-                    await self.mount(
-                        MountRequest(
-                            device_id=str(device_id),
-                            rack_id=str(rack.id),
-                            u_position=u_position,
-                        ),
-                        user_id=user_id,
-                    )
-                    result.mounted += 1
-                    mounted_in_rack += 1
-                    cursor_u = u_position + device.height_u + gap_u
+                    async with self.session.begin_nested():
+                        await self.mount(
+                            MountRequest(
+                                device_id=str(device_id),
+                                rack_id=str(rack.id),
+                                u_position=u_position,
+                            ),
+                            user_id=user_id,
+                        )
+                        result.mounted += 1
+                        mounted_in_rack += 1
+                        cursor_u = u_position + device.height_u + gap_u
 
-                    assignment: dict = {
-                        "device_id": str(device_id),
-                        "hostname": device.hostname,
-                        "rack_id": str(rack.id),
-                        "rack_code": rack.code,
-                        "u_position": u_position,
-                        "system_ip": None,
-                        "ip_id": None,
-                    }
+                        assignment: dict = {
+                            "device_id": str(device_id),
+                            "hostname": device.hostname,
+                            "rack_id": str(rack.id),
+                            "rack_code": rack.code,
+                            "u_position": u_position,
+                            "system_ip": None,
+                            "bmc_ip": None,
+                            "ip_id": None,
+                            "bmc_ip_id": None,
+                        }
 
-                    if ip_queue:
-                        ip_entity = ip_queue.pop(0)
-                        ip_entity.bind_type = IpBindType.DEVICE.value
-                        ip_entity.device_id = device_id
-                        ip_entity.rack_id = rack.id
-                        ip_entity.room_id = room_id
-                        ip_entity.u_position = u_position
-                        ip_entity.scope_rack_ids = None
-                        ip_entity.status = IpStatus.ALLOCATED.value
-                        ip_entity.updated_by = user_id
-                        ip_entity.version += 1
-                        result.ip_bound += 1
-                        assignment["system_ip"] = ip_entity.system_ip
-                        assignment["ip_id"] = str(ip_entity.id)
+                        business_entity = business_queue.pop(0) if business_queue else None
+                        bmc_entity = bmc_queue.pop(0) if bmc_queue else None
 
-                    result.assignments.append(assignment)
+                        if business_entity:
+                            business_entity.bind_type = IpBindType.DEVICE.value
+                            business_entity.device_id = device_id
+                            business_entity.rack_id = rack.id
+                            business_entity.room_id = room_id
+                            business_entity.u_position = u_position
+                            business_entity.scope_rack_ids = None
+                            business_entity.label = "business"
+                            business_entity.status = IpStatus.ALLOCATED.value
+                            business_entity.updated_by = user_id
+                            business_entity.version += 1
+                            result.ip_bound += 1
+                            assignment["system_ip"] = business_entity.system_ip
+                            assignment["ip_id"] = str(business_entity.id)
+
+                        if bmc_entity:
+                            bmc_entity.bind_type = IpBindType.DEVICE.value
+                            bmc_entity.device_id = device_id
+                            bmc_entity.rack_id = rack.id
+                            bmc_entity.room_id = room_id
+                            bmc_entity.u_position = u_position
+                            bmc_entity.scope_rack_ids = None
+                            bmc_entity.label = "bmc"
+                            bmc_entity.status = IpStatus.ALLOCATED.value
+                            bmc_entity.updated_by = user_id
+                            bmc_entity.version += 1
+                            result.ip_bound += 1
+                            assignment["bmc_ip"] = bmc_entity.system_ip
+                            assignment["bmc_ip_id"] = str(bmc_entity.id)
+                            if business_entity:
+                                business_entity.bmc_ip = bmc_entity.system_ip
+
+                        result.assignments.append(assignment)
                 except Exception as exc:  # noqa: BLE001
                     result.skipped += 1
                     result.errors.append(f"{device.hostname}: {exc}")
@@ -375,8 +439,14 @@ class LayoutService:
             result.errors.append(f"{label}: 机柜空间不足，未能上架")
             device_idx += 1
 
-        if ip_queue:
-            result.errors.append(f"剩余 {len(ip_queue)} 条 IP 未关联（设备已全部上架或不足）")
+        if business_queue:
+            result.errors.append(
+                f"剩余 {len(business_queue)} 条业务IP未关联（设备已全部上架或不足）"
+            )
+        if bmc_queue:
+            result.errors.append(
+                f"剩余 {len(bmc_queue)} 条BMC地址未关联（设备已全部上架或不足）"
+            )
 
         await self.session.flush()
         return result

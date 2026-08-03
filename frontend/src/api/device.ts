@@ -22,6 +22,12 @@ export interface Device {
   ip_summary: string | null
   bmc_ip?: string | null
   vip?: string | null
+  system_ip_id?: string | null
+  bmc_ip_id?: string | null
+  vip_ip_id?: string | null
+  system_segment_id?: string | null
+  bmc_segment_id?: string | null
+  vip_segment_id?: string | null
   rack_id: string | null
   rack_code: string | null
   room_id: string | null
@@ -223,6 +229,9 @@ export interface DevicePayload {
   power?: number | null
   status?: string | null
   description?: string | null
+  system_ip_id?: string | null
+  bmc_ip_id?: string | null
+  vip_ip_id?: string | null
 }
 
 export interface BatchMountNewDevice {
@@ -234,6 +243,7 @@ export interface BatchMountNewDevice {
   height_u?: number | null
   power?: number | null
   description?: string | null
+  contract_id?: string | null
 }
 
 export interface BatchMountPayload {
@@ -248,8 +258,10 @@ export interface BatchMountPayload {
   start_u?: number
   /** 设备间空闲 U 间隔，默认 1 */
   gap_u?: number
-  /** 与上架设备按序 1:1 关联的已有 IP */
+  /** 业务 IP，与上架设备按序 1:1 关联 */
   ip_ids?: string[]
+  /** BMC/带外 IP，与上架设备按序 1:1 关联 */
+  bmc_ip_ids?: string[]
 }
 
 export interface BatchMountResult {
@@ -265,7 +277,9 @@ export interface BatchMountResult {
     rack_code: string
     u_position: number
     system_ip?: string | null
+    bmc_ip?: string | null
     ip_id?: string | null
+    bmc_ip_id?: string | null
   }>
 }
 

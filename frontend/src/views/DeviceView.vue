@@ -62,6 +62,7 @@ import {
   createIpSegment,
   deleteIpSegment,
   getIpSegment,
+  listIpAddresses,
   listIpSegments,
   updateIpAddress,
   updateIpSegment,
@@ -73,9 +74,13 @@ import {
   type IpStatus,
 } from '@/api/ip'
 import {
+  contractItemKey,
+  findContractItem,
   listDeviceContracts,
+  matchContractItemKey,
   syncContractModels,
   type DeviceContract,
+  type DeviceContractItem,
 } from '@/api/contract'
 import { getRackLayout, listRacks, type Rack, type RackLayoutSlot } from '@/api/rack'
 import { listRooms, type Room } from '@/api/room'
@@ -106,6 +111,45 @@ const manufacturers = ref<Manufacturer[]>([])
 const syncModelsLoading = ref(false)
 const formContracts = computed(() => contracts.value)
 
+const selectedFormContract = computed(
+  () => formContracts.value.find((c) => c.id === form.contract_id) || null,
+)
+
+const formContractItems = computed((): DeviceContractItem[] => {
+  const items = selectedFormContract.value?.device_items
+  return Array.isArray(items) ? items.filter((it) => it.device_name) : []
+})
+
+function onFormContractChange(contractId: string | null) {
+  form.contract_id = contractId || null
+  form.contract_item_key = ''
+  if (!contractId) return
+  const items = formContractItems.value
+  if (items.length === 1) {
+    onFormContractItemChange(contractItemKey(items[0]))
+  }
+}
+
+function onFormContractItemChange(key: string | null) {
+  form.contract_item_key = key || ''
+  const item = findContractItem(selectedFormContract.value, key)
+  if (!item) return
+  form.name = item.device_name
+  const modelName = (item.device_model_name || '').trim()
+  if (!modelName) return
+  const mfgName = (item.manufacturer_name || '').trim()
+  const hit = models.value.find(
+    (m) =>
+      m.name === modelName
+      && (!mfgName || !m.manufacturer_name || m.manufacturer_name === mfgName),
+  )
+  if (hit) {
+    form.device_model_id = hit.id
+    form.height_u = hit.height_u
+    form.power = hit.power
+  }
+}
+
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const keyword = ref('')
 
@@ -119,6 +163,7 @@ const ipBatchBusy = ref(false)
 const selectedIps = ref<IpAddress[]>([])
 const ipDetailVisible = ref(false)
 const ipDetailLoading = ref(false)
+const ipDetailAddressesLoading = ref(false)
 const ipDetail = ref<IpSegmentDetail | null>(null)
 
 const IP_STATUS_OPTIONS: Array<{ value: IpStatus; label: string; type: 'success' | 'warning' | 'info' | 'danger' }> = [
@@ -141,6 +186,18 @@ const IP_NETWORK_TYPE_OPTIONS = [
   { value: '内网', label: '内网' },
   { value: '专网', label: '专网' },
 ]
+
+/** 机房在地址段「所属机房位置」中的展示文案 */
+function roomLocationLabel(room: Room): string {
+  const parts = [
+    room.datacenter_name,
+    room.building_no ? `${room.building_no}号楼` : null,
+    room.room_no || null,
+    room.name || null,
+  ].filter((x): x is string => Boolean(x && String(x).trim()))
+  const unique = [...new Set(parts)]
+  return unique.join(' · ') || room.name || room.id
+}
 
 function ipStatusMeta(status: string | undefined | null) {
   return IP_STATUS_OPTIONS.find((o) => o.value === status) || { value: 'free' as IpStatus, label: status || '空闲', type: 'success' as const }
@@ -172,12 +229,11 @@ const ipBatchForm = reactive({
   network: '',
   prefix_len: 24,
   gateway: '',
-  reserved_count: 0,
+  reserved_ips: '',
   address_purpose: '业务地址',
   network_type: '互联网',
   location: '',
   remarks: '',
-  start_bmc_ip: '',
   dns: '',
   dns_secondary: '',
 })
@@ -233,13 +289,138 @@ const form = reactive({
   bmc_profile_id: '' as string | null,
   system_profile_id: '' as string | null,
   contract_id: '' as string | null,
+  /** 合同明细键：kind||name||model||mfg */
+  contract_item_key: '' as string,
   height_u: 1 as number | null,
   power: null as number | null,
   description: '',
   room_id: '',
   rack_id: '',
   u_position: 1 as number | null,
+  system_segment_id: '' as string,
+  system_ip_id: '' as string | null,
+  bmc_segment_id: '' as string,
+  bmc_ip_id: '' as string | null,
+  vip_segment_id: '' as string,
+  vip_ip_id: '' as string | null,
 })
+
+const deviceIpSegments = ref<IpSegment[]>([])
+const systemIpOptions = ref<IpAddress[]>([])
+const bmcIpOptions = ref<IpAddress[]>([])
+const vipIpOptions = ref<IpAddress[]>([])
+const ipOptionsLoading = reactive({
+  system: false,
+  bmc: false,
+  vip: false,
+})
+const ipAssignHydrating = ref(false)
+
+async function ensureDeviceIpSegments() {
+  if (deviceIpSegments.value.length) return
+  try {
+    const data = await listIpSegments({ page: 1, page_size: 200 })
+    deviceIpSegments.value = data?.items ?? []
+  } catch {
+    deviceIpSegments.value = []
+  }
+}
+
+function sortIpOptions(items: IpAddress[]) {
+  return [...items].sort((a, b) => {
+    const aa = a.system_ip.split('.').map(Number)
+    const bb = b.system_ip.split('.').map(Number)
+    for (let i = 0; i < 4; i += 1) {
+      if ((aa[i] || 0) !== (bb[i] || 0)) return (aa[i] || 0) - (bb[i] || 0)
+    }
+    return 0
+  })
+}
+
+async function loadSegmentIpOptions(
+  kind: 'system' | 'bmc' | 'vip',
+  segmentId: string,
+  keepIpId?: string | null,
+) {
+  if (!segmentId) {
+    if (kind === 'system') systemIpOptions.value = []
+    if (kind === 'bmc') bmcIpOptions.value = []
+    if (kind === 'vip') vipIpOptions.value = []
+    return
+  }
+  ipOptionsLoading[kind] = true
+  try {
+    const params: Record<string, unknown> = {
+      page: 1,
+      page_size: 200,
+      segment_id: segmentId,
+    }
+    // 业务 / 带外：仅空闲；虚拟 IP：非禁用即可（可复用）
+    if (kind === 'system' || kind === 'bmc') {
+      params.status = 'free'
+    }
+    const data = await listIpAddresses(params)
+    let items = (data?.items ?? []) as IpAddress[]
+    if (kind === 'vip') {
+      items = items.filter((ip) => ip.status !== 'disabled')
+    }
+    // 编辑时保留当前已分配地址，避免下拉中消失
+    if (keepIpId && !items.some((ip) => ip.id === keepIpId)) {
+      try {
+        const mine = await listIpAddresses({
+          page: 1,
+          page_size: 50,
+          segment_id: segmentId,
+          ...(kind !== 'vip' && editingId.value ? { device_id: editingId.value } : {}),
+        })
+        const extra = ((mine?.items ?? []) as IpAddress[]).filter((ip) => ip.id === keepIpId)
+        if (!extra.length && kind === 'vip') {
+          const all = await listIpAddresses({ page: 1, page_size: 200, segment_id: segmentId })
+          items = [
+            ...((all?.items ?? []) as IpAddress[]).filter((ip) => ip.id === keepIpId),
+            ...items,
+          ]
+        } else {
+          items = [...extra, ...items]
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    items = sortIpOptions(items)
+    if (kind === 'system') systemIpOptions.value = items
+    if (kind === 'bmc') bmcIpOptions.value = items
+    if (kind === 'vip') vipIpOptions.value = items
+  } catch {
+    if (kind === 'system') systemIpOptions.value = []
+    if (kind === 'bmc') bmcIpOptions.value = []
+    if (kind === 'vip') vipIpOptions.value = []
+  } finally {
+    ipOptionsLoading[kind] = false
+  }
+}
+
+watch(
+  () => form.system_segment_id,
+  (id) => {
+    if (!ipAssignHydrating.value) form.system_ip_id = null
+    void loadSegmentIpOptions('system', id, form.system_ip_id)
+  },
+)
+watch(
+  () => form.bmc_segment_id,
+  (id) => {
+    if (!ipAssignHydrating.value) form.bmc_ip_id = null
+    void loadSegmentIpOptions('bmc', id, form.bmc_ip_id)
+  },
+)
+watch(
+  () => form.vip_segment_id,
+  (id) => {
+    if (!ipAssignHydrating.value) form.vip_ip_id = null
+    void loadSegmentIpOptions('vip', id, form.vip_ip_id)
+  },
+)
 
 const originalMount = ref<{ rack_id: string | null; u_position: number | null }>({
   rack_id: null,
@@ -1160,29 +1341,63 @@ async function loadIpData() {
   }
 }
 
+async function loadSegmentAddresses(segmentId: string): Promise<IpAddress[]> {
+  const pages: IpAddress[] = []
+  let page = 1
+  let total = 0
+  do {
+    const data = await listIpAddresses({
+      page,
+      page_size: 200,
+      segment_id: segmentId,
+    })
+    pages.push(...(data.items || []))
+    total = data.pagination?.total ?? pages.length
+    page += 1
+  } while (pages.length < total && page <= 50)
+  return pages
+}
+
 async function openIpSegmentDetail(row: IpSegment) {
   ipDetailVisible.value = true
   ipDetailLoading.value = true
+  ipDetailAddressesLoading.value = false
   selectedIps.value = []
   try {
-    ipDetail.value = await getIpSegment(row.id)
+    // 先拉段信息（不含全量地址），对话框秒开；地址分页加载避免卡顿
+    const meta = await getIpSegment(row.id, { include_addresses: false })
+    ipDetail.value = { ...meta, addresses: [] }
+    ipDetailLoading.value = false
+    ipDetailAddressesLoading.value = true
+    const addresses = await loadSegmentAddresses(row.id)
+    if (ipDetail.value?.id === row.id) {
+      ipDetail.value = { ...ipDetail.value, addresses }
+    }
   } catch (error: unknown) {
     ipDetail.value = null
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '加载地址段详情失败')
-  } finally {
     ipDetailLoading.value = false
+  } finally {
+    ipDetailAddressesLoading.value = false
   }
 }
 
 async function refreshIpDetail() {
   if (!ipDetail.value) return
+  const segmentId = ipDetail.value.id
   ipDetailLoading.value = true
+  ipDetailAddressesLoading.value = true
   try {
-    ipDetail.value = await getIpSegment(ipDetail.value.id)
+    const meta = await getIpSegment(segmentId, { include_addresses: false })
+    const addresses = await loadSegmentAddresses(segmentId)
+    if (ipDetail.value?.id === segmentId) {
+      ipDetail.value = { ...meta, addresses }
+    }
     selectedIps.value = []
   } finally {
     ipDetailLoading.value = false
+    ipDetailAddressesLoading.value = false
   }
 }
 
@@ -1230,6 +1445,7 @@ function openIpSegmentEdit(row?: IpSegment | null) {
   ipSegmentEditForm.dns = seg.dns || ''
   ipSegmentEditForm.dns_secondary = seg.dns_secondary || ''
   ipSegmentEditVisible.value = true
+  void loadLocationRefs().catch(() => undefined)
 }
 
 async function saveIpSegmentEdit() {
@@ -1332,12 +1548,22 @@ function resetForm() {
   form.bmc_profile_id = null
   form.system_profile_id = null
   form.contract_id = null
+  form.contract_item_key = ''
   form.height_u = 1
   form.power = null
   form.description = ''
   form.room_id = ''
   form.rack_id = ''
   form.u_position = 1
+  form.system_segment_id = ''
+  form.system_ip_id = null
+  form.bmc_segment_id = ''
+  form.bmc_ip_id = null
+  form.vip_segment_id = ''
+  form.vip_ip_id = null
+  systemIpOptions.value = []
+  bmcIpOptions.value = []
+  vipIpOptions.value = []
   originalMount.value = { rack_id: null, u_position: null }
   formLayoutSlots.value = []
   formLayoutTotalPower.value = 0
@@ -1348,6 +1574,30 @@ function openCreate() {
   editingPanel.value = null
   resetForm()
   editVisible.value = true
+  void ensureDeviceIpSegments()
+}
+
+function applyDeviceIpAssign(detail: Device) {
+  ipAssignHydrating.value = true
+  form.system_segment_id = detail.system_segment_id || ''
+  form.system_ip_id = detail.system_ip_id || null
+  form.bmc_segment_id = detail.bmc_segment_id || ''
+  form.bmc_ip_id = detail.bmc_ip_id || null
+  form.vip_segment_id = detail.vip_segment_id || ''
+  form.vip_ip_id = detail.vip_ip_id || null
+  void Promise.all([
+    form.system_segment_id
+      ? loadSegmentIpOptions('system', form.system_segment_id, form.system_ip_id)
+      : Promise.resolve(),
+    form.bmc_segment_id
+      ? loadSegmentIpOptions('bmc', form.bmc_segment_id, form.bmc_ip_id)
+      : Promise.resolve(),
+    form.vip_segment_id
+      ? loadSegmentIpOptions('vip', form.vip_segment_id, form.vip_ip_id)
+      : Promise.resolve(),
+  ]).finally(() => {
+    ipAssignHydrating.value = false
+  })
 }
 
 function openEdit(row: Device) {
@@ -1361,12 +1611,26 @@ function openEdit(row: Device) {
   form.bmc_profile_id = row.bmc_profile_id
   form.system_profile_id = row.system_profile_id
   form.contract_id = row.contract_id || null
+  form.contract_item_key = matchContractItemKey(
+    contracts.value.find((c) => c.id === row.contract_id) || null,
+    row.name,
+    row.device_model_name,
+  )
   form.height_u = row.height_u
   form.power = row.power
   form.description = row.description || ''
   form.room_id = row.room_id || ''
   form.rack_id = row.rack_id || ''
   form.u_position = row.u_position || 1
+  form.system_segment_id = ''
+  form.system_ip_id = null
+  form.bmc_segment_id = ''
+  form.bmc_ip_id = null
+  form.vip_segment_id = ''
+  form.vip_ip_id = null
+  systemIpOptions.value = []
+  bmcIpOptions.value = []
+  vipIpOptions.value = []
   originalMount.value = {
     rack_id: row.rack_id || null,
     u_position: row.u_position || null,
@@ -1378,19 +1642,19 @@ function openEdit(row: Device) {
   }
   editVisible.value = true
   if (form.rack_id) void loadFormRackLayout(form.rack_id)
-  // 列表可能未带全面板时补拉详情
-  if (!row.port_layout) {
-    void getDevice(row.id)
-      .then((d) => {
-        if (editingId.value !== row.id) return
-        editingPanel.value = {
-          port_layout: d.port_layout || null,
-          network_kind: d.network_kind || null,
-          device_name: d.name || d.hostname,
-        }
-      })
-      .catch(() => undefined)
-  }
+  void ensureDeviceIpSegments()
+  // 列表可能未带全面板/IP 时补拉详情
+  void getDevice(row.id)
+    .then((d) => {
+      if (editingId.value !== row.id) return
+      editingPanel.value = {
+        port_layout: d.port_layout || null,
+        network_kind: d.network_kind || null,
+        device_name: d.name || d.hostname,
+      }
+      applyDeviceIpAssign(d)
+    })
+    .catch(() => undefined)
 }
 
 async function openDeviceFromQuery() {
@@ -1489,6 +1753,14 @@ async function handleSubmit() {
     ElMessage.warning('请填写序列号与型号')
     return
   }
+  if (form.contract_id && !form.contract_item_key) {
+    ElMessage.warning('请选择合同内的设备名称，以便采购汇总正确统计已关联数量')
+    return
+  }
+  if (form.vip_ip_id && !form.system_ip_id && !form.bmc_ip_id) {
+    ElMessage.warning('分配虚拟IP前请先选择业务地址或带外地址')
+    return
+  }
   const payload = {
     name: form.name || form.hostname || form.serial_number,
     hostname: form.hostname || form.name || form.serial_number,
@@ -1502,6 +1774,9 @@ async function handleSubmit() {
     height_u: form.height_u,
     power: form.power,
     description: form.description || null,
+    system_ip_id: form.system_ip_id || null,
+    bmc_ip_id: form.bmc_ip_id || null,
+    vip_ip_id: form.vip_ip_id || null,
   }
   try {
     let deviceId = editingId.value
@@ -1519,8 +1794,18 @@ async function handleSubmit() {
     }
     editVisible.value = false
     await loadData()
-  } catch {
-    ElMessage.error('保存失败，请检查位置或参数是否正确')
+    await refreshIpAfterDeviceChange()
+  } catch (error: unknown) {
+    const err = error as {
+      response?: { data?: { message?: string; details?: { detail?: string } } }
+      message?: string
+    }
+    ElMessage.error(
+      err.response?.data?.details?.detail
+        || err.response?.data?.message
+        || err.message
+        || '保存失败，请检查位置或参数是否正确',
+    )
   }
 }
 
@@ -1529,13 +1814,10 @@ function isMessageBoxCancel(error: unknown): boolean {
 }
 
 async function handleDelete(row: Device) {
-  if (row.rack_id) {
-    ElMessage.warning('请先下架设备后再删除')
-    return
-  }
+  const mountedHint = row.rack_id ? '设备仍在机柜中，将先下架再删除；' : ''
   try {
     await ElMessageBox.confirm(
-      `确定删除设备「${row.name || row.hostname}」吗？已分配的 IP 将释放为空闲。`,
+      `确定删除设备「${row.name || row.hostname}」吗？${mountedHint}已分配的 IP 将释放为空闲。`,
       '确认删除',
       { type: 'warning' },
     )
@@ -1552,17 +1834,12 @@ async function handleDelete(row: Device) {
 
 async function handleBatchDelete() {
   if (!selectedDevices.value.length) return
-  const mounted = selectedDevices.value.filter((d) => d.rack_id)
-  if (mounted.length === selectedDevices.value.length) {
-    ElMessage.warning('选中的设备均已上架，请先下架后再删除')
-    return
-  }
-  if (mounted.length) {
-    ElMessage.warning(`已跳过 ${mounted.length} 台已上架设备，仅删除库存设备`)
-  }
+  const mountedCount = selectedDevices.value.filter((d) => d.rack_id).length
+  const mountedHint =
+    mountedCount > 0 ? `其中 ${mountedCount} 台仍在机柜中，将先下架再删除；` : ''
   try {
     await ElMessageBox.confirm(
-      `确定删除选中的 ${selectedDevices.value.length} 台设备吗？已分配的 IP 将释放为空闲。`,
+      `确定删除选中的 ${selectedDevices.value.length} 台设备吗？${mountedHint}已分配的 IP 将释放为空闲。`,
       '批量删除',
       { type: 'warning' },
     )
@@ -2026,15 +2303,15 @@ function openIpBatchCreate() {
   ipBatchForm.network = ''
   ipBatchForm.prefix_len = 24
   ipBatchForm.gateway = ''
-  ipBatchForm.reserved_count = 0
+  ipBatchForm.reserved_ips = ''
   ipBatchForm.address_purpose = '业务地址'
   ipBatchForm.network_type = '互联网'
   ipBatchForm.location = ''
   ipBatchForm.remarks = ''
-  ipBatchForm.start_bmc_ip = ''
   ipBatchForm.dns = ''
   ipBatchForm.dns_secondary = ''
   ipBatchCreateVisible.value = true
+  void loadLocationRefs().catch(() => undefined)
 }
 
 async function submitIpBatchCreate(ev?: Event) {
@@ -2054,12 +2331,11 @@ async function submitIpBatchCreate(ev?: Event) {
       network: ipBatchForm.network.trim(),
       prefix_len: Number(ipBatchForm.prefix_len),
       gateway: ipBatchForm.gateway.trim() || null,
-      reserved_count: Number(ipBatchForm.reserved_count) || 0,
+      reserved_ips: ipBatchForm.reserved_ips.trim() || null,
       address_purpose: ipBatchForm.address_purpose || null,
       network_type: ipBatchForm.network_type || null,
       location: ipBatchForm.location.trim() || null,
       remarks: ipBatchForm.remarks.trim() || null,
-      start_bmc_ip: ipBatchForm.start_bmc_ip.trim() || null,
       dns: ipBatchForm.dns.trim() || null,
       dns_secondary: ipBatchForm.dns_secondary.trim() || null,
     })
@@ -2075,7 +2351,7 @@ async function submitIpBatchCreate(ev?: Event) {
         data?: {
           message?: string
           detail?: string
-          details?: { errors?: Array<{ msg?: string }> }
+          details?: { detail?: string; errors?: Array<{ msg?: string }> }
         }
       }
       message?: string
@@ -2086,6 +2362,7 @@ async function submitIpBatchCreate(ev?: Event) {
       .join('; ')
     ElMessage.error(
       validationMsgs
+        || err.response?.data?.details?.detail
         || err.response?.data?.message
         || err.response?.data?.detail
         || err.message
@@ -2518,31 +2795,29 @@ watch(
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="280" fixed="right">
+            <el-table-column label="操作" width="88" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button v-if="canUpdate" type="primary" link @click="openEdit(row)">编辑</el-button>
-                <el-button v-if="row.rack_id" type="primary" link @click="openRackDetail(row)">机柜图</el-button>
-                <el-button v-if="canUpdate" type="primary" link @click="openMount(row)">
-                  {{ row.rack_id ? '改位' : '上架' }}
-                </el-button>
-                <el-button v-if="canUpdate && row.rack_id" type="warning" link @click="handleUnmount(row)">
-                  下架
-                </el-button>
-                <el-tooltip
-                  v-if="canDelete"
-                  :disabled="!row.rack_id"
-                  content="请先下架设备后再删除"
-                  placement="top"
-                >
-                  <el-button
-                    type="danger"
-                    link
-                    :disabled="!!row.rack_id"
-                    @click.stop="handleDelete(row)"
-                  >
-                    删除
-                  </el-button>
-                </el-tooltip>
+                <el-dropdown trigger="click">
+                  <el-button type="primary" link>操作</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item v-if="row.rack_id" @click="openRackDetail(row)">机柜图</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" @click="openMount(row)">
+                        {{ row.rack_id ? '改位' : '上架' }}
+                      </el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="canUpdate && row.rack_id"
+                        @click="handleUnmount(row)"
+                      >
+                        下架
+                      </el-dropdown-item>
+                      <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">
+                        删除
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -2596,17 +2871,23 @@ watch(
             <el-table-column prop="description" label="描述" min-width="200">
               <template #default="{ row }">{{ row.description || '—' }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="160">
+            <el-table-column label="操作" width="88" align="center">
               <template #default="{ row }">
-                <el-button v-if="canUpdate" type="primary" link @click="openTypeEdit(row)">编辑</el-button>
-                <el-button
-                  v-if="canUpdate && !row.is_system"
-                  type="danger"
-                  link
-                  @click="removeType(row)"
-                >
-                  删除
-                </el-button>
+                <el-dropdown trigger="click">
+                  <el-button type="primary" link>操作</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-if="canUpdate" @click="openTypeEdit(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="canUpdate && !row.is_system"
+                        divided
+                        @click="removeType(row)"
+                      >
+                        删除
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -2619,14 +2900,17 @@ watch(
             <el-table-column prop="description" label="描述" min-width="180">
               <template #default="{ row }">{{ row.description || '—' }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="160">
+            <el-table-column label="操作" width="88" align="center">
               <template #default="{ row }">
-                <el-button v-if="canUpdate" type="primary" link @click="openModelEdit(row)">
-                  编辑
-                </el-button>
-                <el-button v-if="canUpdate" type="danger" link @click="removeModel(row)">
-                  删除
-                </el-button>
+                <el-dropdown trigger="click">
+                  <el-button type="primary" link>操作</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-if="canUpdate" @click="openModelEdit(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" divided @click="removeModel(row)">删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -2639,10 +2923,17 @@ watch(
               </template>
             </el-table-column>
             <el-table-column prop="description" label="描述" min-width="160" />
-            <el-table-column label="操作" width="160">
+            <el-table-column label="操作" width="88" align="center">
               <template #default="{ row }">
-                <el-button v-if="canUpdate" type="primary" link @click="openProfileEdit(row)">编辑</el-button>
-                <el-button v-if="canUpdate" type="danger" link @click="removeProfile(row)">删除</el-button>
+                <el-dropdown trigger="click">
+                  <el-button type="primary" link>操作</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-if="canUpdate" @click="openProfileEdit(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" divided @click="removeProfile(row)">删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -2703,7 +2994,7 @@ watch(
                 <span class="ip-free">{{ row.free_count }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="保留个数" width="90" align="center" prop="reserved_count" />
+            <el-table-column label="保留地址" width="90" align="center" prop="reserved_count" />
             <el-table-column label="地址用途" min-width="100">
               <template #default="{ row }">{{ row.address_purpose || '—' }}</template>
             </el-table-column>
@@ -2716,25 +3007,24 @@ watch(
             <el-table-column label="备注" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">{{ row.remarks || '—' }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right">
+            <el-table-column label="操作" width="88" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button type="primary" link @click="openIpSegmentDetail(row)">详情</el-button>
-                <el-button
-                  v-if="canUpdate"
-                  type="primary"
-                  link
-                  @click="openIpSegmentEdit(row)"
-                >
-                  编辑
-                </el-button>
-                <el-button
-                  v-if="canDelete"
-                  type="danger"
-                  link
-                  @click="handleIpSegmentDelete(row)"
-                >
-                  删除
-                </el-button>
+                <el-dropdown trigger="click">
+                  <el-button type="primary" link>操作</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item @click="openIpSegmentDetail(row)">详情</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" @click="openIpSegmentEdit(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="canDelete"
+                        divided
+                        @click="handleIpSegmentDelete(row)"
+                      >
+                        删除
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -2758,8 +3048,49 @@ watch(
       size="720px"
     >
       <el-form label-width="100px">
+        <el-form-item label="采购合同">
+          <el-select
+            v-model="form.contract_id"
+            clearable
+            filterable
+            style="width: 100%"
+            placeholder="选择采购合同"
+            @change="onFormContractChange"
+          >
+            <el-option
+              v-for="c in formContracts"
+              :key="c.id"
+              :label="c.project_no ? `${c.contract_no} · ${c.project_no}` : c.contract_no"
+              :value="c.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="合同设备">
+          <el-select
+            v-model="form.contract_item_key"
+            clearable
+            filterable
+            style="width: 100%"
+            placeholder="选择合同内的设备名称"
+            :disabled="!form.contract_id"
+            @change="onFormContractItemChange"
+          >
+            <el-option
+              v-for="it in formContractItems"
+              :key="contractItemKey(it)"
+              :label="it.device_name"
+              :value="contractItemKey(it)"
+            />
+          </el-select>
+          <p v-if="form.contract_id && !formContractItems.length" class="bind-device-hint">
+            该合同暂无设备明细
+          </p>
+        </el-form-item>
         <el-form-item label="名称" required>
-          <el-input v-model="form.name" />
+          <el-input
+            v-model="form.name"
+            placeholder="可从合同设备自动填入，需与合同明细名称一致"
+          />
         </el-form-item>
         <el-form-item label="主机名">
           <el-input v-model="form.hostname" placeholder="默认与名称相同" />
@@ -2837,32 +3168,127 @@ watch(
             :disabled="!form.rack_id"
           />
         </el-form-item>
-        <el-form-item v-if="form.rack_id" label="机柜图">
-          <div v-loading="formLayoutLoading" class="device-rack-preview">
-            <RackCabinet
-              selectable
-              :code="formRackMeta?.code || '机柜'"
-              :total-u="formRackMeta?.total_u || 42"
-              :slots="formLayoutSlots"
-              :total-power="formLayoutTotalPower"
-              :visual-style="(formRackMeta?.visual_style as any) || 'classic'"
-              :selected-u="form.u_position"
-              :highlight-device-id="editingId"
-              compact
-              @select-u="(u) => { form.u_position = u }"
-            />
-            <p class="bind-device-hint">点击空闲 U 位选择上架位置；已上架设备会高亮显示</p>
-          </div>
-        </el-form-item>
         <el-form-item label="设备参数">
-          <el-select v-model="form.param_profile_id" clearable style="width: 100%" filterable>
+          <el-select
+            v-model="form.param_profile_id"
+            clearable
+            filterable
+            style="width: 100%"
+            placeholder="选择设备参数（设备ID - 设备名称）"
+          >
             <el-option
               v-for="p in paramProfiles"
               :key="p.id"
-              :label="p.summary ? `${p.name} · ${p.summary}` : p.name"
+              :label="`${p.code} - ${p.name}`"
               :value="p.id"
             />
           </el-select>
+        </el-form-item>
+        <el-divider content-position="left">IP 地址分配</el-divider>
+        <el-form-item label="业务地址">
+          <div class="ip-assign-row">
+            <el-select
+              v-model="form.system_segment_id"
+              clearable
+              filterable
+              placeholder="选择地址段"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="s in deviceIpSegments"
+                :key="s.id"
+                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                :value="s.id"
+              />
+            </el-select>
+            <el-select
+              v-model="form.system_ip_id"
+              clearable
+              filterable
+              :loading="ipOptionsLoading.system"
+              :disabled="!form.system_segment_id"
+              placeholder="选择可用业务IP"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="ip in systemIpOptions"
+                :key="ip.id"
+                :label="ip.system_ip"
+                :value="ip.id"
+              />
+            </el-select>
+          </div>
+          <p class="bind-device-hint">仅显示空闲地址；占用后自动隐藏，释放后可见</p>
+        </el-form-item>
+        <el-form-item label="带外地址">
+          <div class="ip-assign-row">
+            <el-select
+              v-model="form.bmc_segment_id"
+              clearable
+              filterable
+              placeholder="选择地址段"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="s in deviceIpSegments"
+                :key="s.id"
+                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                :value="s.id"
+              />
+            </el-select>
+            <el-select
+              v-model="form.bmc_ip_id"
+              clearable
+              filterable
+              :loading="ipOptionsLoading.bmc"
+              :disabled="!form.bmc_segment_id"
+              placeholder="选择可用带外IP"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="ip in bmcIpOptions"
+                :key="ip.id"
+                :label="ip.system_ip"
+                :value="ip.id"
+              />
+            </el-select>
+          </div>
+          <p class="bind-device-hint">仅显示空闲地址，不可与其他设备重复使用</p>
+        </el-form-item>
+        <el-form-item label="虚拟IP">
+          <div class="ip-assign-row">
+            <el-select
+              v-model="form.vip_segment_id"
+              clearable
+              filterable
+              placeholder="选择地址段"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="s in deviceIpSegments"
+                :key="s.id"
+                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                :value="s.id"
+              />
+            </el-select>
+            <el-select
+              v-model="form.vip_ip_id"
+              clearable
+              filterable
+              :loading="ipOptionsLoading.vip"
+              :disabled="!form.vip_segment_id"
+              placeholder="选择虚拟IP（可共用）"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="ip in vipIpOptions"
+                :key="ip.id"
+                :label="ip.system_ip"
+                :value="ip.id"
+              />
+            </el-select>
+          </div>
+          <p class="bind-device-hint">虚拟IP可被多台设备重复选择；需先分配业务或带外地址</p>
         </el-form-item>
         <el-form-item label="BMC 档案">
           <el-select v-model="form.bmc_profile_id" clearable style="width: 100%" filterable>
@@ -2881,22 +3307,6 @@ watch(
               :key="p.id"
               :label="p.summary ? `${p.name} · ${p.summary}` : p.name"
               :value="p.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="采购合同">
-          <el-select
-            v-model="form.contract_id"
-            clearable
-            filterable
-            style="width: 100%"
-            placeholder="选择采购合同"
-          >
-            <el-option
-              v-for="c in formContracts"
-              :key="c.id"
-              :label="c.contract_no"
-              :value="c.id"
             />
           </el-select>
         </el-form-item>
@@ -3002,6 +3412,7 @@ watch(
       :racks="racks"
       :models="models"
       :types="types"
+      :contracts="contracts"
       @success="onBatchCreateSuccess"
       @type-created="onTypeCreated"
       @model-created="onModelCreated"
@@ -3232,27 +3643,60 @@ watch(
         <el-form-item label="网关">
           <el-input v-model="ipBatchForm.gateway" placeholder="如 172.17.0.1" />
         </el-form-item>
-        <el-form-item label="保留个数">
-          <el-input-number v-model="ipBatchForm.reserved_count" :min="0" :max="1024" controls-position="right" />
+        <el-form-item label="保留地址">
+          <el-input
+            v-model="ipBatchForm.reserved_ips"
+            type="textarea"
+            :rows="2"
+            placeholder="可选。填写具体保留 IP，多个用逗号/空格/换行分隔，也支持范围如 172.17.0.10-172.17.0.12"
+          />
         </el-form-item>
         <el-form-item label="地址用途">
-          <el-select v-model="ipBatchForm.address_purpose" clearable filterable allow-create style="width: 100%">
+          <el-select
+            v-model="ipBatchForm.address_purpose"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择预设，或输入自定义用途后回车"
+            style="width: 100%"
+          >
             <el-option v-for="o in IP_PURPOSE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="网络类型">
-          <el-select v-model="ipBatchForm.network_type" clearable filterable allow-create style="width: 100%">
+          <el-select
+            v-model="ipBatchForm.network_type"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择或输入自定义网络类型"
+            style="width: 100%"
+          >
             <el-option v-for="o in IP_NETWORK_TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="所属机房位置">
-          <el-input v-model="ipBatchForm.location" placeholder="如 亦庄" />
+          <el-select
+            v-model="ipBatchForm.location"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择已建机房，或输入自定义位置后回车"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="r in rooms"
+              :key="r.id"
+              :label="roomLocationLabel(r)"
+              :value="roomLocationLabel(r)"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="ipBatchForm.remarks" type="textarea" :rows="2" />
-        </el-form-item>
-        <el-form-item label="起始 BMC IP">
-          <el-input v-model="ipBatchForm.start_bmc_ip" placeholder="可选，按序递增" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -3275,7 +3719,7 @@ watch(
             <div class="meta-item"><label>网关</label><span>{{ ipDetail.gateway || '—' }}</span></div>
             <div class="meta-item"><label>已分配</label><span>{{ ipDetail.allocated_count }}</span></div>
             <div class="meta-item"><label>空闲可用</label><span class="ip-free">{{ ipDetail.free_count }}</span></div>
-            <div class="meta-item"><label>保留个数</label><span>{{ ipDetail.reserved_count }}</span></div>
+            <div class="meta-item"><label>保留地址</label><span>{{ ipDetail.reserved_count }}</span></div>
             <div class="meta-item"><label>地址用途</label><span>{{ ipDetail.address_purpose || '—' }}</span></div>
             <div class="meta-item"><label>网络类型</label><span>{{ ipDetail.network_type || '—' }}</span></div>
             <div class="meta-item"><label>所属机房位置</label><span>{{ ipDetail.location || '—' }}</span></div>
@@ -3328,6 +3772,7 @@ watch(
             <span v-if="selectedIps.length" class="batch-hint">已选 {{ selectedIps.length }} 条</span>
           </div>
           <el-table
+            v-loading="ipDetailAddressesLoading"
             :data="ipDetail.addresses"
             stripe
             max-height="560"
@@ -3355,22 +3800,29 @@ watch(
             <el-table-column label="关联位置" min-width="160">
               <template #default="{ row }">{{ formatBindLocation(row) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" width="88" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button v-if="canUpdate" type="primary" link @click="openIpEdit(row)">编辑</el-button>
-                <el-button v-if="canUpdate" type="primary" link @click="openIpBindSingle(row)">关联</el-button>
-                <el-button
-                  v-if="canUpdate && row.bind_type !== 'none'"
-                  type="warning"
-                  link
-                  @click="handleIpRelease(row)"
-                >
-                  释放
-                </el-button>
-                <el-button v-if="canUpdate" type="info" link @click="handleIpToggleDisabled(row)">
-                  {{ row.status === 'disabled' ? '启用' : '禁用' }}
-                </el-button>
-                <el-button v-if="canDelete" type="danger" link @click="handleIpDelete(row)">删除</el-button>
+                <el-dropdown trigger="click">
+                  <el-button type="primary" link>操作</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-if="canUpdate" @click="openIpEdit(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" @click="openIpBindSingle(row)">关联</el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="canUpdate && row.bind_type !== 'none'"
+                        @click="handleIpRelease(row)"
+                      >
+                        释放
+                      </el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" @click="handleIpToggleDisabled(row)">
+                        {{ row.status === 'disabled' ? '启用' : '禁用' }}
+                      </el-dropdown-item>
+                      <el-dropdown-item v-if="canDelete" divided @click="handleIpDelete(row)">
+                        删除
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -3387,17 +3839,48 @@ watch(
           <el-input v-model="ipSegmentEditForm.gateway" />
         </el-form-item>
         <el-form-item label="地址用途">
-          <el-select v-model="ipSegmentEditForm.address_purpose" clearable filterable allow-create style="width: 100%">
+          <el-select
+            v-model="ipSegmentEditForm.address_purpose"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择预设，或输入自定义用途后回车"
+            style="width: 100%"
+          >
             <el-option v-for="o in IP_PURPOSE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="网络类型">
-          <el-select v-model="ipSegmentEditForm.network_type" clearable filterable allow-create style="width: 100%">
+          <el-select
+            v-model="ipSegmentEditForm.network_type"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择或输入自定义网络类型"
+            style="width: 100%"
+          >
             <el-option v-for="o in IP_NETWORK_TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="所属机房位置">
-          <el-input v-model="ipSegmentEditForm.location" />
+          <el-select
+            v-model="ipSegmentEditForm.location"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            placeholder="选择已建机房，或输入自定义位置后回车"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="r in rooms"
+              :key="r.id"
+              :label="roomLocationLabel(r)"
+              :value="roomLocationLabel(r)"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="ipSegmentEditForm.remarks" type="textarea" :rows="2" />
@@ -3766,6 +4249,13 @@ watch(
   color: var(--el-color-warning);
   font-size: 12px;
   line-height: 1.4;
+}
+.ip-assign-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
 }
 
 .mount-layout {

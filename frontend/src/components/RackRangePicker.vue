@@ -173,6 +173,28 @@ function isCellSelected(row: number, col: number) {
   return displaySelected.value.has(rack.id)
 }
 
+function rackAt(row: number, col: number) {
+  return rackByPos.value.get(`${row}-${col}`) || null
+}
+
+function isRackOccupied(rack: Rack | null | undefined) {
+  if (!rack) return false
+  return (rack.device_count ?? 0) > 0 || (rack.occupied_u ?? 0) > 0
+}
+
+function cellTitle(row: number, col: number) {
+  const rack = rackAt(row, col)
+  if (!rack) return '空位'
+  const parts = [
+    rack.code,
+    `共 ${rack.total_u}U`,
+    `空闲 ${rack.free_u}U`,
+    `已占用 ${rack.occupied_u}U`,
+    `已上架 ${rack.device_count ?? 0} 台`,
+  ]
+  return parts.join(' · ')
+}
+
 function emitSorted(ids: Iterable<string>) {
   const order = new Map(sortedRacks.value.map((r, i) => [r.id, i]))
   emit(
@@ -253,14 +275,20 @@ onBeforeUnmount(() => {
     <p v-if="rangeError" class="range-error">{{ rangeError }}</p>
     <p class="range-hint">
       在下方机柜图按住拖选矩形范围；Ctrl/⌘ 拖选为追加。也可输入编号范围后点「应用」。
+      橙色表示机柜已有设备上架。
     </p>
     <p class="range-summary">{{ selectedSummary }}</p>
+    <div v-if="racks.length" class="rack-legend">
+      <span class="legend-item"><i class="swatch empty-rack" />空闲机柜</span>
+      <span class="legend-item"><i class="swatch occupied-rack" />已有设备</span>
+      <span class="legend-item"><i class="swatch selected-rack" />当前选中</span>
+    </div>
 
     <div v-if="!racks.length" class="grid-empty">当前机房暂无机柜</div>
     <div
       v-else
       class="rack-grid"
-      :style="{ gridTemplateColumns: `repeat(${maxCol}, minmax(56px, 1fr))` }"
+      :style="{ gridTemplateColumns: `repeat(${maxCol}, minmax(64px, 1fr))` }"
       @dragstart.prevent
     >
       <template v-for="row in maxRow" :key="`r-${row}`">
@@ -270,19 +298,30 @@ onBeforeUnmount(() => {
           type="button"
           class="rack-cell"
           :class="{
-            empty: !rackByPos.get(`${row}-${col}`),
+            empty: !rackAt(row, col),
+            occupied: isRackOccupied(rackAt(row, col)),
             selected: isCellSelected(row, col),
             dragging: dragging && isCellSelected(row, col),
           }"
-          :disabled="!rackByPos.get(`${row}-${col}`)"
-          :title="rackByPos.get(`${row}-${col}`)?.code || '空位'"
+          :disabled="!rackAt(row, col)"
+          :title="cellTitle(row, col)"
           @pointerdown="onCellPointerDown(row, col, $event)"
           @pointerenter="onCellPointerEnter(row, col)"
         >
-          <span class="code">{{ rackByPos.get(`${row}-${col}`)?.code || '·' }}</span>
-          <span v-if="rackByPos.get(`${row}-${col}`)" class="meta">
-            空{{ rackByPos.get(`${row}-${col}`)!.free_u }}U
-          </span>
+          <template v-if="rackAt(row, col)">
+            <span class="code">{{ rackAt(row, col)!.code }}</span>
+            <span class="meta">
+              {{
+                isRackOccupied(rackAt(row, col))
+                  ? `已上架 ${rackAt(row, col)!.device_count} 台`
+                  : `空闲 ${rackAt(row, col)!.free_u}U`
+              }}
+            </span>
+            <span v-if="isRackOccupied(rackAt(row, col))" class="meta sub">
+              空闲 {{ rackAt(row, col)!.free_u }}U / {{ rackAt(row, col)!.total_u }}U
+            </span>
+          </template>
+          <span v-else class="code">·</span>
         </button>
       </template>
     </div>
@@ -315,9 +354,40 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 .range-summary {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 13px;
   color: var(--el-text-color-regular);
+}
+.rack-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--el-border-color);
+}
+.swatch.empty-rack {
+  background: var(--el-bg-color);
+}
+.swatch.occupied-rack {
+  background: #fff3e0;
+  border-color: #ffb74d;
+}
+.swatch.selected-rack {
+  background: var(--el-color-primary-light-8);
+  border-color: var(--el-color-primary);
 }
 .grid-empty {
   padding: 24px;
@@ -329,7 +399,7 @@ onBeforeUnmount(() => {
 .rack-grid {
   display: grid;
   gap: 6px;
-  max-height: 320px;
+  max-height: 340px;
   overflow: auto;
   padding: 8px;
   background: var(--el-fill-color-lighter);
@@ -344,8 +414,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-height: 48px;
-  padding: 4px 2px;
+  min-height: 56px;
+  padding: 5px 3px;
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
   background: var(--el-bg-color);
@@ -363,10 +433,24 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-placeholder);
   cursor: default;
 }
+.rack-cell.occupied:not(.selected) {
+  background: #fff3e0;
+  border-color: #ffb74d;
+  color: #e65100;
+}
+.rack-cell.occupied:not(.selected):hover:not(:disabled) {
+  border-color: #fb8c00;
+  background: #ffe0b2;
+}
 .rack-cell.selected {
   background: var(--el-color-primary-light-8);
   border-color: var(--el-color-primary);
   color: var(--el-color-primary);
+}
+.rack-cell.selected.occupied {
+  background: #e3f2fd;
+  border-color: var(--el-color-primary);
+  box-shadow: inset 0 0 0 1px #ffb74d;
 }
 .rack-cell.dragging {
   background: var(--el-color-primary-light-7);
@@ -379,7 +463,12 @@ onBeforeUnmount(() => {
 }
 .rack-cell .meta {
   font-size: 10px;
-  opacity: 0.75;
-  line-height: 1;
+  opacity: 0.9;
+  line-height: 1.15;
+  text-align: center;
+}
+.rack-cell .meta.sub {
+  opacity: 0.7;
+  font-size: 9px;
 }
 </style>

@@ -667,6 +667,10 @@ class DeviceCreate(BaseModel):
     weight: Decimal | None = None
     power: Decimal | None = None
     description: str | None = None
+    # IP 分配：业务 / 带外 / 虚拟（虚拟 IP 可被多台设备共用）
+    system_ip_id: str | None = Field(default=None, description="业务 IP 记录 ID（须空闲）")
+    bmc_ip_id: str | None = Field(default=None, description="带外管理 IP 记录 ID（须空闲）")
+    vip_ip_id: str | None = Field(default=None, description="虚拟 IP 记录 ID（可共用）")
 
 
 class DeviceUpdate(BaseModel):
@@ -684,6 +688,9 @@ class DeviceUpdate(BaseModel):
     power: Decimal | None = None
     status: str | None = None
     description: str | None = None
+    system_ip_id: str | None = Field(default=None, description="业务 IP；传入空串表示清除")
+    bmc_ip_id: str | None = Field(default=None, description="带外 IP；传入空串表示清除")
+    vip_ip_id: str | None = Field(default=None, description="虚拟 IP；传入空串表示清除")
 
 
 class DeviceResponse(BaseModel):
@@ -709,6 +716,12 @@ class DeviceResponse(BaseModel):
     ip_summary: str | None = None
     bmc_ip: str | None = None
     vip: str | None = None
+    system_ip_id: str | None = None
+    bmc_ip_id: str | None = None
+    vip_ip_id: str | None = None
+    system_segment_id: str | None = None
+    bmc_segment_id: str | None = None
+    vip_segment_id: str | None = None
     rack_id: str | None
     rack_code: str | None = None
     room_id: str | None = None
@@ -746,6 +759,7 @@ class BatchMountNewDevice(BaseModel):
     height_u: int | None = Field(default=None, ge=1, le=10)
     power: Decimal | None = None
     description: str | None = None
+    contract_id: str | None = None
 
 
 class BatchMountRequest(BaseModel):
@@ -755,12 +769,16 @@ class BatchMountRequest(BaseModel):
     rack_ids: list[str] = Field(default_factory=list)
     row_nos: list[int] = Field(default_factory=list, description="可选：限定排号")
     column_nos: list[int] = Field(default_factory=list, description="可选：限定列号")
-    per_rack_count: int = Field(default=1, ge=1, le=60)
+    per_rack_count: int = Field(default=1, ge=1, le=200)
     start_u: int = Field(default=1, ge=1, le=100, description="每柜上架起始 U 位")
     gap_u: int = Field(default=1, ge=0, le=10, description="设备间空闲 U 间隔，默认 1U")
     ip_ids: list[str] = Field(
         default_factory=list,
-        description="可选：按顺序与上架设备 1:1 关联的已有 IP 记录",
+        description="可选：业务 IP，按顺序与上架设备 1:1 关联",
+    )
+    bmc_ip_ids: list[str] = Field(
+        default_factory=list,
+        description="可选：BMC/带外 IP，按顺序与上架设备 1:1 关联",
     )
 
 

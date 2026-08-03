@@ -1,9 +1,28 @@
-"""Run database seed manually."""
+"""Run database seed manually.
+
+Usage (from repository root):
+
+    backend\\.venv\\Scripts\\python.exe scripts\\seed.py
+
+Or:
+
+    cd backend
+    .\\.venv\\Scripts\\python.exe -c "import runpy; runpy.run_path(r'..\\scripts\\seed.py', run_name='__main__')"
+"""
+
+from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
-from app.core.database import async_session_factory, init_db
-from app.core.seed import seed_defaults
+ROOT = Path(__file__).resolve().parents[1]
+BACKEND = ROOT / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+from app.core.database import async_session_factory, init_db  # noqa: E402
+from app.core.seed import seed_defaults  # noqa: E402
 
 
 async def main() -> None:

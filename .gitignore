@@ -1,16 +1,27 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .venv/
 venv/
+.deps.stamp
 *.db
+*.db.bak*
 .env
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+__pypackages__/
 
 # Node
 node_modules/
 dist/
 *.local
+node_modules/.deps.stamp
 
 # IDE
 .idea/
@@ -25,5 +36,7 @@ Thumbs.db
 # Docker
 postgres_data/
 
-# Logs
+# Logs / temp
 *.log
+*.tmp
+.cache/

@@ -197,21 +197,21 @@ AI 助手、容量预测、自动布局建议、Digital Twin。
 ## 6. Repository Structure
 
 ```text
-DCIM/
-├── backend/
+rackdcim-pro/
+├── backend/                     # 唯一后端入口
 │   ├── app/
-│   │   ├── api/v1/endpoints/    # 15 router modules
+│   │   ├── api/v1/endpoints/    # router modules
 │   │   ├── core/                # config, db, security, seed
-│   │   ├── domains/layout/      # U-position engine
+│   │   ├── domains/             # layout / domain engines
 │   │   ├── models/              # SQLAlchemy ORM
 │   │   ├── repositories/
 │   │   ├── schemas/             # Pydantic DTOs
 │   │   ├── services/            # Business logic
 │   │   └── main.py
-│   ├── alembic/versions/        # 0001–0016
+│   ├── alembic/versions/
 │   ├── requirements.txt
 │   └── .env.example
-├── frontend/
+├── frontend/                    # 唯一前端入口
 │   └── src/
 │       ├── api/                 # Axios modules
 │       ├── components/

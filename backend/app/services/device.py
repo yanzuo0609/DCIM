@@ -4,6 +4,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.domains.layout.engine import occupied_range
 from app.models.device import (
     Device,
     DeviceBmcProfile,
@@ -26,7 +27,7 @@ from app.repositories.device import (
 )
 from app.repositories.device_contract import DeviceContractRepository
 from app.repositories.infrastructure import RoomRepository
-from app.repositories.rack import RackRepository
+from app.repositories.rack import RackPositionRepository, RackRepository
 from app.services.ip_address import IpAddressService
 from app.schemas.common import PaginationMeta, PaginationParams
 from app.schemas.device import (
@@ -75,18 +76,63 @@ from app.schemas.device import (
 )
 
 
-def _ip_fields_from_device(device: Device) -> tuple[str | None, str | None, str | None]:
-    """Return (system_ip, bmc_ip, vip) from linked ip_address rows."""
+def _ip_fields_from_device(
+    device: Device,
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]:
+    """Return business/BMC/VIP display values and record/segment ids from linked rows.
+
+    Returns:
+        system_ip, bmc_ip, vip,
+        system_ip_id, bmc_ip_id, vip_ip_id,
+        system_segment_id, bmc_segment_id, vip_segment_id
+    """
     rows = list(getattr(device, "ip_addresses", None) or [])
     if not rows:
-        return None, None, None
-    # Prefer first bound record with system_ip
-    primary = rows[0]
-    for row in rows:
-        if row.system_ip:
-            primary = row
+        return None, None, None, None, None, None, None, None, None
+
+    business = next((r for r in rows if (r.label or "") == "business"), None)
+    bmc = next((r for r in rows if (r.label or "") == "bmc"), None)
+    if business is None:
+        business = next((r for r in rows if r.system_ip and (r.label or "") not in {"bmc", "vip"}), None)
+    if bmc is None:
+        # legacy: bmc stored as field on business row
+        pass
+
+    system_ip = business.system_ip if business else None
+    system_ip_id = str(business.id) if business else None
+    system_segment_id = str(business.segment_id) if business and business.segment_id else None
+
+    bmc_ip = bmc.system_ip if bmc else (business.bmc_ip if business else None)
+    bmc_ip_id = str(bmc.id) if bmc else None
+    bmc_segment_id = str(bmc.segment_id) if bmc and bmc.segment_id else None
+
+    vip = None
+    for r in rows:
+        if r.vip:
+            vip = r.vip
             break
-    return primary.system_ip, primary.bmc_ip, primary.vip
+    # vip_ip_id / vip_segment_id: resolve by matching vip string against pool later in enrich if needed
+    return (
+        system_ip,
+        bmc_ip,
+        vip,
+        system_ip_id,
+        bmc_ip_id,
+        None,
+        system_segment_id,
+        bmc_segment_id,
+        None,
+    )
 
 
 def _panel_for_device(device: Device) -> tuple[dict | None, str | None, str | None]:
@@ -110,11 +156,23 @@ def _to_device_response(
     rack_code: str | None = None,
     room_id: str | None = None,
     room_name: str | None = None,
+    vip_ip_id: str | None = None,
+    vip_segment_id: str | None = None,
 ) -> DeviceResponse:
     model = device.model
     mfg = model.manufacturer if model else None
     contract = getattr(device, "contract", None)
-    system_ip, bmc_ip, vip = _ip_fields_from_device(device)
+    (
+        system_ip,
+        bmc_ip,
+        vip,
+        system_ip_id,
+        bmc_ip_id,
+        _vip_id,
+        system_segment_id,
+        bmc_segment_id,
+        _vip_seg,
+    ) = _ip_fields_from_device(device)
     port_layout, network_kind, panel_name = _panel_for_device(device)
     return DeviceResponse(
         id=str(device.id),
@@ -137,6 +195,12 @@ def _to_device_response(
         ip_summary=system_ip,
         bmc_ip=bmc_ip,
         vip=vip,
+        system_ip_id=system_ip_id,
+        bmc_ip_id=bmc_ip_id,
+        vip_ip_id=vip_ip_id,
+        system_segment_id=system_segment_id,
+        bmc_segment_id=bmc_segment_id,
+        vip_segment_id=vip_segment_id,
         rack_id=str(device.rack_id) if device.rack_id else None,
         rack_code=rack_code,
         room_id=room_id,
@@ -169,8 +233,29 @@ class DeviceService:
         self.bmc_repo = DeviceBmcProfileRepository(session)
         self.contract_repo = DeviceContractRepository(session)
         self.rack_repo = RackRepository(session)
+        self.position_repo = RackPositionRepository(session)
         self.room_repo = RoomRepository(session)
         self.ip_service = IpAddressService(session)
+
+    async def _clear_mount_for_delete(
+        self, device: Device, user_id: uuid.UUID | None = None
+    ) -> None:
+        """Clear rack occupancy so a mounted device can be soft-deleted."""
+        if not device.rack_id:
+            return
+        if device.u_position is not None:
+            positions = await self.position_repo.list_by_rack(device.rack_id)
+            target_us = occupied_range(device.u_position, device.height_u)
+            for pos in positions:
+                if pos.u_position in target_us and pos.device_id == device.id:
+                    pos.occupied = False
+                    pos.device_id = None
+                    pos.updated_by = user_id
+        device.rack_id = None
+        device.u_position = None
+        device.status = DeviceStatus.STOCK.value
+        device.updated_by = user_id
+        device.version += 1
 
     async def _resolve_contract_id(self, contract_id: str | None) -> uuid.UUID | None:
         if not contract_id:
@@ -192,8 +277,21 @@ class DeviceService:
                 room = await self.room_repo.get_by_id(rack.room_id)
                 if room:
                     room_name = room.name
+        vip_ip_id = None
+        vip_segment_id = None
+        _, _, vip, *_ = _ip_fields_from_device(device)
+        if vip:
+            vip_row = await self.ip_service.repo.get_by_system_ip(vip)
+            if vip_row:
+                vip_ip_id = str(vip_row.id)
+                vip_segment_id = str(vip_row.segment_id) if vip_row.segment_id else None
         return _to_device_response(
-            device, rack_code=rack_code, room_id=room_id, room_name=room_name
+            device,
+            rack_code=rack_code,
+            room_id=room_id,
+            room_name=room_name,
+            vip_ip_id=vip_ip_id,
+            vip_segment_id=vip_segment_id,
         )
 
     async def _enrich_many(self, devices: list[Device]) -> list[DeviceResponse]:
@@ -277,13 +375,19 @@ class DeviceService:
     async def create_device(
         self, payload: DeviceCreate, user_id: uuid.UUID | None = None
     ) -> DeviceResponse:
-        if await self.repo.get_by_serial(payload.serial_number):
+        existing_sn = await self.repo.get_by_serial_including_deleted(payload.serial_number)
+        if existing_sn and existing_sn.deleted_at is None:
             raise ConflictError("序列号已存在", code=10003)
+        if existing_sn and existing_sn.deleted_at is not None:
+            await self.repo.free_unique_for_soft_deleted(existing_sn)
 
         name = (payload.name or payload.hostname or payload.serial_number).strip()
         hostname = (payload.hostname or name).strip()
-        if await self.repo.get_by_hostname(hostname):
+        existing_hn = await self.repo.get_by_hostname_including_deleted(hostname)
+        if existing_hn and existing_hn.deleted_at is None:
             raise ConflictError("主机名已存在")
+        if existing_hn and existing_hn.deleted_at is not None:
+            await self.repo.free_unique_for_soft_deleted(existing_hn)
 
         model = await self.model_repo.get_by_id(uuid.UUID(payload.device_model_id))
         if not model:
@@ -314,6 +418,14 @@ class DeviceService:
             updated_by=user_id,
         )
         created = await self.repo.create(entity)
+        if payload.system_ip_id or payload.bmc_ip_id or payload.vip_ip_id:
+            await self.ip_service.assign_device_ips(
+                created.id,
+                system_ip_id=payload.system_ip_id,
+                bmc_ip_id=payload.bmc_ip_id,
+                vip_ip_id=payload.vip_ip_id,
+                user_id=user_id,
+            )
         device = await self.repo.get_by_id_with_model(created.id)
         assert device is not None
         return await self._enrich(device)
@@ -382,6 +494,18 @@ class DeviceService:
         device.updated_by = user_id
         device.version += 1
         await self.session.flush()
+
+        data = payload.model_dump(exclude_unset=True)
+        if any(k in data for k in ("system_ip_id", "bmc_ip_id", "vip_ip_id")):
+            await self.ip_service.assign_device_ips(
+                device_id,
+                system_ip_id=data.get("system_ip_id"),
+                bmc_ip_id=data.get("bmc_ip_id"),
+                vip_ip_id=data.get("vip_ip_id"),
+                user_id=user_id,
+                replace_existing=True,
+            )
+
         device = await self.repo.get_by_id_with_model(device_id)
         assert device is not None
         return await self._enrich(device)
@@ -392,10 +516,10 @@ class DeviceService:
         device = await self.repo.get_by_id_with_model(device_id)
         if not device:
             raise NotFoundError("Device not found", code=10003)
-        if device.rack_id:
-            raise ConflictError("请先下架设备再删除")
+        await self._clear_mount_for_delete(device, user_id=user_id)
         await self.ip_service.release_by_device(device_id, user_id=user_id)
         await self.repo.soft_delete(device, deleted_by=user_id)
+        await self.repo.free_unique_for_soft_deleted(device)
 
     async def batch_delete(
         self, payload: DeviceBatchDeleteRequest, user_id: uuid.UUID | None = None
@@ -418,12 +542,14 @@ class DeviceService:
                 result.skipped += 1
                 result.errors.append(f"{raw}: 不存在")
                 continue
-            if device.rack_id:
-                result.skipped += 1
-                result.errors.append(f"{device.hostname}: 已上架，无法删除")
-                continue
             to_delete.append(device_id)
         if to_delete:
+            for device_id in to_delete:
+                device = await self.repo.get_by_id(device_id)
+                if not device:
+                    result.skipped += 1
+                    continue
+                await self._clear_mount_for_delete(device, user_id=user_id)
             await self.ip_service.release_by_devices(to_delete, user_id=user_id)
             for device_id in to_delete:
                 device = await self.repo.get_by_id(device_id)
@@ -431,6 +557,7 @@ class DeviceService:
                     result.skipped += 1
                     continue
                 await self.repo.soft_delete(device, deleted_by=user_id)
+                await self.repo.free_unique_for_soft_deleted(device)
                 result.deleted += 1
         await self.session.flush()
         return result

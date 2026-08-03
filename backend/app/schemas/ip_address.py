@@ -102,15 +102,20 @@ class IpSegmentCreate(BaseModel):
     """按参考台账新建地址段：网络地址 + 掩码位数，自动展开主机地址。"""
 
     application: str | None = Field(default=None, max_length=100, description="应用")
-    network: str = Field(description="IP地址段，如 172.17.0.0")
-    prefix_len: int = Field(default=24, ge=8, le=30, description="掩码位数，如 24")
+    network: str = Field(description="IP地址段，如 172.17.0.0 或 172.17.0.0/24")
+    prefix_len: int | None = Field(default=24, ge=8, le=30, description="掩码位数，如 24")
     gateway: str | None = Field(default=None, max_length=64)
-    reserved_count: int = Field(default=0, ge=0, description="保留个数")
+    reserved_ips: str | list[str] | None = Field(
+        default=None,
+        description="保留地址，支持逗号/空格/换行分隔，或起止范围如 172.17.0.10-172.17.0.12",
+    )
+    reserved_count: int | None = Field(
+        default=None, ge=0, description="兼容旧字段：从段尾保留 N 个（优先使用 reserved_ips）"
+    )
     address_purpose: str | None = Field(default=None, max_length=50, description="地址用途")
     network_type: str | None = Field(default=None, max_length=50, description="网络类型")
     location: str | None = Field(default=None, max_length=100, description="所属机房位置")
     remarks: str | None = Field(default=None, description="备注")
-    start_bmc_ip: str | None = None
     dns: str | None = Field(default=None, max_length=64)
     dns_secondary: str | None = Field(default=None, max_length=64)
 

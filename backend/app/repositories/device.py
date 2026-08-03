@@ -287,6 +287,28 @@ class DeviceRepository(BaseRepository[Device]):
         stmt = select(Device).where(Device.hostname == hostname, Device.deleted_at.is_(None))
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    async def get_by_serial_including_deleted(self, serial_number: str) -> Device | None:
+        stmt = select(Device).where(Device.serial_number == serial_number)
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_hostname_including_deleted(self, hostname: str) -> Device | None:
+        stmt = select(Device).where(Device.hostname == hostname)
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def free_unique_for_soft_deleted(self, device: Device) -> None:
+        """Rename soft-deleted device keys so UNIQUE(serial/hostname) can be reused."""
+        if device.deleted_at is None:
+            return
+        suffix = f"__del__{device.id.hex[:8]}"
+        if not device.serial_number.endswith(suffix):
+            # keep within column length
+            base_sn = device.serial_number[: max(1, 100 - len(suffix))]
+            device.serial_number = f"{base_sn}{suffix}"
+        if not device.hostname.endswith(suffix):
+            base_hn = device.hostname[: max(1, 100 - len(suffix))]
+            device.hostname = f"{base_hn}{suffix}"
+        await self.session.flush()
+
     async def count_all(self) -> int:
         stmt = select(Device).where(Device.deleted_at.is_(None))
         result = await self.session.execute(stmt)

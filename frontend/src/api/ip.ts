@@ -65,14 +65,14 @@ export interface IpSegmentDetail extends IpSegment {
 export interface IpSegmentPayload {
   application?: string | null
   network: string
-  prefix_len: number
+  prefix_len?: number | null
   gateway?: string | null
-  reserved_count?: number
+  reserved_ips?: string | string[] | null
+  reserved_count?: number | null
   address_purpose?: string | null
   network_type?: string | null
   location?: string | null
   remarks?: string | null
-  start_bmc_ip?: string | null
   dns?: string | null
   dns_secondary?: string | null
 }
@@ -141,8 +141,13 @@ export async function listIpSegments(params: Record<string, unknown> = {}) {
   return response.data.data
 }
 
-export async function getIpSegment(id: string): Promise<IpSegmentDetail> {
-  const response = await api.get<ApiResponse<IpSegmentDetail>>(`/ip-addresses/segments/${id}`)
+export async function getIpSegment(
+  id: string,
+  params: { include_addresses?: boolean } = {},
+): Promise<IpSegmentDetail> {
+  const response = await api.get<ApiResponse<IpSegmentDetail>>(`/ip-addresses/segments/${id}`, {
+    params,
+  })
   return unwrap(response)
 }
 

@@ -537,9 +537,21 @@ onMounted(async () => {
       max-height="520"
       :row-class-name="rowClassName"
     >
+      <el-table-column prop="code" label="设备ID" min-width="150" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.code }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="name" label="设备名称" min-width="140" show-overflow-tooltip>
         <template #default="{ row }">
           <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.name }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="配置摘要" min-width="240" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
+            {{ row.summary || '待补充系统盘 / 数据盘' }}
+          </span>
         </template>
       </el-table-column>
       <el-table-column label="设备类型" min-width="120" show-overflow-tooltip>
@@ -553,13 +565,6 @@ onMounted(async () => {
         <template #default="{ row }">
           <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
             {{ modelOf(row) || '—' }}
-          </span>
-        </template>
-      </el-table-column>
-      <el-table-column label="详细参数" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
-            {{ detailOf(row) || '—' }}
           </span>
         </template>
       </el-table-column>
@@ -583,17 +588,24 @@ onMounted(async () => {
           <span v-else class="text-complete">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="配置摘要" min-width="240" show-overflow-tooltip>
+      <el-table-column label="详细参数" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
-            {{ row.summary || '待补充系统盘 / 数据盘' }}
+            {{ detailOf(row) || '—' }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column label="操作" width="88" fixed="right" align="center">
         <template #default="{ row }">
-          <el-button v-if="canUpdate" type="primary" link @click="openEdit(row)">编辑</el-button>
-          <el-button v-if="canDelete" type="danger" link @click="handleDelete(row)">删除</el-button>
+          <el-dropdown trigger="click">
+            <el-button type="primary" link>操作</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
+                <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </template>
       </el-table-column>
     </el-table>
@@ -643,16 +655,6 @@ onMounted(async () => {
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item label="详细参数">
-          <el-input
-            v-model="form.detail_params"
-            type="textarea"
-            :rows="2"
-            maxlength="1000"
-            show-word-limit
-            placeholder="填写详细参数说明，如配置备注等"
-          />
-        </el-form-item>
 
         <div class="param-section-title">系统盘</div>
         <div class="disk-row">
@@ -750,6 +752,16 @@ onMounted(async () => {
             </div>
           </el-form-item>
         </div>
+
+        <div class="param-section-title">详细参数</div>
+        <el-input
+          v-model="form.detail_params"
+          type="textarea"
+          :rows="3"
+          maxlength="1000"
+          show-word-limit
+          placeholder="填写详细参数说明，如配置备注等"
+        />
 
         <div class="param-section-title">其他参数</div>
         <el-input

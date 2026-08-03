@@ -1,8 +1,10 @@
 import ipaddress
 import math
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
@@ -58,9 +60,20 @@ def _iter_ipv4_range(start: str, end: str) -> list[str]:
     return [str(ipaddress.ip_address(i)) for i in range(int(start_ip), int(end_ip) + 1)]
 
 
-def _expand_cidr(network: str, prefix_len: int) -> tuple[ipaddress.IPv4Network, list[str]]:
+def _expand_cidr(network: str, prefix_len: int | None = None) -> tuple[ipaddress.IPv4Network, list[str]]:
+    raw = (network or "").strip()
+    if not raw:
+        raise ValidationError("请填写 IP 地址段", code=10004)
     try:
-        net = ipaddress.ip_network(f"{network.strip()}/{int(prefix_len)}", strict=False)
+        if "/" in raw:
+            net = ipaddress.ip_network(raw, strict=False)
+            if prefix_len is not None and int(prefix_len) != net.prefixlen:
+                # 掩码位数与地址段内 /xx 不一致时，以显式位数为准
+                net = ipaddress.ip_network(f"{net.network_address}/{int(prefix_len)}", strict=False)
+        else:
+            if prefix_len is None:
+                raise ValidationError("请填写掩码位数", code=10004)
+            net = ipaddress.ip_network(f"{raw}/{int(prefix_len)}", strict=False)
     except ValueError as exc:
         raise ValidationError(f"无效地址段或掩码: {exc}", code=10004) from exc
     if not isinstance(net, ipaddress.IPv4Network):
@@ -71,6 +84,58 @@ def _expand_cidr(network: str, prefix_len: int) -> tuple[ipaddress.IPv4Network, 
     if not hosts:
         raise ValidationError("该掩码下没有可用主机地址", code=10004)
     return net, hosts
+
+
+def _parse_reserved_ips(
+    reserved_ips: str | list[str] | None,
+    *,
+    reserved_count: int | None,
+    hosts: list[str],
+) -> set[str]:
+    """解析保留地址：支持单个 IP、逗号/空格/换行分隔，或起止范围 a-b。"""
+    host_set = set(hosts)
+    reserved: set[str] = set()
+
+    tokens: list[str] = []
+    if isinstance(reserved_ips, list):
+        tokens = [str(x).strip() for x in reserved_ips if str(x).strip()]
+    elif isinstance(reserved_ips, str) and reserved_ips.strip():
+        for part in reserved_ips.replace(";", ",").replace("\n", ",").replace(" ", ",").split(","):
+            token = part.strip()
+            if token:
+                tokens.append(token)
+
+    for token in tokens:
+        if "-" in token and token.count("-") == 1 and not token.startswith("-"):
+            start_s, end_s = [x.strip() for x in token.split("-", 1)]
+            try:
+                for ip in _iter_ipv4_range(start_s, end_s):
+                    if ip not in host_set:
+                        raise ValidationError(f"保留地址 {ip} 不在该地址段内", code=10004)
+                    reserved.add(ip)
+            except ValidationError:
+                raise
+            except Exception as exc:
+                raise ValidationError(f"无效保留地址范围: {token}", code=10004) from exc
+        else:
+            try:
+                ip = str(ipaddress.ip_address(token))
+            except ValueError as exc:
+                raise ValidationError(f"无效保留地址: {token}", code=10004) from exc
+            if ip not in host_set:
+                raise ValidationError(f"保留地址 {ip} 不在该地址段内", code=10004)
+            reserved.add(ip)
+
+    if not reserved and reserved_count:
+        count = int(reserved_count)
+        if count < 0:
+            raise ValidationError("保留个数不能为负数", code=10004)
+        if count > len(hosts):
+            raise ValidationError("保留个数不能大于可用主机数", code=10004)
+        # 兼容旧接口：从段尾保留 N 个
+        reserved = set(hosts[-count:]) if count else set()
+
+    return reserved
 
 
 def _prefix_to_dotted(prefix_len: int) -> str:
@@ -155,6 +220,11 @@ class IpAddressService:
         entity.room_id = None
         entity.scope_rack_ids = None
         entity.u_position = None
+        # 释放设备角色绑定时清掉业务/带外/VIP 标记
+        if (entity.label or "") in {"bmc", "business", "vip"} or entity.bmc_ip or entity.vip:
+            entity.bmc_ip = None
+            entity.vip = None
+            entity.label = None
         self._refresh_status(entity)
         entity.updated_by = user_id
         entity.version += 1
@@ -165,14 +235,13 @@ class IpAddressService:
         segment_id: uuid.UUID | None = None,
         user_id: uuid.UUID | None = None,
     ) -> int:
-        """释放已删除设备、或已下架（无 rack）但仍残留绑定的 IP。"""
+        """释放已删除设备上残留的 IP 绑定（库存设备可保留已分配 IP）。"""
         ips = await self.repo.list_device_bound(segment_id=segment_id)
         if not ips:
             return 0
         device_ids = list({ip.device_id for ip in ips if ip.device_id})
         if not device_ids:
             return 0
-        # 含软删设备，用于判断是否应释放
         stmt = select(Device).where(Device.id.in_(device_ids))
         devices = list((await self.session.execute(stmt)).scalars().all())
         device_map = {d.id: d for d in devices}
@@ -180,13 +249,7 @@ class IpAddressService:
         released = 0
         for entity in ips:
             device = device_map.get(entity.device_id) if entity.device_id else None
-            should_release = False
-            if device is None or device.deleted_at is not None:
-                # 设备不存在或已删除
-                should_release = True
-            elif device.rack_id is None:
-                # 已下架：库存态不再占用 IP（含历史残留）
-                should_release = True
+            should_release = device is None or device.deleted_at is not None
             if not should_release:
                 continue
             self._clear_device_bind(entity, user_id)
@@ -194,6 +257,99 @@ class IpAddressService:
         if released:
             await self.session.flush()
         return released
+
+    async def assign_device_ips(
+        self,
+        device_id: uuid.UUID,
+        *,
+        system_ip_id: str | None = None,
+        bmc_ip_id: str | None = None,
+        vip_ip_id: str | None = None,
+        user_id: uuid.UUID | None = None,
+        replace_existing: bool = False,
+    ) -> None:
+        """为设备分配业务 / 带外 / 虚拟 IP。
+
+        - 业务、带外：仅允许空闲地址，独占绑定到设备
+        - 虚拟 IP：可选任意非禁用地址，且不独占，多台设备可共用同一 VIP
+        """
+        device = await self.device_repo.get_by_id_with_model(device_id)
+        if not device:
+            raise NotFoundError("设备不存在")
+
+        if replace_existing:
+            await self.release_by_device(device_id, user_id=user_id)
+
+        async def _load(raw: str | None, *, role: str) -> IpAddress | None:
+            if raw is None or raw == "":
+                return None
+            try:
+                entity_id = uuid.UUID(raw)
+            except ValueError as exc:
+                raise ValidationError(f"无效{role} ID", code=10004) from exc
+            entity = await self.repo.get_by_id_full(entity_id)
+            if not entity:
+                raise NotFoundError(f"{role} 不存在")
+            return entity
+
+        system_entity = await _load(system_ip_id, role="业务IP")
+        bmc_entity = await _load(bmc_ip_id, role="带外管理IP")
+        vip_entity = await _load(vip_ip_id, role="虚拟IP")
+
+        if system_entity:
+            if system_entity.status == IpStatus.DISABLED.value:
+                raise ValidationError("已禁用的业务IP不可分配", code=10004)
+            if system_entity.status not in {IpStatus.FREE.value, IpStatus.RESERVED.value}:
+                if not (
+                    system_entity.device_id == device_id
+                    and system_entity.status == IpStatus.ALLOCATED.value
+                ):
+                    raise ValidationError(
+                        f"业务IP {system_entity.system_ip} 已被占用", code=10004
+                    )
+            await self._apply_bind(
+                system_entity,
+                IpBindRequest(bind_type="device", device_id=str(device_id)),
+                user_id,
+            )
+            system_entity.label = "business"
+            system_entity.status = IpStatus.ALLOCATED.value
+
+        if bmc_entity:
+            if system_entity and bmc_entity.id == system_entity.id:
+                raise ValidationError("带外管理IP不能与业务IP相同", code=10004)
+            if bmc_entity.status == IpStatus.DISABLED.value:
+                raise ValidationError("已禁用的带外管理IP不可分配", code=10004)
+            if bmc_entity.status not in {IpStatus.FREE.value, IpStatus.RESERVED.value}:
+                if not (
+                    bmc_entity.device_id == device_id
+                    and bmc_entity.status == IpStatus.ALLOCATED.value
+                ):
+                    raise ValidationError(
+                        f"带外管理IP {bmc_entity.system_ip} 已被占用", code=10004
+                    )
+            await self._apply_bind(
+                bmc_entity,
+                IpBindRequest(bind_type="device", device_id=str(device_id)),
+                user_id,
+            )
+            bmc_entity.label = "bmc"
+            bmc_entity.status = IpStatus.ALLOCATED.value
+            if system_entity:
+                system_entity.bmc_ip = bmc_entity.system_ip
+
+        if vip_entity:
+            if vip_entity.status == IpStatus.DISABLED.value:
+                raise ValidationError("已禁用的虚拟IP不可分配", code=10004)
+            target = system_entity or bmc_entity
+            if target is None:
+                raise ValidationError(
+                    "分配虚拟IP前请先分配业务地址或带外地址", code=10004
+                )
+            # 不修改 vip_entity 的绑定/状态，允许多台设备共用
+            target.vip = vip_entity.system_ip
+
+        await self.session.flush()
 
     async def _segment_counts(self, segment_id: uuid.UUID) -> dict[str, int]:
         return await self.repo.count_by_segment_status(segment_id)
@@ -357,16 +513,20 @@ class IpAddressService:
         )
         return result, pagination
 
-    async def get_segment(self, segment_id: uuid.UUID) -> IpSegmentDetail:
+    async def get_segment(
+        self, segment_id: uuid.UUID, *, include_addresses: bool = True
+    ) -> IpSegmentDetail:
         segment = await self.segment_repo.get_by_id_active(segment_id)
         if not segment:
             raise NotFoundError("地址段不存在")
         # 打开详情前清理：已删除 / 已下架设备对应的 IP 绑定
         await self.reconcile_stale_device_binds(segment_id=segment_id)
-        addresses = await self.repo.list_by_segment(segment_id)
-        addresses.sort(key=lambda x: _ip_sort_key(x.system_ip))
         counts = await self._segment_counts(segment_id)
         base = self._to_segment_response(segment, counts)
+        if not include_addresses:
+            return IpSegmentDetail(**base.model_dump(), addresses=[])
+        addresses = await self.repo.list_by_segment(segment_id)
+        addresses.sort(key=lambda x: _ip_sort_key(x.system_ip))
         return IpSegmentDetail(
             **base.model_dump(),
             addresses=[self._to_response(a) for a in addresses],
@@ -376,8 +536,11 @@ class IpAddressService:
         self, payload: IpSegmentCreate, user_id: uuid.UUID | None = None
     ) -> IpSegmentDetail:
         net, hosts = _expand_cidr(payload.network, payload.prefix_len)
-        if payload.reserved_count > len(hosts):
-            raise ValidationError("保留个数不能大于可用主机数", code=10004)
+        reserved_set = _parse_reserved_ips(
+            payload.reserved_ips,
+            reserved_count=payload.reserved_count,
+            hosts=hosts,
+        )
         gateway = payload.gateway.strip() if payload.gateway else None
         if gateway:
             try:
@@ -391,7 +554,8 @@ class IpAddressService:
                 except ValueError as exc:
                     raise ValidationError(f"无效{label}: {exc}", code=10004) from exc
 
-        dotted = _prefix_to_dotted(payload.prefix_len)
+        prefix_len = int(net.prefixlen)
+        dotted = _prefix_to_dotted(prefix_len)
         app = payload.application.strip() if payload.application else None
         purpose = payload.address_purpose.strip() if payload.address_purpose else None
         network_type = payload.network_type.strip() if payload.network_type else None
@@ -399,23 +563,12 @@ class IpAddressService:
         remarks = payload.remarks.strip() if payload.remarks else None
         dns = payload.dns.strip() if payload.dns else None
         dns_secondary = payload.dns_secondary.strip() if payload.dns_secondary else None
-        name = f"{app + ' · ' if app else ''}{net.network_address}/{payload.prefix_len}"
-
-        bmc_ips: list[str | None] = [None] * len(hosts)
-        if payload.start_bmc_ip and payload.start_bmc_ip.strip():
-            try:
-                start_bmc = ipaddress.ip_address(payload.start_bmc_ip.strip())
-            except ValueError as exc:
-                raise ValidationError(f"无效 BMC 起始 IP: {exc}", code=10004) from exc
-            bmc_ips = [str(ipaddress.ip_address(int(start_bmc) + i)) for i in range(len(hosts))]
-
-        # 从段尾开始标记保留地址，避免占用靠前常用主机位
-        reserved_set = set(hosts[-payload.reserved_count :]) if payload.reserved_count else set()
+        name = f"{app + ' · ' if app else ''}{net.network_address}/{prefix_len}"
 
         segment = IpSegment(
             application=app,
             network=str(net.network_address),
-            prefix_len=payload.prefix_len,
+            prefix_len=prefix_len,
             gateway=gateway,
             address_purpose=purpose,
             network_type=network_type,
@@ -424,7 +577,7 @@ class IpAddressService:
             name=name[:100],
             start_ip=hosts[0],
             end_ip=hosts[-1],
-            netmask=str(payload.prefix_len),
+            netmask=str(prefix_len),
             dns=dns,
             dns_secondary=dns_secondary,
             application_type=purpose,
@@ -435,21 +588,51 @@ class IpAddressService:
         )
         created_segment = await self.segment_repo.create(segment)
 
+        existing_map = await self.repo.map_by_system_ips(hosts, include_deleted=True)
         created = 0
         skipped = 0
-        for idx, system_ip in enumerate(hosts):
-            if await self.repo.get_by_system_ip(system_ip):
-                skipped += 1
-                continue
+        now = datetime.now(timezone.utc)
+
+        for system_ip in hosts:
             status = (
                 IpStatus.RESERVED.value
                 if system_ip in reserved_set
                 else IpStatus.FREE.value
             )
+            existing = existing_map.get(system_ip)
+            if existing is not None and existing.deleted_at is None:
+                skipped += 1
+                continue
+            if existing is not None and existing.deleted_at is not None:
+                # 复用软删记录，避免 UNIQUE(system_ip) 冲突导致 500
+                existing.deleted_at = None
+                existing.deleted_by = None
+                existing.segment_id = created_segment.id
+                existing.bmc_ip = None
+                existing.vip = None
+                existing.netmask = dotted
+                existing.gateway = gateway
+                existing.dns = dns
+                existing.dns_secondary = dns_secondary
+                existing.label = None
+                existing.description = remarks
+                existing.status = status
+                existing.bind_type = IpBindType.NONE.value
+                existing.device_id = None
+                existing.rack_id = None
+                existing.room_id = None
+                existing.scope_rack_ids = None
+                existing.u_position = None
+                existing.updated_by = user_id
+                existing.updated_at = now
+                existing.version = (existing.version or 0) + 1
+                created += 1
+                continue
+
             entity = IpAddress(
                 segment_id=created_segment.id,
                 system_ip=system_ip,
-                bmc_ip=bmc_ips[idx],
+                bmc_ip=None,
                 vip=None,
                 netmask=dotted,
                 gateway=gateway,
@@ -462,7 +645,7 @@ class IpAddressService:
                 created_by=user_id,
                 updated_by=user_id,
             )
-            await self.repo.create(entity)
+            self.session.add(entity)
             created += 1
 
         if created == 0:
@@ -470,8 +653,15 @@ class IpAddressService:
             raise ValidationError(
                 f"地址段创建失败：可用地址均已存在（跳过 {skipped}）", code=10004
             )
-        await self.session.flush()
-        return await self.get_segment(created_segment.id)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            raise ValidationError(
+                "地址段创建失败：部分 IP 已存在（含历史软删除冲突），请检查后重试",
+                code=10004,
+            ) from exc
+        # 创建响应不附带全量地址，避免 /24 等大段序列化过慢；前端会再拉详情
+        return await self.get_segment(created_segment.id, include_addresses=False)
 
     async def update_segment(
         self,
@@ -554,6 +744,7 @@ class IpAddressService:
         room_id: uuid.UUID | None = None,
         rack_id: uuid.UUID | None = None,
         device_id: uuid.UUID | None = None,
+        segment_id: uuid.UUID | None = None,
         bind_type: str | None = None,
         status: str | None = None,
     ) -> tuple[list[IpAddressResponse], PaginationMeta]:
@@ -564,6 +755,8 @@ class IpAddressService:
             filters["rack_id"] = rack_id
         if device_id:
             filters["device_id"] = device_id
+        if segment_id:
+            filters["segment_id"] = segment_id
         if bind_type:
             filters["bind_type"] = bind_type
         if status:

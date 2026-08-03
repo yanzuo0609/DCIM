@@ -229,12 +229,19 @@ onMounted(loadData)
           </template>
         </el-table-column>
         <el-table-column prop="description" label="描述" min-width="180" show-overflow-tooltip />
-        <el-table-column label="操作" width="320" fixed="right">
+        <el-table-column label="操作" width="88" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button type="primary" link @click="openRooms(row)">进入机房管理</el-button>
-            <el-button type="primary" link @click="openSimulate(row)">3D 仿真</el-button>
-            <el-button v-if="canUpdate" type="primary" link @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="canDelete" type="danger" link @click="handleDelete(row)">删除</el-button>
+            <el-dropdown trigger="click">
+              <el-button type="primary" link>操作</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="openRooms(row)">进入机房管理</el-dropdown-item>
+                  <el-dropdown-item @click="openSimulate(row)">3D 仿真</el-dropdown-item>
+                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
+                  <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>

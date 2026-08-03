@@ -149,6 +149,44 @@ export function formatItemLabel(item: DeviceContractItem): string {
   return parts.filter(Boolean).join(' / ')
 }
 
+/** 合同明细唯一键，用于选择器 v-model */
+export function contractItemKey(item: DeviceContractItem): string {
+  return [
+    normalizeItemKind(item.item_kind),
+    item.device_name || '',
+    item.device_model_name || '',
+    item.manufacturer_name || '',
+  ].join('||')
+}
+
+export function findContractItem(
+  contract: DeviceContract | null | undefined,
+  key: string | null | undefined,
+): DeviceContractItem | null {
+  if (!contract || !key) return null
+  const items = contract.device_items?.length
+    ? contract.device_items
+    : []
+  return items.find((it) => contractItemKey(it) === key) || null
+}
+
+export function matchContractItemKey(
+  contract: DeviceContract | null | undefined,
+  deviceName: string | null | undefined,
+  modelName?: string | null,
+): string {
+  if (!contract || !deviceName) return ''
+  const items = contract.device_items || []
+  const name = deviceName.trim()
+  const model = (modelName || '').trim()
+  const exact = items.find(
+    (it) => it.device_name === name && (!model || it.device_model_name === model),
+  )
+  if (exact) return contractItemKey(exact)
+  const byName = items.find((it) => it.device_name === name)
+  return byName ? contractItemKey(byName) : ''
+}
+
 export function formatContractItems(contract: {
   device_items?: DeviceContractItem[] | null
   device_names?: string[] | null
