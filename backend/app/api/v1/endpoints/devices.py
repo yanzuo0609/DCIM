@@ -16,6 +16,7 @@ from app.schemas.common import ApiResponse, PaginatedData, PaginatedResponse, Pa
 from app.schemas.device import (
     DeviceBatchDeleteRequest,
     DeviceBatchDeleteResult,
+    DeviceBatchNextIndexResponse,
     DeviceCreate,
     DeviceModelCreate,
     DeviceModelPanelApply,
@@ -127,6 +128,23 @@ async def batch_delete_devices(
     current_user: Annotated[User, Depends(require_permissions("device:delete"))],
 ) -> ApiResponse[DeviceBatchDeleteResult]:
     data = await service.batch_delete(payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.get(
+    "/devices/next-batch-index",
+    response_model=ApiResponse[DeviceBatchNextIndexResponse],
+)
+async def suggest_batch_start_index(
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    _: Annotated[User, Depends(require_permissions("device:view"))],
+    hostname_prefix: str = Query(default="", max_length=100),
+    serial_prefix: str = Query(default="", max_length=100),
+) -> ApiResponse[DeviceBatchNextIndexResponse]:
+    data = await service.suggest_batch_start_index(
+        hostname_prefix=hostname_prefix,
+        serial_prefix=serial_prefix,
+    )
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

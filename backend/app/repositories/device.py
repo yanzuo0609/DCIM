@@ -277,6 +277,19 @@ class DeviceRepository(BaseRepository[Device]):
         )
         return list((await self.session.execute(stmt)).scalars().unique().all()), int(total or 0)
 
+    async def list_values_by_prefix(
+        self, *, field: str, prefix: str, limit: int = 5000
+    ) -> list[str]:
+        """List hostname or serial_number values that start with prefix (active only)."""
+        col = Device.hostname if field == "hostname" else Device.serial_number
+        stmt = (
+            select(col)
+            .where(Device.deleted_at.is_(None), col.like(f"{prefix}%"))
+            .limit(limit)
+        )
+        rows = (await self.session.execute(stmt)).scalars().all()
+        return [str(v) for v in rows if v]
+
     async def get_by_serial(self, serial_number: str) -> Device | None:
         stmt = select(Device).where(
             Device.serial_number == serial_number, Device.deleted_at.is_(None)

@@ -37,9 +37,13 @@ def validate_mount(
     positions = occupied_range(u_position, height_u)
     conflicts: list[int] = []
     for u in positions:
-        occupant = occupied_map.get(u)
-        if occupant and occupant != exclude_device_id:
-            conflicts.append(u)
+        if u not in occupied_map:
+            continue
+        occupant = occupied_map[u]
+        # occupied_map 含已占用 U（device_id 可为 None 的残留占用）
+        if exclude_device_id is not None and occupant == exclude_device_id:
+            continue
+        conflicts.append(u)
 
     if conflicts:
         return LayoutValidation(
@@ -66,7 +70,7 @@ def find_first_available(
             blocked = False
             for g in range(1, gap_u + 1):
                 prev = u - g
-                if prev >= 1 and occupied_map.get(prev):
+                if prev >= 1 and prev in occupied_map:
                     blocked = True
                     break
             if blocked:

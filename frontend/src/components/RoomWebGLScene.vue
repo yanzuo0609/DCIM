@@ -112,7 +112,7 @@ let editBaseline: EditSnapshot | null = null
 
 const canUndo = computed(() => sceneEditMode.value && undoStack.value.length > 0)
 
-/** 编号方向：左编号 / 右编号（标签位置 + 连续编号列序） */
+/** 编号方向：左编号=从左到右；右编号=从右到左 */
 const labelSide = ref<'left' | 'right'>('left')
 /** 编号显隐模式 */
 const labelVisMode = ref<'all' | 'hide_all' | 'row_only' | 'row_hide'>('all')
@@ -145,10 +145,29 @@ const selectedRack = computed(() =>
   layout.value?.racks.find((r) => r.id === selectedRackId.value) || null,
 )
 
+/** 当前选中的场景格位（优先点击格子，其次实体机柜 row/col） */
 const selectedSlotPos = computed(() => {
+  if (selectedCell.value?.kind === 'rack') {
+    return { row: selectedCell.value.row, col: selectedCell.value.col }
+  }
   const rack = selectedRack.value
   if (!rack) return null
   return { row: rack.row_no, col: rack.column_no }
+})
+
+/** 与三维顶牌一致的展示编号（slot_codes 优先） */
+function slotDisplayCode(row: number, col: number): string {
+  const codes = layout.value?.slot_codes || []
+  return (codes[row - 1]?.[col - 1] || '').trim()
+}
+
+const tipDisplayCode = computed(() => {
+  const pos = selectedSlotPos.value
+  if (pos) {
+    const code = slotDisplayCode(pos.row, pos.col)
+    if (code) return code
+  }
+  return selectedRack.value?.code || ''
 })
 
 const selectedCellLabel = computed(() => {
@@ -373,16 +392,18 @@ function makeRackLabel(
     e.preventDefault()
     e.stopPropagation()
     if (sceneEditMode.value || rackDialogVisible.value) return
-    if (!rackId) {
-      ElMessage.info('该机柜位尚未关联实体机柜')
-      return
+    const hit = {
+      cellType: 'rack' as const,
+      rackId: rackId || undefined,
+      row,
+      col,
     }
-    const rack = layout.value?.racks.find((r) => r.id === rackId) || null
+    const rack = resolveRackFromHit(hit)
     if (!rack) {
-      ElMessage.info('未找到机柜数据')
+      ElMessage.info('该机柜位尚未关联实体机柜，请先保存布局或在机房管理中创建')
       return
     }
-    selectRack(rack)
+    selectRack(rack, { row, col })
     void openRackDialog(rack)
   })
   const label = new CSS2DObject(el)
@@ -420,6 +441,7 @@ function makeRackMesh(rack: RoomMonitorRack, code: string, row: number, col: num
   g.userData.cellType = 'rack'
   g.userData.row = row
   g.userData.col = col
+  g.userData.displayCode = code
 
   const bodyMat = new THREE.MeshStandardMaterial({
     color: 0x2b2d31,
@@ -1232,6 +1254,28 @@ function buildSceneContent(data: RoomMonitorLayout, resetCameraPose = false) {
   const ventMat = new THREE.MeshStandardMaterial({ color: 0x8a939e, roughness: 0.7 })
   const codes = data.slot_codes || []
   const sel = selectedCell.value
+  /**
+   * 绑定规则（与机房二维布局一致，并兼容「稠密 column_no」）：
+   * 1) 优先 slot_codes 编号（RTL 编号时格子列 ≠ rack.column_no）
+   * 2) 其次排内第 N 个机柜位 ↔ 按 column_no 排序的第 N 台柜（历史稠密列号）
+   * 3) 最后才按网格 (row,col) 精确位置
+   */
+  const byPos = new Map(data.racks.map((r) => [`${r.row_no}-${r.column_no}`, r]))
+  const byCode = new Map(
+    data.racks
+      .filter((r) => (r.code || '').trim())
+      .map((r) => [(r.code || '').trim().toLowerCase(), r]),
+  )
+  const claimed = new Set<string>()
+  const racksByRow = new Map<number, RoomMonitorRack[]>()
+  for (const r of data.racks) {
+    const list = racksByRow.get(r.row_no) || []
+    list.push(r)
+    racksByRow.set(r.row_no, list)
+  }
+  for (const list of racksByRow.values()) {
+    list.sort((a, b) => a.column_no - b.column_no || a.code.localeCompare(b.code))
+  }
 
   for (let row = 1; row <= rows; row++) {
     const rowIdx = row - 1
@@ -1243,9 +1287,7 @@ function buildSceneContent(data: RoomMonitorLayout, resetCameraPose = false) {
     vent.position.set(0, 0.02, z + RACK_D / 2 + 0.45)
     roomGroup.add(vent)
 
-    const rowRacks = data.racks
-      .filter((r) => r.row_no === row)
-      .sort((a, b) => a.column_no - b.column_no)
+    const rowRacks = racksByRow.get(row) || []
     const plans = planSceneRow(sl, row)
 
     for (const plan of plans) {
@@ -1255,9 +1297,23 @@ function buildSceneContent(data: RoomMonitorLayout, resetCameraPose = false) {
         `R${String(row).padStart(2, '0')}${String(plan.col).padStart(2, '0')}`
 
       if (plan.kind === 'rack') {
-        const rack = rowRacks[plan.rackIndex ?? -1]
-        // 严格优先场景 slot_codes（编号方向改的是格子码，不能被 rack.code 盖住）
         const slotCode = (codes[rowIdx]?.[plan.col - 1] || '').trim()
+        const posRack = byPos.get(`${row}-${plan.col}`) || null
+        const codeRack = slotCode ? byCode.get(slotCode.toLowerCase()) || null : null
+        const denseRack =
+          plan.rackIndex != null && plan.rackIndex >= 0
+            ? rowRacks[plan.rackIndex] || null
+            : null
+        let rack: RoomMonitorRack | null = null
+        if (codeRack && !claimed.has(codeRack.id)) {
+          rack = codeRack
+        } else if (denseRack && !claimed.has(denseRack.id)) {
+          rack = denseRack
+        } else if (posRack && !claimed.has(posRack.id)) {
+          rack = posRack
+        }
+        if (rack) claimed.add(rack.id)
+
         const displayCode = slotCode || (rack?.code || '').trim() || code
         if (rack) {
           const mesh = makeRackMesh(rack, displayCode, row, plan.col)
@@ -1533,7 +1589,7 @@ function undoLastEdit() {
 }
 
 /**
- * 按「单排」强制重编号：左编号从该排左端起，右编号从该排右端起。
+ * 按「单排」强制重编号：左编号从左到右，右编号从右到左。
  * 删除/替换机柜后调用，消除断号；序号从「连续编号」起始值起。
  */
 function renumberRowsAfterEdit(rows: number[]) {
@@ -1559,7 +1615,7 @@ function renumberRowsAfterEdit(rows: number[]) {
   layout.value = { ...data, slot_codes: nextCodes }
 }
 
-/** 手动更新全部机柜编号（按当前编号方向与前缀） */
+/** 手动更新全部机柜编号（按当前编号方向） */
 function updateAllRackCodes() {
   if (!sceneEditMode.value) {
     ElMessage.warning('请先点击「编辑场景」')
@@ -1578,8 +1634,8 @@ function updateAllRackCodes() {
   scheduleRebuild(false)
   ElMessage.success(
     labelSide.value === 'right'
-      ? '已按右编号更新全部机柜编号（未保存）'
-      : '已按左编号更新全部机柜编号（未保存）',
+      ? '已按从右到左更新全部机柜编号（未保存）'
+      : '已按从左到右更新全部机柜编号（未保存）',
   )
 }
 
@@ -1691,8 +1747,8 @@ async function applyContinuousCodes() {
   scheduleRebuild(false)
   ElMessage.success(
     fromRight
-      ? '已按右编号预览（每排从右端起），请保存布局'
-      : '已按左编号预览（每排从左端起），请保存布局',
+      ? '已按从右到左预览连续编号，请保存布局'
+      : '已按从左到右预览连续编号，请保存布局',
   )
 }
 
@@ -1704,9 +1760,12 @@ async function saveSelectedCode() {
     ElMessage.warning('标号不能为空')
     return
   }
+  const pos = selectedSlotPos.value
+  const row = pos?.row ?? rack.row_no
+  const col = pos?.col ?? rack.column_no
   savingCode.value = true
   try {
-    await saveSlotCode(rack.row_no, rack.column_no, next)
+    await saveSlotCode(row, col, next)
     ElMessage.success('标号已更新')
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '保存失败')
@@ -1715,11 +1774,16 @@ async function saveSelectedCode() {
   }
 }
 
-function selectRack(rack: RoomMonitorRack | null) {
+function selectRack(
+  rack: RoomMonitorRack | null,
+  cell?: { row: number; col: number } | null,
+) {
   if (!rack) return
   selectedRackId.value = rack.id
-  editingCode.value = rack.code
-  selectedCell.value = null
+  const row = cell?.row ?? rack.row_no
+  const col = cell?.col ?? rack.column_no
+  selectedCell.value = { row, col, kind: 'rack' }
+  editingCode.value = slotDisplayCode(row, col) || rack.code
   refreshFixedSelection()
   for (const [id, obj] of rackMeshes) {
     obj.traverse((child) => {
@@ -1734,6 +1798,7 @@ function selectRack(rack: RoomMonitorRack | null) {
       }
     })
   }
+  refreshCellSelection()
 }
 
 function resolveRackFromHit(hit: {
@@ -1743,14 +1808,44 @@ function resolveRackFromHit(hit: {
   col?: number
 } | null): RoomMonitorRack | null {
   if (!hit || !layout.value) return null
+
   if (hit.rackId) {
-    return layout.value.racks.find((r) => r.id === hit.rackId) || null
+    const byId = layout.value.racks.find((r) => r.id === hit.rackId)
+    if (byId) return byId
   }
-  if (hit.cellType === 'rack' && hit.row != null && hit.col != null) {
-    return (
-      layout.value.racks.find((r) => r.row_no === hit.row && r.column_no === hit.col) || null
+
+  if (hit.row == null || hit.col == null) return null
+
+  // 格子顶牌编号（RTL 时与 rack.column_no 不一致，必须优先）
+  const slotCode = slotDisplayCode(hit.row, hit.col)
+  if (slotCode) {
+    const byCode = layout.value.racks.find(
+      (r) => (r.code || '').trim().toLowerCase() === slotCode.toLowerCase(),
     )
+    if (byCode) return byCode
   }
+
+  // 网格坐标恰好等于 rack.row_no/column_no
+  const byPos = layout.value.racks.find(
+    (r) => r.row_no === hit.row && r.column_no === hit.col,
+  )
+  if (byPos) return byPos
+
+  // 稠密列号：排内第 N 个机柜位 ↔ column_no 排序第 N 台
+  const sl = sceneLayout.value
+  if (sl && hit.cellType === 'rack') {
+    const plan = planSceneRow(sl, hit.row).find(
+      (p) => p.kind === 'rack' && p.col === hit.col,
+    )
+    if (plan?.rackIndex != null && plan.rackIndex >= 0) {
+      const rowRacks = layout.value.racks
+        .filter((r) => r.row_no === hit.row)
+        .sort((a, b) => a.column_no - b.column_no || a.code.localeCompare(b.code))
+      const dense = rowRacks[plan.rackIndex]
+      if (dense) return dense
+    }
+  }
+
   return null
 }
 
@@ -1767,7 +1862,9 @@ function onCanvasDblClick(event: MouseEvent) {
     ElMessage.info('该机柜位尚未关联实体机柜，请先保存布局或在机房管理中创建')
     return
   }
-  selectRack(rack)
+  const cell =
+    hit.row != null && hit.col != null ? { row: hit.row, col: hit.col } : null
+  selectRack(rack, cell)
   void openRackDialog(rack)
 }
 
@@ -1788,6 +1885,10 @@ function resolveCellAt(row: number, col: number): {
         rackId = id
         break
       }
+    }
+    if (!rackId) {
+      const rack = resolveRackFromHit({ cellType: 'rack', row, col })
+      rackId = rack?.id
     }
   }
   return { cellType: kind, rackId, row, col }
@@ -2009,7 +2110,7 @@ function selectSceneCell(row: number, col: number, kind: CellKind, rackId?: stri
     const rack = layout.value?.racks.find((r) => r.id === rackId) || null
     if (rack) {
       selectedRackId.value = rack.id
-      editingCode.value = rack.code
+      editingCode.value = slotDisplayCode(row, col) || rack.code
     }
   } else if (kind === 'rack') {
     selectedRackId.value = null
@@ -2199,7 +2300,6 @@ function onLabelSideChange() {
   const allRows = Array.from({ length: sl.rows }, (_, i) => i + 1)
   renumberRowsAfterEdit(allRows)
   if (sceneEditMode.value) dirty.value = true
-  // 立即重建，确保标签位置 + 号码同步（右编号从右端起）
   if (rebuildRaf) cancelAnimationFrame(rebuildRaf)
   rebuildRaf = 0
   buildSceneContent(layout.value, false)
@@ -2207,6 +2307,11 @@ function onLabelSideChange() {
     applyLabelVisibility()
     refreshCellSelection()
   })
+  ElMessage.success(
+    labelSide.value === 'right'
+      ? '已切换为从右到左编号（未保存）'
+      : '已切换为从左到右编号（未保存）',
+  )
 }
 
 function onPointerClick(event: PointerEvent) {
@@ -2273,7 +2378,9 @@ function onPointerClick(event: PointerEvent) {
 
   if (hit.rackId || hit.cellType === 'rack') {
     const rack = resolveRackFromHit(hit)
-    selectRack(rack)
+    const cell =
+      hit.row != null && hit.col != null ? { row: hit.row, col: hit.col } : null
+    selectRack(rack, cell)
   }
 }
 
@@ -2314,7 +2421,9 @@ async function openRackDialog(rack?: RoomMonitorRack | null) {
     return
   }
   selectedRackId.value = target.id
-  editingCode.value = target.code
+  const pos = selectedSlotPos.value
+  editingCode.value =
+    (pos ? slotDisplayCode(pos.row, pos.col) : '') || target.code
   rackDialogVisible.value = true
   setLabelsHidden(true)
   rackDialogLoading.value = true
@@ -2730,11 +2839,11 @@ defineExpose({
           <select
             v-model="labelSide"
             class="batch-select"
-            title="左编号：该排从左端起编；右编号：从右端起编"
+            title="左编号：从左到右；右编号：从右到左（反方向布局）"
             @change="onLabelSideChange"
           >
-            <option value="left">左编号</option>
-            <option value="right">右编号</option>
+            <option value="left">从左到右</option>
+            <option value="right">从右到左</option>
           </select>
         </label>
 
@@ -2801,7 +2910,7 @@ defineExpose({
     </div>
 
     <aside v-if="selectedRack && !sceneEditMode" class="tip-card">
-      <strong>{{ selectedRack.code }}</strong>
+      <strong>{{ tipDisplayCode || selectedRack.code }}</strong>
       <span>{{ selectedRack.name }}</span>
       <span v-if="selectedSlotPos">
         位置 第{{ selectedSlotPos.row }}排 / 第{{ selectedSlotPos.col }}列
@@ -2834,7 +2943,7 @@ defineExpose({
         <div class="rack-dialog" role="dialog" aria-modal="true">
           <header>
             <div class="rack-dialog-title">
-              <h4>{{ rackDialogRack?.code || selectedRack?.code || '机柜布局' }}</h4>
+              <h4>{{ tipDisplayCode || rackDialogRack?.code || selectedRack?.code || '机柜布局' }}</h4>
               <p v-if="rackDialogRack || selectedRack">
                 {{ rackDialogRack?.name || selectedRack?.name }}
                 <template v-if="selectedSlotPos">
@@ -2856,7 +2965,7 @@ defineExpose({
             </div>
             <div class="rack-dialog-cabinet">
               <RackCabinet
-                :code="rackDialogRack.code"
+                :code="tipDisplayCode || rackDialogRack.code"
                 :total-u="rackDialogRack.total_u"
                 :slots="rackDialogSlots"
                 :total-power="rackDialogPower"

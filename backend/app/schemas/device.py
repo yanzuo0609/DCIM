@@ -762,6 +762,16 @@ class BatchMountNewDevice(BaseModel):
     contract_id: str | None = None
 
 
+class DeviceBatchNextIndexResponse(BaseModel):
+    """批量新建时建议的起始序号（基于已有主机名/序列号前缀）。"""
+
+    start_index: int = 1
+    hostname_max: int = 0
+    serial_max: int = 0
+    hostname_prefix: str = ""
+    serial_prefix: str = ""
+
+
 class BatchMountRequest(BaseModel):
     room_id: str
     device_ids: list[str] = Field(default_factory=list)

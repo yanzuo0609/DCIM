@@ -300,6 +300,25 @@ export async function listDevices(params: Record<string, unknown> = {}) {
   return response.data.data
 }
 
+export interface DeviceBatchNextIndex {
+  start_index: number
+  hostname_max: number
+  serial_max: number
+  hostname_prefix: string
+  serial_prefix: string
+}
+
+/** 按主机名/序列号前缀建议批量新建起始序号 */
+export async function suggestBatchStartIndex(params: {
+  hostname_prefix?: string
+  serial_prefix?: string
+}): Promise<DeviceBatchNextIndex> {
+  const response = await api.get<ApiResponse<DeviceBatchNextIndex>>('/devices/next-batch-index', {
+    params,
+  })
+  return unwrap(response)
+}
+
 export async function getDevice(id: string): Promise<Device> {
   const response = await api.get<ApiResponse<Device>>(`/devices/${id}`)
   return unwrap(response)

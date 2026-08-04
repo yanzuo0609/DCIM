@@ -5,6 +5,7 @@ import {
   batchMountDevices,
   createDeviceModel,
   createDeviceType,
+  suggestBatchStartIndex,
   type BatchMountNewDevice,
   type DeviceModel,
   type DeviceType,
@@ -92,6 +93,11 @@ const form = reactive({
   gap_u: 1,
   per_rack_count: 1,
 })
+
+/** 用户是否手改过起始序号；前缀变化时会重新自动建议 */
+const startIndexManual = ref(false)
+const startIndexHint = ref('')
+let startIndexSeq = 0
 
 const previewRows = ref<BatchMountNewDevice[]>([])
 const previewLines = ref<string[]>([])
@@ -285,7 +291,7 @@ function buildDeviceRows(): BatchMountNewDevice[] {
     const idx = form.start_index + i
     const hostname = `${form.name_prefix}${padIndex(idx)}`
     rows.push({
-      // 设备名称用合同明细名称，便于采购汇总按品类统计已关联
+      // 设备名称用合同明细名称，便于采购汇总按品类统计已上架关联数
       name: contractName || hostname,
       hostname,
       serial_number: `${form.serial_prefix}${padIndex(idx)}`,
@@ -520,6 +526,8 @@ function resetForm() {
   form.name_prefix = 'SRV'
   form.serial_prefix = 'SN'
   form.start_index = 1
+  startIndexManual.value = false
+  startIndexHint.value = ''
   form.device_model_id = ''
   form.device_type_id = props.types[0]?.id || null
   form.height_u = 1
@@ -549,8 +557,47 @@ function resetForm() {
   mountRacks.value = []
 }
 
+async function syncStartIndexFromPrefixes() {
+  const hn = form.name_prefix.trim()
+  const sn = form.serial_prefix.trim()
+  if (!hn && !sn) {
+    startIndexHint.value = ''
+    return
+  }
+  const seq = ++startIndexSeq
+  try {
+    const data = await suggestBatchStartIndex({
+      hostname_prefix: hn,
+      serial_prefix: sn,
+    })
+    if (seq !== startIndexSeq) return
+    if (!startIndexManual.value) {
+      form.start_index = data.start_index
+    }
+    const parts: string[] = []
+    if (data.hostname_max > 0) parts.push(`设备编号最大 ${hn}${padIndex(data.hostname_max)}`)
+    if (data.serial_max > 0) parts.push(`序列号最大 ${sn}${padIndex(data.serial_max)}`)
+    if (parts.length) {
+      startIndexHint.value = `已存在：${parts.join('，')} → 建议起始 ${data.start_index}`
+    } else {
+      startIndexHint.value = '该前缀下暂无设备，起始序号为 1'
+    }
+  } catch {
+    if (seq !== startIndexSeq) return
+    startIndexHint.value = ''
+  }
+}
+
+function onStartIndexManualChange() {
+  startIndexManual.value = true
+}
+
 function syncPerRackCountDefault() {
   form.per_rack_count = Math.max(1, suggestedPerRackCount.value)
+}
+
+function onPerRackCountChange(val: number | undefined) {
+  form.per_rack_count = Math.max(1, Number(val) || 1)
 }
 
 watch(
@@ -558,6 +605,16 @@ watch(
   (open) => {
     if (!open) return
     resetForm()
+    void syncStartIndexFromPrefixes()
+  },
+)
+
+watch(
+  () => [form.name_prefix, form.serial_prefix] as const,
+  () => {
+    if (!props.value) return
+    startIndexManual.value = false
+    void syncStartIndexFromPrefixes()
   },
 )
 
@@ -566,13 +623,6 @@ watch(
   (id) => {
     const model = props.models.find((m) => m.id === id)
     if (model) form.height_u = model.height_u
-  },
-)
-
-watch(
-  () => [form.height_u, form.start_u, form.gap_u, form.rack_ids.join(',')] as const,
-  () => {
-    if (step.value === 2) syncPerRackCountDefault()
   },
 )
 
@@ -698,7 +748,6 @@ watch(
     }
     form.rack_ids = []
     await refreshMountRacks()
-    syncPerRackCountDefault()
   },
 )
 
@@ -806,7 +855,7 @@ function buildPreview() {
     `机房：${roomName}`,
     `采购合同：${contractNo}`,
     `合同设备：${contractDevice}`,
-    `新建设备：${previewRows.value.length} 台（主机名 ${form.name_prefix}${padIndex(form.start_index)} … ${form.name_prefix}${padIndex(form.start_index + form.count - 1)}）`,
+    `新建设备：${previewRows.value.length} 台（设备编号 ${form.name_prefix}${padIndex(form.start_index)} … ${form.name_prefix}${padIndex(form.start_index + form.count - 1)}）`,
     `业务IP：${biz.length} 条${biz.length ? `（${biz[0].system_ip} … ${biz.at(-1)?.system_ip}）` : '（跳过）'}`,
     `BMC地址：${bmc.length} 条${bmc.length ? `（${bmc[0].system_ip} … ${bmc.at(-1)?.system_ip}）` : '（跳过）'}`,
     `目标机柜：${targets.length} 台（已有设备 ${rackOccupancySummary.value.occupiedRacks} 台 / 已上架 ${rackOccupancySummary.value.totalDevices} 台 / 空闲 ${rackOccupancySummary.value.totalFreeU}U）`,
@@ -825,11 +874,11 @@ async function nextStep() {
       return
     }
     if (!form.name_prefix.trim() || !form.serial_prefix.trim()) {
-      ElMessage.warning('请填写主机名前缀与序列号前缀')
+      ElMessage.warning('请填写设备编号前缀与序列号前缀')
       return
     }
     if (form.contract_id && !form.contract_item_key) {
-      ElMessage.warning('请选择合同内的设备名称，以便采购汇总正确统计已关联数量')
+      ElMessage.warning('请选择合同内的设备名称，以便采购汇总按名称统计已上架关联数')
       return
     }
     step.value = 1
@@ -855,7 +904,6 @@ async function nextStep() {
     step.value = 2
     await refreshMountRacks()
     await nextTick()
-    syncPerRackCountDefault()
     return
   }
   if (step.value === 2) {
@@ -905,7 +953,7 @@ async function submit() {
       room_id: form.room_id,
       new_devices: newDevices,
       rack_ids: form.rack_ids,
-      per_rack_count: form.per_rack_count,
+      per_rack_count: Math.max(1, Number(form.per_rack_count) || 1),
       start_u: form.start_u,
       gap_u: form.gap_u,
       ip_ids: selectedBusinessIpIds.value,
@@ -980,20 +1028,28 @@ async function submit() {
             />
           </el-select>
           <span v-if="selectedContractItem" class="field-tip">
-            设备名称将设为「{{ selectedContractItem.device_name }}」，计入采购汇总已关联
+            设备名称将设为「{{ selectedContractItem.device_name }}」，上架后计入采购汇总「已关联」
           </span>
         </el-form-item>
         <el-form-item label="新建数量" required>
           <el-input-number v-model="form.count" :min="1" :max="200" />
         </el-form-item>
-        <el-form-item label="起始序号">
-          <el-input-number v-model="form.start_index" :min="1" :max="9999" />
-        </el-form-item>
-        <el-form-item label="主机名前缀" required>
-          <el-input v-model="form.name_prefix" placeholder="如 SRV → 主机名 SRV01" />
+        <el-form-item label="设备编号前缀" required>
+          <el-input v-model="form.name_prefix" placeholder="如 SRV → 编号 SRV01" />
         </el-form-item>
         <el-form-item label="序列号前缀" required>
           <el-input v-model="form.serial_prefix" placeholder="如 SN → SN01" />
+        </el-form-item>
+        <el-form-item label="起始序号">
+          <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
+            <el-input-number
+              v-model="form.start_index"
+              :min="1"
+              :max="9999"
+              @change="onStartIndexManualChange"
+            />
+            <span v-if="startIndexHint" class="field-tip">{{ startIndexHint }}</span>
+          </div>
         </el-form-item>
         <el-form-item label="设备型号" required>
           <el-select
@@ -1029,7 +1085,7 @@ async function submit() {
       <el-alert
         type="info"
         :closable="false"
-        :title="`预览：主机名 ${form.name_prefix}${padIndex(form.start_index)} … ${form.name_prefix}${padIndex(form.start_index + form.count - 1)}${selectedContractItem ? ` · 设备名称「${selectedContractItem.device_name}」` : ''}`"
+        :title="`预览：设备编号 ${form.name_prefix}${padIndex(form.start_index)} … ${form.name_prefix}${padIndex(form.start_index + form.count - 1)}${selectedContractItem ? ` · 设备名称「${selectedContractItem.device_name}」` : ''}`"
       />
     </div>
 
@@ -1161,9 +1217,14 @@ async function submit() {
           <span class="field-tip">U（默认 1，设备之间空 1U）</span>
         </el-form-item>
         <el-form-item label="每柜最多">
-          <el-input-number v-model="form.per_rack_count" :min="1" :max="200" />
+          <el-input-number
+            v-model="form.per_rack_count"
+            :min="1"
+            :max="200"
+            @change="onPerRackCountChange"
+          />
           <span class="field-tip">
-            按空闲U/起始U估算 = {{ suggestedPerRackCount }}
+            严格按此数量上架（当前 {{ form.per_rack_count }} 台/柜）· U位建议 {{ suggestedPerRackCount }}
             <el-button link type="primary" @click="syncPerRackCountDefault">按计算填入</el-button>
           </span>
         </el-form-item>
@@ -1172,7 +1233,7 @@ async function submit() {
         :type="occupancyAlertType"
         :closable="false"
         :title="occupancyAlertTitle"
-        description="橙色机柜表示已有设备；上架时会跳过已被占用的 U 位，按机柜编号顺序自动寻找可用位置。"
+        description="橙色机柜表示已有设备；上架时按「每柜最多」限制台数，并跳过已被占用的 U 位，按机柜编号顺序寻找可用位置。"
         show-icon
         style="margin-top: 8px"
       />
@@ -1183,7 +1244,8 @@ async function submit() {
         <li v-for="(line, i) in previewLines" :key="i">{{ line }}</li>
       </ul>
       <el-table v-if="previewRows.length" :data="previewRows.slice(0, 8)" size="small" style="margin-top: 12px">
-        <el-table-column prop="name" label="名称" />
+        <el-table-column prop="hostname" label="设备编号" />
+        <el-table-column prop="name" label="设备名称" />
         <el-table-column prop="serial_number" label="序列号" />
         <el-table-column label="业务IP">
           <template #default="{ $index }">

@@ -63,7 +63,7 @@ function padSeq(n: number, cols: number): string {
 /**
  * 按机房预设前缀为场景网格生成/补齐编号。
  * - 已有编号尽量保留
- * - 新增排/列按排前缀与左/右起始端补齐
+ * - 新增排/列按排前缀与编号方向补齐
  * - 仅机柜格占号
  */
 export function buildPresetSlotCodes(options: {
@@ -72,6 +72,7 @@ export function buildPresetSlotCodes(options: {
   kindsByRow: string[][]
   existing?: string[][]
   codePrefix?: string | null
+  /** true：从右向左编号；false：从左向右 */
   fromRight?: boolean
 }): string[][] {
   const { rows, cols, kindsByRow, existing = [], codePrefix, fromRight = false } = options
@@ -151,7 +152,7 @@ export function normalizeSlotCodesMatrix(
 /**
  * 强制按排重编号（删除/替换后补齐断号，或手动「更新机柜编号」）。
  * - 仅机柜格占号；立柱/列头柜/空位置空
- * - 左编号：该排从左端起；右编号：从右端起
+ * - 左编号：该排从左端起；右编号：从右端起（从右向左）
  * - 每排独立，序号从 start 连续递增
  */
 export function renumberRackSlots(options: {

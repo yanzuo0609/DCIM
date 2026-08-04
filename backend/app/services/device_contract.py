@@ -719,41 +719,35 @@ class DeviceContractService:
 
         linked_stmt = (
             select(
-                Device.contract_id,
                 Device.name,
-                DeviceModel.name.label("model_name"),
                 func.count(Device.id),
             )
             .select_from(Device)
-            .outerjoin(DeviceModel, Device.device_model_id == DeviceModel.id)
-            .where(Device.contract_id.is_not(None), Device.deleted_at.is_(None))
-            .group_by(Device.contract_id, Device.name, DeviceModel.name)
+            .where(
+                Device.rack_id.is_not(None),
+                Device.deleted_at.is_(None),
+                Device.name.is_not(None),
+                Device.name != "",
+            )
+            .group_by(Device.name)
         )
-        # (contract_id, device_name, model_name) -> count
+        # 设备名称 -> 已上架台数（与采购汇总设备名称对齐）
         linked_rows = (await self.session.execute(linked_stmt)).all()
-        linked_by_key: dict[tuple[uuid.UUID, str, str], int] = {}
-        for cid, dname, model_name, cnt in linked_rows:
-            if not cid:
+        linked_by_name: dict[str, int] = {}
+        for dname, cnt in linked_rows:
+            key = (dname or "").strip()
+            if not key:
                 continue
-            key = (cid, (dname or "").strip(), (model_name or "").strip())
-            linked_by_key[key] = linked_by_key.get(key, 0) + int(cnt)
+            linked_by_name[key] = linked_by_name.get(key, 0) + int(cnt)
 
         result: list[DeviceContractSummaryItem] = []
         for (kind, mfg, name, model), bucket in sorted(
             buckets.items(),
             key=lambda x: (0 if x[0][0] == "hardware" else 1, (x[0][1] or ""), x[0][2], x[0][3]),
         ):
-            # 按「合同 + 设备名称 + 型号」统计已关联设备，避免同合同多品类互相串计
-            linked = 0
+            # 按设备管理中「同设备名称」的已上架数量统计
             name_key = (name or "").strip()
-            model_key = (model or "").strip()
-            for cid in bucket["contract_ids"]:
-                if model_key and model_key != "—":
-                    linked += linked_by_key.get((cid, name_key, model_key), 0)
-                else:
-                    for (c, n, _m), cnt in linked_by_key.items():
-                        if c == cid and n == name_key:
-                            linked += cnt
+            linked = linked_by_name.get(name_key, 0)
             qty = int(bucket["qty"])
             avg_price = None
             if bucket["price_qty"] > 0:

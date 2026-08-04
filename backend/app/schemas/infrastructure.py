@@ -423,7 +423,7 @@ class RoomResponse(BaseModel):
     purpose: str | None = "production"
     importance: str | None = "medium"
     attributes: list[str] = Field(default_factory=list)
-    # 独立统计：已建机柜 / 在用机柜 / 空余机柜位 / 容量(Σ模板U位) / 总功耗(W)
+    # 独立统计：已建机柜 / 使用中机柜 / 空余机柜(=已建−使用) / 容量(Σ模板U位) / 总功耗(W)
     rack_count: int = 0
     used_count: int = 0
     free_count: int = 0

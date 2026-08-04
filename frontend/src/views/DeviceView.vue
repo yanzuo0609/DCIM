@@ -2700,7 +2700,7 @@ watch(
             <div class="actions">
               <el-input
                 v-model="keyword"
-                placeholder="搜索名称/主机名/序列号"
+                placeholder="搜索设备名称/编号/序列号"
                 clearable
                 style="width: 220px"
                 @keyup.enter="loadData"
@@ -2761,8 +2761,18 @@ watch(
             @selection-change="onSelectionChange"
           >
             <el-table-column type="selection" width="48" />
-            <el-table-column prop="name" label="名称" min-width="120">
-              <template #default="{ row }">{{ row.name || row.hostname }}</template>
+            <el-table-column
+              type="index"
+              label="序号"
+              width="64"
+              align="center"
+              :index="(i: number) => (pagination.page - 1) * pagination.page_size + i + 1"
+            />
+            <el-table-column prop="hostname" label="设备编号" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.hostname || '—' }}</template>
+            </el-table-column>
+            <el-table-column prop="name" label="设备名称" min-width="130" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.name || '—' }}</template>
             </el-table-column>
             <el-table-column prop="device_type_name" label="类型" width="90" />
             <el-table-column prop="device_model_name" label="型号" min-width="110" />
@@ -3086,14 +3096,14 @@ watch(
             该合同暂无设备明细
           </p>
         </el-form-item>
-        <el-form-item label="名称" required>
+        <el-form-item label="设备名称" required>
           <el-input
             v-model="form.name"
-            placeholder="可从合同设备自动填入，需与合同明细名称一致"
+            placeholder="与合同采购清单/采购汇总设备名称一致"
           />
         </el-form-item>
-        <el-form-item label="主机名">
-          <el-input v-model="form.hostname" placeholder="默认与名称相同" />
+        <el-form-item label="设备编号">
+          <el-input v-model="form.hostname" placeholder="唯一编号，默认可与名称相同" />
         </el-form-item>
         <el-form-item label="序列号" required>
           <el-input v-model="form.serial_number" />

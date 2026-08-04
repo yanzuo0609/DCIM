@@ -73,7 +73,7 @@ onMounted(() => {
     <header class="page-head">
       <div>
         <h2>采购汇总</h2>
-        <p>按硬件 / 软件分类汇总采购数量；「已关联」为已绑定合同且设备名称/型号与明细一致的台数</p>
+        <p>按硬件 / 软件分类汇总采购数量；「已关联」按设备管理中同「设备名称」的已上架台数统计</p>
       </div>
       <el-button size="small" :loading="loading" @click="loadSummary">刷新</el-button>
     </header>

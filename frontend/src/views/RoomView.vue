@@ -78,6 +78,8 @@ const layoutLoading = ref(false)
 const layoutRoom = ref<Room | null>(null)
 const layoutRacks = ref<Rack[]>([])
 const layoutDisplayMode = ref<'simple' | 'full'>('simple')
+/** 仅影响布局图显示：反转每排格子的左右显示顺序，不改机房实际列序/编号数据 */
+const layoutReverseDisplay = ref(false)
 const layoutDetails = ref<Record<string, { slots: RackLayoutSlot[]; totalPower: number }>>({})
 const fullLayoutLoading = ref(false)
 
@@ -213,6 +215,15 @@ const layoutRows = computed(() => {
     const label = firstRackCode?.replace(/\d+$/, '') || `第${row}排`
     return { row, label, slots, rackCount }
   })
+})
+
+/** 布局图展示用：反方向时仅反转每排 slots 显示顺序 */
+const displayLayoutRows = computed(() => {
+  if (!layoutReverseDisplay.value) return layoutRows.value
+  return layoutRows.value.map((row) => ({
+    ...row,
+    slots: [...row.slots].reverse(),
+  }))
 })
 
 const layoutStats = computed(() => {
@@ -1545,6 +1556,7 @@ async function submitUnapplyTemplate() {
 async function openLayout(row: Room, focusRackId?: string | null) {
   layoutVisible.value = true
   layoutDisplayMode.value = 'simple'
+  layoutReverseDisplay.value = false
   clearSelection()
   layoutDetails.value = {}
   pendingFocusRackId.value = focusRackId || null
@@ -1700,9 +1712,9 @@ watch(
           <span class="metric-hint">上架率 {{ pageStats.mountUtil }}%</span>
         </article>
         <article class="metric">
-          <span class="metric-label">空余机柜位</span>
+          <span class="metric-label">空余机柜</span>
           <strong class="metric-value">{{ pageStats.freeCount }}</strong>
-          <span class="metric-hint">容量 − 已建</span>
+          <span class="metric-hint">机柜数量 − 使用</span>
         </article>
         <article class="metric">
           <span class="metric-label">总功耗</span>
@@ -1891,6 +1903,14 @@ watch(
               <el-radio-button value="simple">简单布局</el-radio-button>
               <el-radio-button value="full">完整机柜</el-radio-button>
             </el-radio-group>
+            <el-button
+              :type="layoutReverseDisplay ? 'warning' : 'default'"
+              plain
+              :title="layoutReverseDisplay ? '当前为反方向显示（每排从右到左），点击恢复从左到右' : '反转每排机柜的左右显示顺序（不改编号与实际列序）'"
+              @click="layoutReverseDisplay = !layoutReverseDisplay"
+            >
+              {{ layoutReverseDisplay ? '恢复正向显示' : '反方向显示' }}
+            </el-button>
             <el-dropdown trigger="click" :disabled="exportLoading" @command="handleExportLayouts">
               <el-button type="success" plain :loading="exportLoading">
                 导出布局图
@@ -1977,18 +1997,23 @@ watch(
           <span><i class="dot mid" />40%–80%</span>
           <span><i class="dot high" />≥80%</span>
           <span><i class="dot pillar" />立柱（空白占位）</span>
-          <span class="legend-tip">布局严格按机房排数/每排格数（含立柱）与连续编号展示，不额外增加占位</span>
+          <span class="legend-tip">
+            布局按机房排数/每排格数展示；
+            {{ layoutReverseDisplay ? '当前反方向显示（仅改每排左右顺序，编号不变）' : '默认从左到右显示' }}
+          </span>
         </div>
 
         <div
-          v-if="layoutRows.length && layoutDisplayMode === 'simple'"
+          v-if="displayLayoutRows.length && layoutDisplayMode === 'simple'"
           class="floorplan-map"
+          :class="{ 'floorplan-map-reverse': layoutReverseDisplay }"
           @dragstart.prevent
         >
-          <div v-for="row in layoutRows" :key="row.row" class="floorplan-row">
+          <div v-for="row in displayLayoutRows" :key="row.row" class="floorplan-row">
             <div class="floorplan-row-label">
               第 {{ row.row }} 排
               <span class="floorplan-row-meta">机柜 {{ row.rackCount }} / 格 {{ row.slots.length }}</span>
+              <span v-if="layoutReverseDisplay" class="floorplan-row-dir">← 反方向</span>
             </div>
             <div class="floorplan-slots">
               <template v-for="slot in row.slots" :key="`${slot.row}-${slot.col}`">
@@ -2026,11 +2051,16 @@ watch(
           </div>
         </div>
 
-        <div v-else-if="layoutRows.length && layoutDisplayMode === 'full'" class="floorplan-map floorplan-map-full">
-          <div v-for="row in layoutRows" :key="row.row" class="floorplan-row floorplan-row-full">
+        <div
+          v-else-if="displayLayoutRows.length && layoutDisplayMode === 'full'"
+          class="floorplan-map floorplan-map-full"
+          :class="{ 'floorplan-map-reverse': layoutReverseDisplay }"
+        >
+          <div v-for="row in displayLayoutRows" :key="row.row" class="floorplan-row floorplan-row-full">
             <div class="floorplan-row-label">
               第 {{ row.row }} 排
               <span class="floorplan-row-meta">机柜 {{ row.rackCount }} / 格 {{ row.slots.length }}</span>
+              <span v-if="layoutReverseDisplay" class="floorplan-row-dir">← 反方向</span>
             </div>
             <div class="floorplan-slots floorplan-slots-full">
               <template v-for="slot in row.slots" :key="`${slot.row}-${slot.col}-full`">
@@ -2073,10 +2103,11 @@ watch(
     <el-dialog
       v-model="rackZoomVisible"
       :title="`机柜正面布局 - ${rackZoomRack?.code || ''}`"
-      width="520px"
+      width="620px"
       top="6vh"
       destroy-on-close
       append-to-body
+      align-center
       class="rack-zoom-dialog"
     >
       <div v-loading="rackZoomLoading" class="rack-zoom-panel">
@@ -3133,6 +3164,12 @@ watch(
   color: #909399;
 }
 
+.floorplan-row-dir {
+  font-size: 11px;
+  font-weight: 500;
+  color: #e6a23c;
+}
+
 .floorplan-slots {
   display: flex;
   flex-wrap: nowrap;
@@ -3176,6 +3213,10 @@ watch(
   outline-offset: 1px;
   box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.25);
   z-index: 1;
+}
+
+.rack-zoom-dialog {
+  max-width: min(92vw, 620px);
 }
 
 .rack-zoom-panel {
@@ -3225,8 +3266,9 @@ watch(
 }
 
 .rack-cell-full {
-  flex: 0 0 300px;
-  width: 300px;
+  flex: 0 0 420px;
+  width: 420px;
+  min-width: 420px;
   min-height: 120px;
 }
 

@@ -103,7 +103,9 @@ def _to_room_response(
     is_uniform = len(set(row_layout)) <= 1
     capacity = entity.rack_capacity
     used = max(0, int(used_count))
-    free = capacity - used if free_count is None else max(0, int(free_count))
+    built = max(0, int(rack_count))
+    # 空余 = 已建机柜 − 使用中机柜
+    free = max(0, built - used) if free_count is None else max(0, int(free_count))
     outline_rows = int(getattr(entity, "outline_rows", None) or len(row_layout) or 8)
     outline_cols = int(
         getattr(entity, "outline_cols", None)
@@ -475,8 +477,7 @@ class RoomService:
             stats = stats_map.get(room.id) or {}
             rack_count = int(stats.get("rack_count", 0))
             used_count = int(stats.get("used_count", 0))
-            capacity = room.rack_capacity
-            free_count = max(0, capacity - rack_count)
+            free_count = max(0, rack_count - used_count)
             result.append(
                 _to_room_response(
                     room,

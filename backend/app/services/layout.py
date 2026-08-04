@@ -340,14 +340,24 @@ class LayoutService:
         room_id = uuid.UUID(payload.room_id)
         start_u = payload.start_u
         gap_u = payload.gap_u
+        per_rack_limit = max(1, int(payload.per_rack_count or 1))
 
         device_idx = 0
         for rack in racks:
             if device_idx >= len(queue):
                 break
+            # 本批已上架计数；同时把机柜上已有在架设备计入限额
+            existing_on_rack = 0
+            try:
+                stats = await self.position_repo.stats_for_rack_ids([rack.id])
+                existing_on_rack = int(stats.get(rack.id, (0, 0))[1])
+            except Exception:  # noqa: BLE001
+                existing_on_rack = 0
             mounted_in_rack = 0
             cursor_u = start_u
-            while mounted_in_rack < payload.per_rack_count and device_idx < len(queue):
+            while device_idx < len(queue):
+                if existing_on_rack + mounted_in_rack >= per_rack_limit:
+                    break
                 device_id = queue[device_idx]
                 device = await self.device_repo.get_by_id_with_model(device_id)
                 if not device:
@@ -365,6 +375,7 @@ class LayoutService:
                 )
                 if u_position is None:
                     break
+                mounted_ok = False
                 try:
                     async with self.session.begin_nested():
                         await self.mount(
@@ -377,6 +388,7 @@ class LayoutService:
                         )
                         result.mounted += 1
                         mounted_in_rack += 1
+                        mounted_ok = True
                         cursor_u = u_position + device.height_u + gap_u
 
                         assignment: dict = {
@@ -431,6 +443,9 @@ class LayoutService:
                     result.skipped += 1
                     result.errors.append(f"{device.hostname}: {exc}")
                 device_idx += 1
+                # 达到本柜限额后立即换柜，避免继续尝试
+                if mounted_ok and existing_on_rack + mounted_in_rack >= per_rack_limit:
+                    break
 
         while device_idx < len(queue):
             leftover = await self.device_repo.get_by_id_with_model(queue[device_idx])

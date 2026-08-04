@@ -43,6 +43,7 @@ class DeviceContractRepository(BaseRepository[DeviceContract]):
     async def count_linked_devices(self, contract_id: uuid.UUID) -> int:
         stmt = select(func.count()).select_from(Device).where(
             Device.contract_id == contract_id,
+            Device.rack_id.is_not(None),
             Device.deleted_at.is_(None),
         )
         return int((await self.session.execute(stmt)).scalar_one() or 0)
@@ -54,6 +55,7 @@ class DeviceContractRepository(BaseRepository[DeviceContract]):
             select(Device.contract_id, func.count())
             .where(
                 Device.contract_id.in_(contract_ids),
+                Device.rack_id.is_not(None),
                 Device.deleted_at.is_(None),
             )
             .group_by(Device.contract_id)

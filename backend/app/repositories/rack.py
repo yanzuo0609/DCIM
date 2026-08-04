@@ -310,13 +310,28 @@ class RackPositionRepository(BaseRepository[RackPosition]):
     async def stats_for_rack_ids(
         self, ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, tuple[int, int]]:
-        """Return {rack_id: (occupied_u, device_count)} without loading position rows."""
+        """Return {rack_id: (occupied_u, device_count)} without loading position rows.
+
+        device_count only includes active (non-deleted) devices to avoid ghost occupancy.
+        """
         from sqlalchemy import case, distinct
+
+        from app.models.device import Device
 
         if not ids:
             return {}
         occupied_expr = func.coalesce(
-            func.sum(case((RackPosition.occupied.is_(True), 1), else_=0)),
+            func.sum(
+                case(
+                    (
+                        (RackPosition.occupied.is_(True))
+                        & (Device.id.is_not(None))
+                        & (Device.deleted_at.is_(None)),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
             0,
         )
         device_expr = func.count(
@@ -324,7 +339,9 @@ class RackPositionRepository(BaseRepository[RackPosition]):
                 case(
                     (
                         (RackPosition.occupied.is_(True))
-                        & (RackPosition.device_id.is_not(None)),
+                        & (RackPosition.device_id.is_not(None))
+                        & (Device.id.is_not(None))
+                        & (Device.deleted_at.is_(None)),
                         RackPosition.device_id,
                     ),
                     else_=None,
@@ -333,6 +350,7 @@ class RackPositionRepository(BaseRepository[RackPosition]):
         )
         stmt = (
             select(RackPosition.rack_id, occupied_expr, device_expr)
+            .outerjoin(Device, Device.id == RackPosition.device_id)
             .where(
                 RackPosition.rack_id.in_(ids),
                 RackPosition.deleted_at.is_(None),
@@ -340,7 +358,10 @@ class RackPositionRepository(BaseRepository[RackPosition]):
             .group_by(RackPosition.rack_id)
         )
         rows = (await self.session.execute(stmt)).all()
-        return {rack_id: (int(occupied or 0), int(devices or 0)) for rack_id, occupied, devices in rows}
+        return {
+            rack_id: (int(occupied or 0), int(devices or 0))
+            for rack_id, occupied, devices in rows
+        }
 
     async def list_by_rack(self, rack_id: uuid.UUID) -> list[RackPosition]:
         stmt = (
@@ -350,6 +371,14 @@ class RackPositionRepository(BaseRepository[RackPosition]):
                 RackPosition.deleted_at.is_(None),
             )
             .order_by(RackPosition.u_position)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_by_device(self, device_id: uuid.UUID) -> list[RackPosition]:
+        stmt = select(RackPosition).where(
+            RackPosition.device_id == device_id,
+            RackPosition.deleted_at.is_(None),
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())

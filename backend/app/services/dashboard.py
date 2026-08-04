@@ -365,7 +365,9 @@ class DashboardService:
         )
         purchase_quantity = int((await self.session.execute(qty_stmt)).scalar_one() or 0)
         linked_stmt = select(func.count()).select_from(Device).where(
-            Device.contract_id.is_not(None), Device.deleted_at.is_(None)
+            Device.contract_id.is_not(None),
+            Device.rack_id.is_not(None),
+            Device.deleted_at.is_(None),
         )
         linked_count = (await self.session.execute(linked_stmt)).scalar_one()
         summary_rows = contract_count

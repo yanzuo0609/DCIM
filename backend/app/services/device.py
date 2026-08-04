@@ -1,4 +1,5 @@
 import math
+import re
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +34,7 @@ from app.schemas.common import PaginationMeta, PaginationParams
 from app.schemas.device import (
     DeviceBatchDeleteRequest,
     DeviceBatchDeleteResult,
+    DeviceBatchNextIndexResponse,
     DeviceCreate,
     DeviceModelCreate,
     DeviceModelPanelApply,
@@ -241,16 +243,12 @@ class DeviceService:
         self, device: Device, user_id: uuid.UUID | None = None
     ) -> None:
         """Clear rack occupancy so a mounted device can be soft-deleted."""
-        if not device.rack_id:
-            return
-        if device.u_position is not None:
-            positions = await self.position_repo.list_by_rack(device.rack_id)
-            target_us = occupied_range(device.u_position, device.height_u)
-            for pos in positions:
-                if pos.u_position in target_us and pos.device_id == device.id:
-                    pos.occupied = False
-                    pos.device_id = None
-                    pos.updated_by = user_id
+        # 按 device_id 清掉所有残留位，避免软删后机柜仍显示「已上架」
+        positions = await self.position_repo.list_by_device(device.id)
+        for pos in positions:
+            pos.occupied = False
+            pos.device_id = None
+            pos.updated_by = user_id
         device.rack_id = None
         device.u_position = None
         device.status = DeviceStatus.STOCK.value
@@ -321,6 +319,47 @@ class DeviceService:
                 )
             )
         return result
+
+    @staticmethod
+    def _max_suffix_index(values: list[str], prefix: str) -> int:
+        """Match `{prefix}{digits}` (optional zero-pad) and return max digit value."""
+        if not prefix:
+            return 0
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$", re.IGNORECASE)
+        max_n = 0
+        for raw in values:
+            m = pattern.match((raw or "").strip())
+            if not m:
+                continue
+            try:
+                n = int(m.group(1))
+            except ValueError:
+                continue
+            if n > max_n:
+                max_n = n
+        return max_n
+
+    async def suggest_batch_start_index(
+        self, *, hostname_prefix: str, serial_prefix: str
+    ) -> DeviceBatchNextIndexResponse:
+        hn_prefix = (hostname_prefix or "").strip()
+        sn_prefix = (serial_prefix or "").strip()
+        hn_max = 0
+        sn_max = 0
+        if hn_prefix:
+            values = await self.repo.list_values_by_prefix(field="hostname", prefix=hn_prefix)
+            hn_max = self._max_suffix_index(values, hn_prefix)
+        if sn_prefix:
+            values = await self.repo.list_values_by_prefix(field="serial_number", prefix=sn_prefix)
+            sn_max = self._max_suffix_index(values, sn_prefix)
+        start = max(hn_max, sn_max, 0) + 1
+        return DeviceBatchNextIndexResponse(
+            start_index=max(1, start),
+            hostname_max=hn_max,
+            serial_max=sn_max,
+            hostname_prefix=hn_prefix,
+            serial_prefix=sn_prefix,
+        )
 
     async def list_devices(
         self,
