@@ -189,6 +189,7 @@ class ParamProfileCreate(BaseModel):
 
 
 class ParamProfileUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=50)
     name: str | None = Field(default=None, min_length=1, max_length=100)
     payload: ParamProfilePayload | None = None
     description: str | None = None
@@ -577,6 +578,9 @@ class DeviceModelCreate(BaseModel):
 class DeviceModelUpdate(BaseModel):
     code: str | None = Field(default=None, min_length=1, max_length=50)
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    manufacturer_id: str | None = Field(
+        default=None, description="可选；用于合同同步时绑定/更正厂商"
+    )
     height_u: int | None = Field(default=None, ge=1, le=10)
     power: Decimal | None = None
     description: str | None = None
@@ -659,6 +663,9 @@ class DeviceCreate(BaseModel):
     serial_number: str = Field(min_length=1, max_length=100)
     device_model_id: str
     device_type_id: str | None = None
+    manufacturer_id: str | None = Field(
+        default=None, description="设备级厂商；为空时回退到型号厂商"
+    )
     param_profile_id: str | None = None
     system_profile_id: str | None = None
     bmc_profile_id: str | None = None
@@ -679,6 +686,9 @@ class DeviceUpdate(BaseModel):
     serial_number: str | None = Field(default=None, min_length=1, max_length=100)
     device_model_id: str | None = None
     device_type_id: str | None = None
+    manufacturer_id: str | None = Field(
+        default=None, description="设备级厂商；空串表示清除覆盖，回退型号厂商"
+    )
     param_profile_id: str | None = None
     system_profile_id: str | None = None
     bmc_profile_id: str | None = None
@@ -750,12 +760,59 @@ class DeviceBatchDeleteResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class DeviceBatchUpdateFields(BaseModel):
+    """仅出现（exclude_unset）的字段才会批量写入。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    device_type_id: str | None = None
+    device_model_id: str | None = None
+    height_u: int | None = Field(default=None, ge=1, le=10)
+    manufacturer_id: str | None = Field(
+        default=None, description="设备级厂商；空串表示清除覆盖"
+    )
+    contract_id: str | None = None
+    system_ip_id: str | None = Field(default=None, description="统一业务 IP；空串清除")
+    bmc_ip_id: str | None = Field(default=None, description="统一 BMC IP；空串清除")
+    vip_ip_id: str | None = Field(default=None, description="统一 VIP；空串清除")
+
+
+class DeviceBatchMountSpec(BaseModel):
+    rack_id: str
+    start_u: int = Field(default=1, ge=1, le=100)
+    gap_u: int = Field(default=0, ge=0, le=50)
+
+
+class DeviceBatchUpdateRequest(BaseModel):
+    ids: list[str] = Field(min_length=1)
+    fields: DeviceBatchUpdateFields | None = None
+    system_ip_ids: list[str] | None = Field(
+        default=None, description="与 ids 按序 1:1 配对的业务 IP"
+    )
+    bmc_ip_ids: list[str] | None = Field(
+        default=None, description="与 ids 按序 1:1 配对的 BMC IP"
+    )
+    vip_ip_id: str | None = Field(
+        default=None, description="共享 VIP；传空串表示清空；不传则不改"
+    )
+    unmount: bool = False
+    mount: DeviceBatchMountSpec | None = None
+
+
+class DeviceBatchUpdateResult(BaseModel):
+    updated: int = 0
+    unmounted: int = 0
+    mounted: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
 class BatchMountNewDevice(BaseModel):
     name: str | None = None
     hostname: str | None = None
     serial_number: str = Field(min_length=1, max_length=100)
     device_model_id: str
     device_type_id: str | None = None
+    manufacturer_id: str | None = None
     height_u: int | None = Field(default=None, ge=1, le=10)
     power: Decimal | None = None
     description: str | None = None
@@ -779,7 +836,12 @@ class BatchMountRequest(BaseModel):
     rack_ids: list[str] = Field(default_factory=list)
     row_nos: list[int] = Field(default_factory=list, description="可选：限定排号")
     column_nos: list[int] = Field(default_factory=list, description="可选：限定列号")
-    per_rack_count: int = Field(default=1, ge=1, le=200)
+    per_rack_count: int = Field(
+        default=1,
+        ge=1,
+        le=200,
+        description="每柜同类型设备上限（含已上架；本批可上架数=上限-已有同类型数）",
+    )
     start_u: int = Field(default=1, ge=1, le=100, description="每柜上架起始 U 位")
     gap_u: int = Field(default=1, ge=0, le=10, description="设备间空闲 U 间隔，默认 1U")
     ip_ids: list[str] = Field(
@@ -797,6 +859,8 @@ class BatchMountResult(BaseModel):
     created: int = 0
     ip_bound: int = 0
     skipped: int = 0
+    """已创建但因无可用 U 位而未上架、保留在库存的数量。"""
+    stock_only: int = 0
     errors: list[str] = Field(default_factory=list)
     assignments: list[dict[str, Any]] = Field(default_factory=list)
 

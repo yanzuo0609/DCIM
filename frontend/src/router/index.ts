@@ -102,6 +102,31 @@ const router = createRouter({
           ],
         },
         {
+          path: 'devices/personnel',
+          component: () => import('@/layouts/PersonnelSectionLayout.vue'),
+          meta: { permission: 'device:view' },
+          children: [
+            {
+              path: '',
+              name: 'device-personnel-org',
+              component: () => import('@/views/personnel/PersonnelOrgDesignView.vue'),
+              meta: { permission: 'device:view' },
+            },
+            {
+              path: 'internals',
+              name: 'device-personnel-internals',
+              component: () => import('@/views/personnel/PersonnelInternalView.vue'),
+              meta: { permission: 'device:view' },
+            },
+            {
+              path: 'suppliers',
+              name: 'device-personnel-suppliers',
+              component: () => import('@/views/personnel/PersonnelSupplierView.vue'),
+              meta: { permission: 'device:view' },
+            },
+          ],
+        },
+        {
           path: 'network',
           component: () => import('@/layouts/NetworkSectionLayout.vue'),
           meta: { permission: 'network:view' },
@@ -145,6 +170,12 @@ const router = createRouter({
           name: 'roles',
           component: () => import('@/views/RoleView.vue'),
           meta: { permission: 'role:view' },
+        },
+        {
+          path: 'system/audit',
+          name: 'audit',
+          component: () => import('@/views/AuditView.vue'),
+          meta: { permission: 'audit:view' },
         },
       ],
     },

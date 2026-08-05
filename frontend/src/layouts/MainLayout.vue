@@ -18,6 +18,7 @@ const activeMenu = computed(() => {
   if (route.path.startsWith('/network')) return route.path
   // 合同子页（汇总/参数）仍高亮「合同信息」菜单
   if (route.path.startsWith('/devices/contracts')) return '/devices/contracts'
+  if (route.path.startsWith('/devices/personnel')) return '/devices/personnel'
   return route.path
 })
 const openedMenus = computed(() => {
@@ -97,14 +98,19 @@ async function handleLogout() {
           <el-menu-item index="/network/interfaces">接口设计</el-menu-item>
         </el-sub-menu>
         <el-sub-menu v-if="auth.hasPermission('device:view')" index="device-menu">
-          <template #title><span>设备管理</span></template>
+          <template #title><span>资源管理</span></template>
           <el-menu-item index="/devices">设备管理</el-menu-item>
           <el-menu-item index="/devices/contracts">合同信息</el-menu-item>
+          <el-menu-item index="/devices/personnel">人员管理</el-menu-item>
         </el-sub-menu>
-        <el-sub-menu v-if="auth.hasPermission('user:view') || auth.hasPermission('role:view')" index="/system">
+        <el-sub-menu
+          v-if="auth.hasPermission('user:view') || auth.hasPermission('role:view') || auth.hasPermission('audit:view')"
+          index="/system"
+        >
           <template #title><span>系统管理</span></template>
           <el-menu-item v-if="auth.hasPermission('user:view')" index="/system/users">用户管理</el-menu-item>
           <el-menu-item v-if="auth.hasPermission('role:view')" index="/system/roles">角色管理</el-menu-item>
+          <el-menu-item v-if="auth.hasPermission('audit:view')" index="/system/audit">日志管理</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>

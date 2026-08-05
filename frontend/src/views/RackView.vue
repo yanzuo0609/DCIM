@@ -20,10 +20,79 @@ const VISUAL_STYLE_OPTIONS: Array<{
   hint: string
 }> = [
   { value: 'classic', label: '经典立面', hint: '原深色机柜立面（默认）' },
-  { value: 'schematic', label: '线框立面', hint: '双侧 U 位刻度，浅色信息列（参考图 2）' },
-  { value: 'realistic', label: '正面面板', hint: '设备正面面板示意（参考图 1）' },
-  { value: 'grid', label: '表格占位', hint: '黄格占用、白格空闲（参考图 3）' },
+  { value: 'schematic', label: '线框立面', hint: '双侧 U 位刻度，浅色信息列' },
+  { value: 'realistic', label: '正面面板', hint: '设备正面面板示意' },
+  { value: 'grid', label: '表格占位', hint: '黄格占用、白格空闲' },
 ]
+
+/** 样式缩略图固定 8U 示意，不随模板 U 数变化 */
+const STYLE_THUMB_SLOTS = (() => {
+  const total = 8
+  type Dev = {
+    device_id: string
+    hostname: string
+    height_u: number
+    start_u: number
+    power: number
+    ip_summary: string | null
+    bmc_ip?: string | null
+    model_name: string
+  }
+  const byU = new Map<
+    number,
+    {
+      u_position: number
+      occupied: boolean
+      is_span_start: boolean
+      span_height: number
+      device: Dev | null
+    }
+  >()
+  const place = (topU: number, height: number, device: Dev) => {
+    for (let i = 0; i < height; i += 1) {
+      const u = topU - i
+      byU.set(u, {
+        u_position: u,
+        occupied: true,
+        is_span_start: i === 0,
+        span_height: height,
+        device: { ...device, height_u: height, start_u: topU - height + 1 },
+      })
+    }
+  }
+  place(8, 2, {
+    device_id: 't-2u',
+    hostname: 'SRV',
+    height_u: 2,
+    start_u: 7,
+    power: 120,
+    ip_summary: '10.0.0.1',
+    bmc_ip: '10.0.1.1',
+    model_name: '2U',
+  })
+  place(4, 1, {
+    device_id: 't-1u',
+    hostname: 'SW',
+    height_u: 1,
+    start_u: 4,
+    power: 40,
+    ip_summary: '10.0.0.2',
+    model_name: '1U',
+  })
+  const slots = []
+  for (let u = total; u >= 1; u -= 1) {
+    slots.push(
+      byU.get(u) || {
+        u_position: u,
+        occupied: false,
+        is_span_start: false,
+        span_height: 1,
+        device: null,
+      },
+    )
+  }
+  return slots
+})()
 
 const auth = useAuthStore()
 const templates = ref<RackTemplate[]>([])
@@ -86,70 +155,94 @@ const templateForm = reactive({
 
 const templatePreviewCode = computed(() => templateForm.code || templateForm.name || '预览')
 
-/** 预览用示意占用，便于分辨三种样式差异 */
+/** 预览用示意占用：含 2U / 4U 合并，便于对照经典立面效果 */
 const templatePreviewSlots = computed(() => {
-  const total = Math.max(1, templateForm.total_u || 42)
+  const total = Math.max(8, templateForm.total_u || 42)
+  type PreviewDevice = {
+    device_id: string
+    hostname: string
+    height_u: number
+    start_u: number
+    power: number
+    ip_summary: string | null
+    bmc_ip?: string | null
+    model_name: string
+  }
+  const byU = new Map<
+    number,
+    {
+      u_position: number
+      occupied: boolean
+      is_span_start: boolean
+      span_height: number
+      device: PreviewDevice | null
+    }
+  >()
+
+  const place = (topU: number, height: number, device: PreviewDevice) => {
+    const h = Math.min(height, topU)
+    for (let i = 0; i < h; i += 1) {
+      const u = topU - i
+      byU.set(u, {
+        u_position: u,
+        occupied: true,
+        is_span_start: i === 0,
+        span_height: h,
+        device: { ...device, height_u: h, start_u: topU - h + 1 },
+      })
+    }
+  }
+
+  place(total, 2, {
+    device_id: 'preview-2u',
+    hostname: 'SRV-2U',
+    height_u: 2,
+    start_u: total - 1,
+    power: 200,
+    ip_summary: '10.0.0.10',
+    bmc_ip: '10.0.1.10',
+    model_name: 'Demo-2U',
+  })
+
+  const midTop = Math.max(5, Math.floor(total * 0.55))
+  if (midTop <= total - 2 && midTop - 3 >= 1) {
+    place(midTop, 4, {
+      device_id: 'preview-4u',
+      hostname: 'SRV-4U',
+      height_u: 4,
+      start_u: midTop - 3,
+      power: 450,
+      ip_summary: '10.0.0.40',
+      bmc_ip: '10.0.1.40',
+      model_name: 'Demo-4U',
+    })
+  }
+
+  const swU = Math.max(1, Math.floor(total * 0.25))
+  if (!byU.has(swU)) {
+    place(swU, 1, {
+      device_id: 'preview-1u',
+      hostname: '交换机',
+      height_u: 1,
+      start_u: swU,
+      power: 80,
+      ip_summary: '10.0.0.2',
+      bmc_ip: null,
+      model_name: 'SW',
+    })
+  }
+
   const slots = []
   for (let u = total; u >= 1; u -= 1) {
-    const isTop = u === total || u === total - 1
-    const isMid = u === Math.max(1, Math.floor(total * 0.55))
-    if (isTop && u === total) {
-      slots.push({
-        u_position: u,
-        occupied: true,
-        is_span_start: true,
-        span_height: 2,
-        device: {
-          device_id: 'preview-1',
-          hostname: '设备10',
-          height_u: 2,
-          start_u: total - 1,
-          power: 200,
-          ip_summary: '10.0.0.10',
-          model_name: 'Demo',
-        },
-      })
-    } else if (isTop && u === total - 1 && total > 1) {
-      slots.push({
-        u_position: u,
-        occupied: true,
-        is_span_start: false,
-        span_height: 2,
-        device: {
-          device_id: 'preview-1',
-          hostname: '设备10',
-          height_u: 2,
-          start_u: total - 1,
-          power: 200,
-          ip_summary: '10.0.0.10',
-          model_name: 'Demo',
-        },
-      })
-    } else if (isMid) {
-      slots.push({
-        u_position: u,
-        occupied: true,
-        is_span_start: true,
-        span_height: 1,
-        device: {
-          device_id: 'preview-2',
-          hostname: '交换机',
-          height_u: 1,
-          start_u: u,
-          power: 80,
-          ip_summary: null,
-          model_name: 'SW',
-        },
-      })
-    } else {
-      slots.push({
+    slots.push(
+      byU.get(u) || {
         u_position: u,
         occupied: false,
         is_span_start: false,
         span_height: 1,
         device: null,
-      })
-    }
+      },
+    )
   }
   return slots
 })
@@ -421,16 +514,30 @@ onMounted(() => {
               <el-input-number v-model="templateForm.depth" :min="600" :max="1500" style="width: 100%" />
             </el-form-item>
             <el-form-item label="视觉样式" required>
-              <el-radio-group v-model="templateForm.visual_style" class="style-radios">
-                <el-radio
+              <div class="style-thumbs" role="radiogroup" aria-label="视觉样式">
+                <button
                   v-for="item in VISUAL_STYLE_OPTIONS"
                   :key="item.value"
-                  :value="item.value"
-                  border
+                  type="button"
+                  class="style-thumb"
+                  :class="{ active: templateForm.visual_style === item.value }"
+                  :title="item.hint"
+                  :aria-pressed="templateForm.visual_style === item.value"
+                  @click="templateForm.visual_style = item.value"
                 >
-                  {{ item.label }}
-                </el-radio>
-              </el-radio-group>
+                  <div class="style-thumb-preview">
+                    <RackCabinet
+                      :code="item.label.slice(0, 2)"
+                      :total-u="8"
+                      :slots="STYLE_THUMB_SLOTS"
+                      :total-power="160"
+                      :visual-style="item.value"
+                      compact
+                    />
+                  </div>
+                  <span class="style-thumb-label">{{ item.label }}</span>
+                </button>
+              </div>
               <div class="field-hint">
                 {{ VISUAL_STYLE_OPTIONS.find((o) => o.value === templateForm.visual_style)?.hint }}
               </div>
@@ -458,7 +565,7 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="applyVisible" title="应用模板到机房" width="620px" destroy-on-close>
+    <el-dialog v-model="applyVisible" title="应用模板到机房" width="720px" destroy-on-close>
       <el-form label-width="110px">
         <el-form-item label="样式模板" required>
           <el-select
@@ -475,16 +582,30 @@ onMounted(() => {
           </el-select>
         </el-form-item>
         <el-form-item label="视觉样式" required>
-          <el-radio-group v-model="applyForm.visual_style" class="style-radios">
-            <el-radio
+          <div class="style-thumbs" role="radiogroup" aria-label="视觉样式">
+            <button
               v-for="item in VISUAL_STYLE_OPTIONS"
               :key="item.value"
-              :value="item.value"
-              border
+              type="button"
+              class="style-thumb"
+              :class="{ active: applyForm.visual_style === item.value }"
+              :title="item.hint"
+              :aria-pressed="applyForm.visual_style === item.value"
+              @click="applyForm.visual_style = item.value"
             >
-              {{ item.label }}
-            </el-radio>
-          </el-radio-group>
+              <div class="style-thumb-preview">
+                <RackCabinet
+                  :code="item.label.slice(0, 2)"
+                  :total-u="8"
+                  :slots="STYLE_THUMB_SLOTS"
+                  :total-power="160"
+                  :visual-style="item.value"
+                  compact
+                />
+              </div>
+              <span class="style-thumb-label">{{ item.label }}</span>
+            </button>
+          </div>
           <div class="field-hint">
             {{ VISUAL_STYLE_OPTIONS.find((o) => o.value === applyForm.visual_style)?.hint }}
             <template v-if="applyTemplate && normalizeVisualStyle(applyTemplate.visual_style) !== applyForm.visual_style">
@@ -579,13 +700,70 @@ onMounted(() => {
   }
 }
 
-.style-radios {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.style-thumbs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
 }
 
-.style-radios :deep(.el-radio) {
-  margin-right: 0;
+.style-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fafbfc;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+  font: inherit;
+  color: inherit;
+}
+
+.style-thumb:hover {
+  border-color: #c0c4cc;
+  background: #fff;
+}
+
+.style-thumb.active {
+  border-color: var(--el-color-primary);
+  background: #fff;
+  box-shadow: 0 0 0 1px var(--el-color-primary);
+}
+
+.style-thumb-preview {
+  height: 128px;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  pointer-events: none;
+  border-radius: 4px;
+  background: #f3f4f6;
+}
+
+.style-thumb-preview :deep(.cabinet) {
+  transform: scale(0.42);
+  transform-origin: top center;
+  max-width: none !important;
+}
+
+.style-thumb-preview :deep(.style-grid) {
+  transform: scale(0.5);
+}
+
+.style-thumb-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.2;
+}
+
+.style-thumb.active .style-thumb-label {
+  color: var(--el-color-primary);
 }
 </style>

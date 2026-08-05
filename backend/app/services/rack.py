@@ -35,6 +35,7 @@ from app.schemas.rack import (
     UnapplyTemplateFromRoomRequest,
     UnapplyTemplateFromRoomResult,
 )
+from app.services.device import _ip_fields_from_device
 
 _IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b")
 
@@ -65,19 +66,14 @@ async def _require_active_room(room_repo: RoomRepository, room_id_raw: str | uui
 
 
 def _extract_ip_fields(device) -> tuple[str | None, str | None, str | None]:
-    """Return (system_ip, bmc_ip, vip) from device.ip_addresses."""
-    rows = list(getattr(device, "ip_addresses", None) or [])
-    if rows:
-        primary = rows[0]
-        for row in rows:
-            if getattr(row, "system_ip", None):
-                primary = row
-                break
-        return primary.system_ip, primary.bmc_ip, primary.vip
-    hostname = (device.hostname or "").strip()
+    """Return (system_ip, bmc_ip, vip)，与设备详情一致：支持独立 BMC 地址记录。"""
+    system_ip, bmc_ip, vip, *_rest = _ip_fields_from_device(device)
+    if system_ip or bmc_ip or vip:
+        return system_ip, bmc_ip, vip
+    hostname = (getattr(device, "hostname", None) or "").strip()
     if hostname and _IPV4_RE.fullmatch(hostname):
         return hostname, None, None
-    description = device.description
+    description = getattr(device, "description", None)
     if description:
         match = _IPV4_RE.search(description)
         if match:

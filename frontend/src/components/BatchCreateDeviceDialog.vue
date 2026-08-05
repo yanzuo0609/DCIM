@@ -5,10 +5,14 @@ import {
   batchMountDevices,
   createDeviceModel,
   createDeviceType,
+  createManufacturer,
+  listDeviceModels,
+  listManufacturers,
   suggestBatchStartIndex,
   type BatchMountNewDevice,
   type DeviceModel,
   type DeviceType,
+  type Manufacturer,
 } from '@/api/device'
 import {
   listIpAddresses,
@@ -22,10 +26,17 @@ import type { Room } from '@/api/room'
 import {
   contractItemKey,
   findContractItem,
+  syncContractModelsById,
   type DeviceContract,
   type DeviceContractItem,
 } from '@/api/contract'
 import RackRangePicker from '@/components/RackRangePicker.vue'
+import {
+  clampPerRackCount,
+  getPerRackLimitForType,
+  setPerRackLimitForType,
+  type DeviceTypeLike,
+} from '@/utils/batchMountTypeLimits'
 
 const props = defineProps<{
   modelValue: boolean
@@ -33,6 +44,7 @@ const props = defineProps<{
   racks: Rack[]
   models: DeviceModel[]
   types: DeviceType[]
+  manufacturers?: Manufacturer[]
   contracts?: DeviceContract[]
 }>()
 
@@ -41,12 +53,23 @@ const emit = defineEmits<{
   success: []
   'type-created': [DeviceType]
   'model-created': [DeviceModel]
+  'manufacturer-created': [Manufacturer]
 }>()
 
 const visible = computed({
   get: () => props.modelValue,
   set: (v: boolean) => emit('update:modelValue', v),
 })
+
+const localManufacturers = ref<Manufacturer[]>([])
+
+watch(
+  () => props.manufacturers,
+  (list) => {
+    if (list?.length) localManufacturers.value = [...list]
+  },
+  { immediate: true },
+)
 
 const step = ref(0)
 const submitting = ref(false)
@@ -84,6 +107,7 @@ const form = reactive({
   start_index: 1,
   device_model_id: '',
   device_type_id: '' as string | null,
+  manufacturer_id: null as string | null,
   height_u: 1 as number | null,
   contract_id: '' as string | null,
   contract_item_key: '',
@@ -104,6 +128,26 @@ const previewLines = ref<string[]>([])
 /** 上架步骤拉取的最新机柜占用（含 device_count / free_u） */
 const mountRacks = ref<Rack[]>([])
 const mountRacksLoading = ref(false)
+/** 展开「各类型每柜上限」配置 */
+const showTypeLimitEditor = ref(false)
+const typeLimitDraft = ref<Array<{ id: string; code: string; name: string; count: number }>>([])
+
+const localModels = ref<DeviceModel[]>([])
+
+watch(
+  () => props.models,
+  (list) => {
+    if (list?.length) localModels.value = [...list]
+  },
+  { immediate: true },
+)
+
+const modelOptions = computed(() => {
+  const map = new Map<string, DeviceModel>()
+  for (const m of props.models) map.set(m.id, m)
+  for (const m of localModels.value) map.set(m.id, m)
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name))
+})
 
 const selectedContract = computed(
   () => (props.contracts || []).find((c) => c.id === form.contract_id) || null,
@@ -111,12 +155,48 @@ const selectedContract = computed(
 
 const contractItems = computed((): DeviceContractItem[] => {
   const items = selectedContract.value?.device_items
-  return Array.isArray(items) ? items.filter((it) => it.device_name) : []
+  return Array.isArray(items)
+    ? items.filter((it) => {
+        if (!it.device_name) return false
+        const kind = it.item_kind || 'hardware'
+        return kind !== 'software'
+      })
+    : []
 })
 
 const selectedContractItem = computed(() =>
   findContractItem(selectedContract.value, form.contract_item_key),
 )
+
+function contractItemOptionLabel(it: DeviceContractItem) {
+  const name = (it.device_name || '').trim()
+  const model = (it.device_model_name || '').trim()
+  const mfg = (it.manufacturer_name || '').trim()
+  if (model && mfg) return `${name} · ${model} · ${mfg}`
+  if (model) return `${name} · ${model}`
+  return name
+}
+
+function findModelForContract(
+  modelName: string,
+  mfg: Manufacturer | null,
+): DeviceModel | undefined {
+  const name = modelName.trim()
+  if (!name) return undefined
+  const lower = name.toLowerCase()
+  const source = localModels.value.length ? localModels.value : props.models
+  const byName = source.filter(
+    (m) => m.name.toLowerCase() === lower || m.code.toLowerCase() === lower,
+  )
+  if (!byName.length) return undefined
+  if (mfg) {
+    const withMfg = byName.find(
+      (m) => m.manufacturer_id === mfg.id || m.manufacturer_name === mfg.name,
+    )
+    if (withMfg) return withMfg
+  }
+  return byName[0]
+}
 
 const roomRacks = computed(() => {
   const source = mountRacks.value.length ? mountRacks.value : props.racks
@@ -132,6 +212,13 @@ const targetRacks = computed(() => {
 })
 
 const needCount = computed(() => Math.max(1, form.count || 1))
+
+const currentDeviceType = computed((): DeviceTypeLike | null => {
+  if (!form.device_type_id) return null
+  return props.types.find((t) => t.id === form.device_type_id) || null
+})
+
+const currentTypeLabel = computed(() => currentDeviceType.value?.name || '未指定类型')
 
 const rackOccupancySummary = computed(() => {
   const racks = targetRacks.value
@@ -240,7 +327,7 @@ const occupancyAlertTitle = computed(() => {
     `目标机柜 ${racks.length} 台`,
     `其中已有设备 ${s.occupiedRacks} 台（已上架合计 ${s.totalDevices} 台）`,
     `合计空闲 ${s.totalFreeU}U`,
-    `每柜建议最多 ${suggestedPerRackCount.value} 台`,
+    `「${currentTypeLabel.value}」每柜建议最多 ${suggestedPerRackCount.value} 台（空闲U）`,
   ]
   if (s.insufficient.length) {
     const codes =
@@ -284,7 +371,9 @@ function padIndex(n: number) {
 }
 
 function buildDeviceRows(): BatchMountNewDevice[] {
-  const model = props.models.find((m) => m.id === form.device_model_id)
+  const model =
+    localModels.value.find((m) => m.id === form.device_model_id)
+    || props.models.find((m) => m.id === form.device_model_id)
   const contractName = selectedContractItem.value?.device_name?.trim() || ''
   const rows: BatchMountNewDevice[] = []
   for (let i = 0; i < form.count; i += 1) {
@@ -297,6 +386,7 @@ function buildDeviceRows(): BatchMountNewDevice[] {
       serial_number: `${form.serial_prefix}${padIndex(idx)}`,
       device_model_id: form.device_model_id,
       device_type_id: form.device_type_id,
+      manufacturer_id: form.manufacturer_id || null,
       height_u: form.height_u || model?.height_u || 1,
       contract_id: form.contract_id || null,
     })
@@ -304,30 +394,107 @@ function buildDeviceRows(): BatchMountNewDevice[] {
   return rows
 }
 
-function onBatchContractChange(contractId: string | null) {
+async function onBatchContractChange(contractId: string | null) {
   form.contract_id = contractId || null
   form.contract_item_key = ''
+  form.manufacturer_id = null
   if (!contractId) return
+  try {
+    await syncContractModelsById(contractId)
+    const [models, mfgs] = await Promise.all([listDeviceModels(), listManufacturers()])
+    localModels.value = models
+    localManufacturers.value = mfgs
+    for (const m of models) emit('model-created', m)
+    for (const m of mfgs) emit('manufacturer-created', m)
+  } catch {
+    /* 同步失败仍尝试本地匹配 */
+  }
   if (contractItems.value.length === 1) {
-    onBatchContractItemChange(contractItemKey(contractItems.value[0]))
+    await onBatchContractItemChange(contractItemKey(contractItems.value[0]))
   }
 }
 
-function onBatchContractItemChange(key: string | null) {
+function genManufacturerCode(name: string) {
+  const ascii = name
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40)
+  const base = ascii ? `MFG_${ascii}` : `MFG_${Date.now().toString(36).toUpperCase()}`
+  return base.slice(0, 50)
+}
+
+async function ensureManufacturer(name: string | null | undefined): Promise<Manufacturer | null> {
+  const trimmed = (name || '').trim()
+  if (!trimmed) return null
+  const hit = localManufacturers.value.find((m) => m.name === trimmed || m.code === trimmed)
+  if (hit) return hit
+  let code = genManufacturerCode(trimmed)
+  if (localManufacturers.value.some((m) => m.code === code)) {
+    code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
+  }
+  const created = await createManufacturer({
+    code,
+    name: trimmed,
+    description: '来自合同信息同步',
+  })
+  localManufacturers.value = [...localManufacturers.value, created].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )
+  emit('manufacturer-created', created)
+  return created
+}
+
+async function onBatchContractItemChange(key: string | null) {
   form.contract_item_key = key || ''
   const item = findContractItem(selectedContract.value, key)
-  if (!item) return
-  const modelName = (item.device_model_name || '').trim()
-  if (!modelName) return
-  const mfgName = (item.manufacturer_name || '').trim()
-  const hit = props.models.find(
-    (m) =>
-      m.name === modelName
-      && (!mfgName || !m.manufacturer_name || m.manufacturer_name === mfgName),
-  )
-  if (hit) {
-    form.device_model_id = hit.id
-    form.height_u = hit.height_u
+  if (!item) {
+    form.manufacturer_id = null
+    return
+  }
+  try {
+    const mfg = await ensureManufacturer(item.manufacturer_name)
+    form.manufacturer_id = mfg?.id || null
+    const modelName = (item.device_model_name || item.device_name || '').trim()
+    if (!modelName) {
+      ElMessage.warning('该合同设备未填写型号，请手动选择设备型号')
+      return
+    }
+    let hit = findModelForContract(modelName, mfg)
+    if (!hit) {
+      let code = modelName
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 40)
+      if (!code) code = `MODEL_${Date.now().toString(36).toUpperCase()}`
+      const exists = localModels.value.some((m) => m.code === code) || props.models.some((m) => m.code === code)
+      if (exists) {
+        code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
+      }
+      const created = await createDeviceModel({
+        code,
+        name: modelName,
+        manufacturer_id: mfg?.id || null,
+        height_u: form.height_u || 1,
+        power: null,
+        description: null,
+      })
+      emit('model-created', created)
+      localModels.value = [...localModels.value.filter((m) => m.id !== created.id), created]
+      hit = created
+    }
+    if (hit) {
+      form.device_model_id = hit.id
+      form.height_u = hit.height_u
+      if (!form.manufacturer_id && hit.manufacturer_id) {
+        form.manufacturer_id = hit.manufacturer_id
+      }
+    }
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '匹配合同厂商/型号失败')
   }
 }
 
@@ -530,6 +697,7 @@ function resetForm() {
   startIndexHint.value = ''
   form.device_model_id = ''
   form.device_type_id = props.types[0]?.id || null
+  form.manufacturer_id = null
   form.height_u = 1
   form.contract_id = null
   form.contract_item_key = ''
@@ -537,7 +705,9 @@ function resetForm() {
   form.rack_ids = []
   form.start_u = 1
   form.gap_u = 1
-  form.per_rack_count = 1
+  showTypeLimitEditor.value = false
+  typeLimitDraft.value = []
+  applyPerRackLimitFromType()
   selectedBusinessIpIds.value = []
   selectedBmcIpIds.value = []
   businessIpRangeText.value = ''
@@ -592,12 +762,50 @@ function onStartIndexManualChange() {
   startIndexManual.value = true
 }
 
+function applyPerRackLimitFromType() {
+  const type = currentDeviceType.value
+  form.per_rack_count = getPerRackLimitForType(type)
+}
+
+function persistCurrentTypePerRackLimit(count = form.per_rack_count) {
+  const type = currentDeviceType.value
+  if (!type) return
+  setPerRackLimitForType(type, count)
+}
+
 function syncPerRackCountDefault() {
-  form.per_rack_count = Math.max(1, suggestedPerRackCount.value)
+  form.per_rack_count = clampPerRackCount(suggestedPerRackCount.value || 1)
+  persistCurrentTypePerRackLimit()
+  ElMessage.success(
+    `已按空闲 U 填入「${currentTypeLabel.value}」每柜 ${form.per_rack_count} 台，并记住该类型默认值`,
+  )
 }
 
 function onPerRackCountChange(val: number | undefined) {
-  form.per_rack_count = Math.max(1, Number(val) || 1)
+  form.per_rack_count = clampPerRackCount(val ?? 1)
+  persistCurrentTypePerRackLimit()
+}
+
+function openTypeLimitEditor() {
+  if (showTypeLimitEditor.value) {
+    showTypeLimitEditor.value = false
+    return
+  }
+  typeLimitDraft.value = props.types.map((t) => ({
+    id: t.id,
+    code: t.code,
+    name: t.name,
+    count: getPerRackLimitForType(t),
+  }))
+  showTypeLimitEditor.value = true
+}
+
+function onTypeLimitDraftChange(row: { id: string; code: string; name: string; count: number }) {
+  row.count = clampPerRackCount(row.count)
+  setPerRackLimitForType(row, row.count)
+  if (form.device_type_id === row.id) {
+    form.per_rack_count = row.count
+  }
 }
 
 watch(
@@ -612,7 +820,7 @@ watch(
 watch(
   () => [form.name_prefix, form.serial_prefix] as const,
   () => {
-    if (!props.value) return
+    if (!visible.value) return
     startIndexManual.value = false
     void syncStartIndexFromPrefixes()
   },
@@ -644,15 +852,39 @@ watch(pickKind, async () => {
   syncIpTableSelection()
 })
 
+async function onManufacturerChange(value: string | null) {
+  try {
+    if (!value) {
+      form.manufacturer_id = null
+      return
+    }
+    if (localManufacturers.value.some((m) => m.id === value)) {
+      form.manufacturer_id = value
+      return
+    }
+    const mfg = await ensureManufacturer(value)
+    form.manufacturer_id = mfg?.id || null
+  } catch (error: unknown) {
+    form.manufacturer_id = null
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '保存厂商失败')
+  }
+}
+
 async function onModelChange(value: string | null) {
   if (!value) {
     form.device_model_id = ''
     return
   }
-  if (props.models.some((m) => m.id === value)) {
+  if (modelOptions.value.some((m) => m.id === value)) {
     form.device_model_id = value
-    const model = props.models.find((m) => m.id === value)
-    if (model) form.height_u = model.height_u
+    const model = modelOptions.value.find((m) => m.id === value)
+    if (model) {
+      form.height_u = model.height_u
+      if (!form.manufacturer_id && model.manufacturer_id) {
+        form.manufacturer_id = model.manufacturer_id
+      }
+    }
     return
   }
   const name = value.trim()
@@ -660,10 +892,19 @@ async function onModelChange(value: string | null) {
     form.device_model_id = ''
     return
   }
-  const existed = props.models.find((m) => m.name === name || m.code === name)
+  const mfgId = form.manufacturer_id
+  const existed =
+    modelOptions.value.find(
+      (m) =>
+        (m.name === name || m.code === name)
+        && (!mfgId || m.manufacturer_id === mfgId),
+    ) || modelOptions.value.find((m) => m.name === name || m.code === name)
   if (existed) {
     form.device_model_id = existed.id
     form.height_u = existed.height_u
+    if (!form.manufacturer_id && existed.manufacturer_id) {
+      form.manufacturer_id = existed.manufacturer_id
+    }
     return
   }
   try {
@@ -673,19 +914,24 @@ async function onModelChange(value: string | null) {
       .replace(/^_+|_+$/g, '')
       .slice(0, 40)
     if (!code) code = `MODEL_${Date.now().toString(36).toUpperCase()}`
-    if (props.models.some((m) => m.code === code)) {
+    if (modelOptions.value.some((m) => m.code === code)) {
       code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
     }
     const created = await createDeviceModel({
       code,
       name,
+      manufacturer_id: form.manufacturer_id,
       height_u: form.height_u || 1,
       power: null,
       description: null,
     })
     emit('model-created', created)
+    localModels.value = [...localModels.value.filter((m) => m.id !== created.id), created]
     form.device_model_id = created.id
     form.height_u = created.height_u
+    if (created.manufacturer_id && !form.manufacturer_id) {
+      form.manufacturer_id = created.manufacturer_id
+    }
     ElMessage.success(`已新建型号「${created.name}」`)
   } catch (error: unknown) {
     form.device_model_id = ''
@@ -697,20 +943,24 @@ async function onModelChange(value: string | null) {
 async function onTypeChange(value: string | null) {
   if (!value) {
     form.device_type_id = null
+    applyPerRackLimitFromType()
     return
   }
   if (props.types.some((t) => t.id === value)) {
     form.device_type_id = value
+    applyPerRackLimitFromType()
     return
   }
   const name = value.trim()
   if (!name) {
     form.device_type_id = null
+    applyPerRackLimitFromType()
     return
   }
   const existed = props.types.find((t) => t.name === name || t.code === name)
   if (existed) {
     form.device_type_id = existed.id
+    applyPerRackLimitFromType()
     return
   }
   try {
@@ -726,9 +976,11 @@ async function onTypeChange(value: string | null) {
     const created = await createDeviceType({ code, name, description: null })
     emit('type-created', created)
     form.device_type_id = created.id
+    applyPerRackLimitFromType()
     ElMessage.success(`已新建设备类型「${created.name}」`)
   } catch (error: unknown) {
     form.device_type_id = null
+    applyPerRackLimitFromType()
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '创建设备类型失败')
   }
@@ -859,7 +1111,7 @@ function buildPreview() {
     `业务IP：${biz.length} 条${biz.length ? `（${biz[0].system_ip} … ${biz.at(-1)?.system_ip}）` : '（跳过）'}`,
     `BMC地址：${bmc.length} 条${bmc.length ? `（${bmc[0].system_ip} … ${bmc.at(-1)?.system_ip}）` : '（跳过）'}`,
     `目标机柜：${targets.length} 台（已有设备 ${rackOccupancySummary.value.occupiedRacks} 台 / 已上架 ${rackOccupancySummary.value.totalDevices} 台 / 空闲 ${rackOccupancySummary.value.totalFreeU}U）`,
-    `起始 U：${form.start_u}，设备间隔：${form.gap_u}U，每柜最多：${form.per_rack_count} 台（按空闲U建议 ${suggestedPerRackCount.value}）`,
+    `起始 U：${form.start_u}，设备间隔：${form.gap_u}U，每柜最多：${form.per_rack_count} 台（类型「${currentTypeLabel.value}」，含已上架同类型 · 空闲U建议 ${suggestedPerRackCount.value}）`,
   ]
 }
 
@@ -903,6 +1155,7 @@ async function nextStep() {
     }
     step.value = 2
     await refreshMountRacks()
+    applyPerRackLimitFromType()
     await nextTick()
     return
   }
@@ -952,18 +1205,26 @@ async function submit() {
     const result = await batchMountDevices({
       room_id: form.room_id,
       new_devices: newDevices,
-      rack_ids: form.rack_ids,
+      rack_ids: targetRacks.value.map((r) => r.id),
       per_rack_count: Math.max(1, Number(form.per_rack_count) || 1),
       start_u: form.start_u,
       gap_u: form.gap_u,
       ip_ids: selectedBusinessIpIds.value,
       bmc_ip_ids: selectedBmcIpIds.value,
     })
-    ElMessage.success(
-      `新建 ${result.created} 台，上架 ${result.mounted} 台，关联 IP ${result.ip_bound ?? 0} 条，跳过 ${result.skipped} 台`,
-    )
+    const stockOnly = result.stock_only ?? 0
+    const parts = [
+      `新建 ${result.created} 台`,
+      `上架 ${result.mounted} 台`,
+      `关联 IP ${result.ip_bound ?? 0} 条`,
+    ]
+    if (stockOnly > 0) parts.push(`库存保留 ${stockOnly} 台（无位未上架）`)
+    if (result.skipped > 0) parts.push(`失败 ${result.skipped} 台`)
+    ElMessage.success(parts.join('，'))
     if (result.errors?.length) {
-      ElMessage.warning(result.errors.slice(0, 6).join('; '))
+      const tip = result.errors.slice(0, 6).join('; ')
+      if (stockOnly > 0 && result.skipped === 0) ElMessage.info(tip)
+      else ElMessage.warning(tip)
     }
     visible.value = false
     emit('success')
@@ -1023,13 +1284,38 @@ async function submit() {
             <el-option
               v-for="it in contractItems"
               :key="contractItemKey(it)"
-              :label="it.device_name"
+              :label="contractItemOptionLabel(it)"
               :value="contractItemKey(it)"
             />
           </el-select>
           <span v-if="selectedContractItem" class="field-tip">
             设备名称将设为「{{ selectedContractItem.device_name }}」，上架后计入采购汇总「已关联」
+            <template v-if="form.device_model_id">
+              ；已自动关联型号「{{
+                (localModels.find((m) => m.id === form.device_model_id)
+                  || models.find((m) => m.id === form.device_model_id))?.name || '—'
+              }}」
+            </template>
           </span>
+        </el-form-item>
+        <el-form-item label="厂商">
+          <el-select
+            v-model="form.manufacturer_id"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            style="width: 100%"
+            placeholder="选择或输入厂商；选合同设备时可自动匹配"
+            @change="onManufacturerChange"
+          >
+            <el-option
+              v-for="m in localManufacturers"
+              :key="m.id"
+              :label="m.name"
+              :value="m.id"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="新建数量" required>
           <el-input-number v-model="form.count" :min="1" :max="200" />
@@ -1061,7 +1347,7 @@ async function submit() {
             style="width: 100%"
             @change="onModelChange"
           >
-            <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
+            <el-option v-for="m in modelOptions" :key="m.id" :label="m.name" :value="m.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="设备类型">
@@ -1214,26 +1500,54 @@ async function submit() {
         </el-form-item>
         <el-form-item label="设备间隔">
           <el-input-number v-model="form.gap_u" :min="0" :max="10" />
-          <span class="field-tip">U（默认 1，设备之间空 1U）</span>
+          <span class="field-tip">U（遇已占用 U 时先留出间隔再向后放置；同柜多台之间同样留空）</span>
         </el-form-item>
         <el-form-item label="每柜最多">
-          <el-input-number
-            v-model="form.per_rack_count"
-            :min="1"
-            :max="200"
-            @change="onPerRackCountChange"
-          />
-          <span class="field-tip">
-            严格按此数量上架（当前 {{ form.per_rack_count }} 台/柜）· U位建议 {{ suggestedPerRackCount }}
-            <el-button link type="primary" @click="syncPerRackCountDefault">按计算填入</el-button>
-          </span>
+          <div class="per-rack-field">
+            <div class="per-rack-row">
+              <el-input-number
+                v-model="form.per_rack_count"
+                :min="1"
+                :max="200"
+                @change="onPerRackCountChange"
+              />
+              <span class="field-tip">
+                类型「{{ currentTypeLabel }}」每柜最多 {{ form.per_rack_count }} 台（含已上架同类型）· 空闲U建议
+                {{ suggestedPerRackCount }}
+                <el-button link type="primary" @click="syncPerRackCountDefault">按计算填入</el-button>
+                <el-button link type="primary" @click="openTypeLimitEditor">
+                  {{ showTypeLimitEditor ? '收起类型配置' : '按类型配置' }}
+                </el-button>
+              </span>
+            </div>
+            <div v-if="showTypeLimitEditor" class="type-limit-editor">
+              <p class="hint" style="margin-bottom: 8px">
+                按设备类型设置每柜同类型上限。上架时：已达上限整柜跳过；未达上限则占用 U 跳过并继续向后放置。
+              </p>
+              <el-table :data="typeLimitDraft" size="small" border>
+                <el-table-column prop="name" label="设备类型" min-width="120" />
+                <el-table-column prop="code" label="编码" width="110" />
+                <el-table-column label="每柜最多" width="160">
+                  <template #default="{ row }">
+                    <el-input-number
+                      v-model="row.count"
+                      :min="1"
+                      :max="200"
+                      size="small"
+                      @change="() => onTypeLimitDraftChange(row)"
+                    />
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
       <el-alert
         :type="occupancyAlertType"
         :closable="false"
         :title="occupancyAlertTitle"
-        description="橙色机柜表示已有设备；上架时按「每柜最多」限制台数，并跳过已被占用的 U 位，按机柜编号顺序寻找可用位置。"
+        description="按设备类型设置每柜最多台数。同类型已达上限则跳过整柜；未达上限时若目标 U 已占用，则跳过占用块并按「设备间隔」留空后再向后放置（如 U3/U6/U9 为 2U 设备、间隔 1U 时从 U12 起放）。无柜可上时设备保留库存。"
         show-icon
         style="margin-top: 8px"
       />
@@ -1355,6 +1669,26 @@ async function submit() {
   margin-left: 8px;
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+.per-rack-field {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.per-rack-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.type-limit-editor {
+  width: 100%;
+  max-width: 520px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
 }
 .preview-list {
   margin: 0;

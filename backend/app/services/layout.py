@@ -4,10 +4,19 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.domains.layout.engine import find_first_available, occupied_range, validate_mount
+from app.domains.layout.engine import (
+    find_first_available,
+    occupied_range,
+    pick_mount_u,
+    validate_mount,
+)
 from app.models.device import Device, DeviceStatus
 from app.models.ip_address import IpBindType, IpStatus
-from app.repositories.device import DeviceModelRepository, DeviceRepository
+from app.repositories.device import (
+    DeviceModelRepository,
+    DeviceRepository,
+    ManufacturerRepository,
+)
 from app.repositories.device_contract import DeviceContractRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.ip_address import IpAddressRepository
@@ -43,6 +52,7 @@ class LayoutService:
         self.position_repo = RackPositionRepository(session)
         self.device_repo = DeviceRepository(session)
         self.model_repo = DeviceModelRepository(session)
+        self.mfg_repo = ManufacturerRepository(session)
         self.contract_repo = DeviceContractRepository(session)
         self.room_repo = RoomRepository(session)
         self.ip_repo = IpAddressRepository(session)
@@ -264,6 +274,14 @@ class LayoutService:
                         await self.device_repo.free_unique_for_soft_deleted(existing_hn)
 
                     type_id = uuid.UUID(item.device_type_id) if item.device_type_id else None
+                    manufacturer_id = None
+                    if item.manufacturer_id:
+                        mfg = await self.mfg_repo.get_by_id(uuid.UUID(item.manufacturer_id))
+                        if not mfg:
+                            raise ValidationError(
+                                f"{item.serial_number}: 厂商不存在", code=10004
+                            )
+                        manufacturer_id = mfg.id
                     contract_id = None
                     if item.contract_id:
                         try:
@@ -284,6 +302,7 @@ class LayoutService:
                         serial_number=item.serial_number,
                         device_model_id=model.id,
                         device_type_id=type_id,
+                        manufacturer_id=manufacturer_id,
                         contract_id=contract_id,
                         height_u=item.height_u or model.height_u,
                         power=item.power or model.power,
@@ -346,18 +365,29 @@ class LayoutService:
         for rack in racks:
             if device_idx >= len(queue):
                 break
-            # 本批已上架计数；同时把机柜上已有在架设备计入限额
-            existing_on_rack = 0
-            try:
-                stats = await self.position_repo.stats_for_rack_ids([rack.id])
-                existing_on_rack = int(stats.get(rack.id, (0, 0))[1])
-            except Exception:  # noqa: BLE001
-                existing_on_rack = 0
+
+            # 先看队首设备类型，决定本柜同类型配额
+            peek_id = queue[device_idx]
+            peek = await self.device_repo.get_by_id_with_model(peek_id)
+            if not peek:
+                device_idx += 1
+                result.skipped += 1
+                result.errors.append(f"{peek_id}: 设备不存在")
+                continue
+
+            existing_same_type = await self.device_repo.count_mounted_by_type(
+                rack.id, peek.device_type_id
+            )
+            # 同类型已达每柜上限 → 整柜跳过
+            if existing_same_type >= per_rack_limit:
+                continue
+
+            rack_type_quota = per_rack_limit - existing_same_type
             mounted_in_rack = 0
             cursor_u = start_u
-            while device_idx < len(queue):
-                if existing_on_rack + mounted_in_rack >= per_rack_limit:
-                    break
+            attempted_us: set[int] = set()
+
+            while device_idx < len(queue) and mounted_in_rack < rack_type_quota:
                 device_id = queue[device_idx]
                 device = await self.device_repo.get_by_id_with_model(device_id)
                 if not device:
@@ -365,16 +395,39 @@ class LayoutService:
                     result.skipped += 1
                     result.errors.append(f"{device_id}: 设备不存在")
                     continue
+
+                # 类型变化时按新类型重算本柜配额（通常一批同类型）
+                if device.device_type_id != peek.device_type_id:
+                    existing_same_type = await self.device_repo.count_mounted_by_type(
+                        rack.id, device.device_type_id
+                    )
+                    if existing_same_type >= per_rack_limit:
+                        break
+                    rack_type_quota = per_rack_limit - existing_same_type
+                    mounted_in_rack = 0
+                    attempted_us.clear()
+                    peek = device
+
+                if mounted_in_rack >= rack_type_quota:
+                    break
+
                 occupied_map = await self._build_occupied_map(rack.id)
-                u_position = find_first_available(
+                # 目标 U 占用时：跳过占用块并按「设备间隔」留空，再向后找合法空闲位
+                u_position = pick_mount_u(
                     total_u=rack.total_u,
                     height_u=device.height_u,
                     occupied_map=occupied_map,
                     start_u=cursor_u,
                     gap_u=gap_u,
+                    prefer_exact=False,
                 )
                 if u_position is None:
+                    # 本柜从 cursor 起已无空位，换下一柜
                     break
+                if u_position in attempted_us:
+                    break
+                attempted_us.add(u_position)
+
                 mounted_ok = False
                 try:
                     async with self.session.begin_nested():
@@ -440,27 +493,32 @@ class LayoutService:
 
                         result.assignments.append(assignment)
                 except Exception as exc:  # noqa: BLE001
-                    result.skipped += 1
-                    result.errors.append(f"{device.hostname}: {exc}")
+                    # 该 U 失败：跳过该 U 继续向后找（同柜、同设备）
+                    result.errors.append(f"{device.hostname}@{rack.code}/U{u_position}: {exc}")
+                    cursor_u = u_position + 1
+                    continue
+
                 device_idx += 1
-                # 达到本柜限额后立即换柜，避免继续尝试
-                if mounted_ok and existing_on_rack + mounted_in_rack >= per_rack_limit:
+                if mounted_ok and mounted_in_rack >= rack_type_quota:
                     break
 
+        # 剩余设备：已创建则保留库存不上架
         while device_idx < len(queue):
             leftover = await self.device_repo.get_by_id_with_model(queue[device_idx])
             label = leftover.hostname if leftover else str(queue[device_idx])
-            result.skipped += 1
-            result.errors.append(f"{label}: 机柜空间不足，未能上架")
+            result.stock_only += 1
+            result.errors.append(
+                f"{label}: 无可用机柜/U位或同类型已达每柜上限，已创建并保留在库存（未上架）"
+            )
             device_idx += 1
 
         if business_queue:
             result.errors.append(
-                f"剩余 {len(business_queue)} 条业务IP未关联（设备已全部上架或不足）"
+                f"剩余 {len(business_queue)} 条业务IP未关联（无对应已上架设备）"
             )
         if bmc_queue:
             result.errors.append(
-                f"剩余 {len(bmc_queue)} 条BMC地址未关联（设备已全部上架或不足）"
+                f"剩余 {len(bmc_queue)} 条BMC地址未关联（无对应已上架设备）"
             )
 
         await self.session.flush()
@@ -469,8 +527,10 @@ class LayoutService:
     async def batch_unmount(
         self, payload: BatchUnmountRequest, user_id: uuid.UUID | None = None
     ) -> BatchUnmountResult:
+        """批量下架：一次加载设备、按柜清位、一次释放 IP。"""
         result = BatchUnmountResult()
         seen: set[uuid.UUID] = set()
+        requested: list[uuid.UUID] = []
         for raw in payload.device_ids:
             try:
                 device_id = uuid.UUID(raw)
@@ -481,19 +541,54 @@ class LayoutService:
             if device_id in seen:
                 continue
             seen.add(device_id)
-            device = await self.device_repo.get_by_id_with_model(device_id)
+            requested.append(device_id)
+
+        if not requested:
+            return result
+
+        devices = await self.device_repo.list_by_ids_with_relations(requested)
+        by_id = {d.id: d for d in devices}
+        to_unmount: list[Device] = []
+        for device_id in requested:
+            device = by_id.get(device_id)
             if not device:
                 result.skipped += 1
-                result.errors.append(f"{raw}: 不存在")
+                result.errors.append(f"{device_id}: 不存在")
                 continue
             if not device.rack_id:
                 result.skipped += 1
                 result.errors.append(f"{device.hostname}: 未上架")
                 continue
-            try:
-                await self.unmount(UnmountRequest(device_id=str(device_id)), user_id=user_id)
-                result.unmounted += 1
-            except Exception as exc:  # noqa: BLE001
-                result.skipped += 1
-                result.errors.append(f"{device.hostname}: {exc}")
+            to_unmount.append(device)
+
+        if not to_unmount:
+            return result
+
+        # 按机柜批量清占用位
+        by_rack: dict[uuid.UUID, list[Device]] = {}
+        for device in to_unmount:
+            assert device.rack_id is not None
+            by_rack.setdefault(device.rack_id, []).append(device)
+
+        for rack_id, group in by_rack.items():
+            positions = await self.position_repo.list_by_rack(rack_id)
+            device_ids = {d.id for d in group}
+            for pos in positions:
+                if pos.device_id in device_ids:
+                    pos.occupied = False
+                    pos.device_id = None
+                    pos.updated_by = user_id
+
+        for device in to_unmount:
+            device.rack_id = None
+            device.u_position = None
+            device.status = DeviceStatus.STOCK.value
+            device.updated_by = user_id
+            device.version += 1
+            result.unmounted += 1
+
+        await self.ip_service.release_by_devices(
+            [d.id for d in to_unmount], user_id=user_id
+        )
+        await self.session.flush()
         return result

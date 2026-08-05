@@ -187,6 +187,10 @@ class Device(BaseModel):
     contract_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("device_contract.id"), nullable=True, index=True
     )
+    # 设备级厂商覆盖：有值时优先于型号厂商，避免改一台影响同型号其它设备
+    manufacturer_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("manufacturer.id"), nullable=True, index=True
+    )
     rack_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("rack.id"), nullable=True, index=True
     )
@@ -200,6 +204,9 @@ class Device(BaseModel):
     network_panel_bound: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     model: Mapped[DeviceModel] = relationship(back_populates="devices")
+    manufacturer: Mapped[Manufacturer | None] = relationship(
+        foreign_keys=[manufacturer_id]
+    )
     device_type: Mapped[DeviceType | None] = relationship(back_populates="devices")
     param_profile: Mapped[DeviceParamProfile | None] = relationship(back_populates="devices")
     system_profile: Mapped[DeviceSystemProfile | None] = relationship(back_populates="devices")

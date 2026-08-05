@@ -93,6 +93,9 @@ export interface FramePort {
   peer_node_id: string | null
   peer_port: string | null
   peer_label: string | null
+  /** 对端台账设备（设备管理） */
+  peer_device_id?: string | null
+  peer_device_name?: string | null
   /** 手动拖动后锁定，布局引擎不再覆盖坐标 */
   layout_locked?: boolean | null
 }

@@ -389,9 +389,24 @@ function openEdit(row: ParamProfile) {
   dialogVisible.value = true
 }
 
+/** 新建时若尚未手填设备ID，随名称自动生成建议值 */
+function onNameChangeForCode() {
+  if (editingId.value) return
+  const name = form.name.trim()
+  if (!name) return
+  if (!form.code.trim()) {
+    form.code = makeCode(name)
+  }
+}
+
 async function handleSave() {
   if (!form.name.trim()) {
     ElMessage.warning('请填写设备名称')
+    return
+  }
+  const code = form.code.trim() || makeCode(form.name.trim())
+  if (!code) {
+    ElMessage.warning('请填写设备ID')
     return
   }
   saving.value = true
@@ -399,12 +414,12 @@ async function handleSave() {
     const payload = buildPayload()
     if (editingId.value) {
       await updateParamProfile(editingId.value, {
+        code,
         name: form.name.trim(),
         payload,
         description: form.description || null,
       })
     } else {
-      const code = form.code.trim() || makeCode(form.name.trim())
       await createParamProfile({
         code,
         name: form.name.trim(),
@@ -537,6 +552,13 @@ onMounted(async () => {
       max-height="520"
       :row-class-name="rowClassName"
     >
+      <el-table-column
+        type="index"
+        label="序号"
+        width="64"
+        align="center"
+        :index="(i: number) => i + 1"
+      />
       <el-table-column prop="code" label="设备ID" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">
           <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.code }}</span>
@@ -620,8 +642,21 @@ onMounted(async () => {
       <el-form label-width="100px" class="param-form" size="small">
         <el-row :gutter="12">
           <el-col :span="8">
+            <el-form-item label="设备ID" required>
+              <el-input
+                v-model="form.code"
+                maxlength="50"
+                placeholder="唯一设备ID，可手动修改"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
             <el-form-item label="设备名称" required>
-              <el-input v-model="form.name" placeholder="对应采购汇总设备名称" />
+              <el-input
+                v-model="form.name"
+                placeholder="对应采购汇总设备名称"
+                @change="onNameChangeForCode"
+              />
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -629,6 +664,8 @@ onMounted(async () => {
               <el-input v-model="form.source_device_model" placeholder="设备型号" />
             </el-form-item>
           </el-col>
+        </el-row>
+        <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="设备类型">
               <el-select
@@ -642,14 +679,12 @@ onMounted(async () => {
               </el-select>
             </el-form-item>
           </el-col>
-        </el-row>
-        <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="厂商">
               <el-input v-model="form.source_manufacturer" />
             </el-form-item>
           </el-col>
-          <el-col :span="16">
+          <el-col :span="8">
             <el-form-item label="描述">
               <el-input v-model="form.description" placeholder="可选备注" />
             </el-form-item>

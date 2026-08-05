@@ -4,12 +4,11 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   batchDeleteDevices,
-  batchMountDevices,
-  batchUnmountDevices,
   createBmcProfile,
   createDevice,
   createDeviceModel,
   createDeviceType,
+  createManufacturer,
   createSystemProfile,
   deleteBmcProfile,
   deleteDevice,
@@ -35,7 +34,6 @@ import {
   updateDeviceModel,
   updateDeviceType,
   updateSystemProfile,
-  type BatchMountNewDevice,
   type BmcProfile,
   type BmcProfilePayload,
   type CredentialAccount,
@@ -79,12 +77,15 @@ import {
   listDeviceContracts,
   matchContractItemKey,
   syncContractModels,
+  syncContractModelsById,
   type DeviceContract,
   type DeviceContractItem,
 } from '@/api/contract'
 import { getRackLayout, listRacks, type Rack, type RackLayoutSlot } from '@/api/rack'
 import { listRooms, type Room } from '@/api/room'
 import BatchCreateDeviceDialog from '@/components/BatchCreateDeviceDialog.vue'
+import BatchEditDeviceDialog from '@/components/BatchEditDeviceDialog.vue'
+import type { BatchEditMode } from '@/components/BatchEditDeviceDialog.vue'
 import DevicePanelPreview from '@/components/DevicePanelPreview.vue'
 import RackCabinet from '@/components/RackCabinet.vue'
 import RackRangePicker from '@/components/RackRangePicker.vue'
@@ -117,36 +118,99 @@ const selectedFormContract = computed(
 
 const formContractItems = computed((): DeviceContractItem[] => {
   const items = selectedFormContract.value?.device_items
-  return Array.isArray(items) ? items.filter((it) => it.device_name) : []
+  return Array.isArray(items)
+    ? items.filter((it) => {
+        if (!it.device_name) return false
+        const kind = it.item_kind || 'hardware'
+        return kind !== 'software'
+      })
+    : []
 })
 
-function onFormContractChange(contractId: string | null) {
+function contractItemOptionLabel(it: DeviceContractItem) {
+  const name = (it.device_name || '').trim()
+  const model = (it.device_model_name || '').trim()
+  const mfg = (it.manufacturer_name || '').trim()
+  if (model && mfg) return `${name} · ${model} · ${mfg}`
+  if (model) return `${name} · ${model}`
+  return name
+}
+
+function findModelForContract(
+  modelName: string,
+  mfg: Manufacturer | null,
+  source: DeviceModel[] = models.value,
+): DeviceModel | undefined {
+  const name = modelName.trim()
+  if (!name) return undefined
+  const lower = name.toLowerCase()
+  const byName = source.filter(
+    (m) => m.name.toLowerCase() === lower || m.code.toLowerCase() === lower,
+  )
+  if (!byName.length) return undefined
+  if (mfg) {
+    const withMfg = byName.find(
+      (m) => m.manufacturer_id === mfg.id || m.manufacturer_name === mfg.name,
+    )
+    if (withMfg) return withMfg
+  }
+  return byName[0]
+}
+
+async function onFormContractChange(contractId: string | null) {
   form.contract_id = contractId || null
   form.contract_item_key = ''
+  form.manufacturer_id = null
   if (!contractId) return
+  try {
+    // 先按合同同步型号档案，再自动关联合同设备
+    await syncContractModelsById(contractId)
+    await Promise.all([loadProfileRefs(), loadManufacturers()])
+  } catch {
+    /* 同步失败仍尝试本地匹配 */
+  }
   const items = formContractItems.value
   if (items.length === 1) {
-    onFormContractItemChange(contractItemKey(items[0]))
+    await onFormContractItemChange(contractItemKey(items[0]))
   }
 }
 
-function onFormContractItemChange(key: string | null) {
+async function onFormContractItemChange(key: string | null) {
   form.contract_item_key = key || ''
   const item = findContractItem(selectedFormContract.value, key)
-  if (!item) return
+  if (!item) {
+    form.manufacturer_id = null
+    return
+  }
   form.name = item.device_name
-  const modelName = (item.device_model_name || '').trim()
-  if (!modelName) return
-  const mfgName = (item.manufacturer_name || '').trim()
-  const hit = models.value.find(
-    (m) =>
-      m.name === modelName
-      && (!mfgName || !m.manufacturer_name || m.manufacturer_name === mfgName),
-  )
-  if (hit) {
-    form.device_model_id = hit.id
-    form.height_u = hit.height_u
-    form.power = hit.power
+  try {
+    const mfg = await ensureManufacturer(item.manufacturer_name)
+    form.manufacturer_id = mfg?.id || null
+    const modelName = (item.device_model_name || item.device_name || '').trim()
+    if (!modelName) {
+      ElMessage.warning('该合同设备未填写型号，请手动选择设备型号')
+      return
+    }
+    let hit = findModelForContract(modelName, mfg)
+    if (!hit) {
+      const id = await ensureDeviceModel(modelName, {
+        height_u: form.height_u,
+        power: form.power,
+        manufacturer_id: mfg?.id || null,
+      })
+      hit = models.value.find((m) => m.id === id)
+    }
+    if (hit) {
+      form.device_model_id = hit.id
+      form.height_u = hit.height_u
+      form.power = hit.power
+      if (!form.manufacturer_id && hit.manufacturer_id) {
+        form.manufacturer_id = hit.manufacturer_id
+      }
+    }
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '匹配合同厂商/型号失败')
   }
 }
 
@@ -291,6 +355,7 @@ const form = reactive({
   contract_id: '' as string | null,
   /** 合同明细键：kind||name||model||mfg */
   contract_item_key: '' as string,
+  manufacturer_id: null as string | null,
   height_u: 1 as number | null,
   power: null as number | null,
   description: '',
@@ -461,20 +526,8 @@ const rackDetailPower = ref(0)
 const rackDetailDeviceId = ref<string | null>(null)
 
 const batchCreateVisible = ref(false)
-
-const wizardVisible = ref(false)
-const wizardStep = ref(0)
-const wizardSource = ref<'stock' | 'create'>('stock')
-const wizardForm = reactive({
-  room_id: '',
-  rack_ids: [] as string[],
-  per_rack_count: 1,
-  start_u: 1,
-  gap_u: 1,
-})
-const wizardNewRows = ref<BatchMountNewDevice[]>([])
-const wizardPreview = ref<string[]>([])
-const wizardSubmitting = ref(false)
+const batchEditVisible = ref(false)
+const batchEditMode = ref<BatchEditMode>('contract')
 
 const paramDialogVisible = ref(false)
 const paramEditingId = ref<string | null>(null)
@@ -659,6 +712,37 @@ function genModelCode(name: string) {
   return `MODEL_${Date.now().toString(36).toUpperCase()}`
 }
 
+function genManufacturerCode(name: string) {
+  const ascii = name
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40)
+  const base = ascii ? `MFG_${ascii}` : `MFG_${Date.now().toString(36).toUpperCase()}`
+  return base.slice(0, 50)
+}
+
+async function ensureManufacturer(name: string | null | undefined): Promise<Manufacturer | null> {
+  const trimmed = (name || '').trim()
+  if (!trimmed) return null
+  const hit = manufacturers.value.find((m) => m.name === trimmed || m.code === trimmed)
+  if (hit) return hit
+  let code = genManufacturerCode(trimmed)
+  if (manufacturers.value.some((m) => m.code === code)) {
+    code = `${code}_${Date.now().toString(36).toUpperCase()}`.slice(0, 50)
+  }
+  const created = await createManufacturer({
+    code,
+    name: trimmed,
+    description: '来自合同信息同步',
+  })
+  manufacturers.value = [...manufacturers.value, created].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )
+  return created
+}
+
 async function loadManufacturers() {
   manufacturers.value = await listManufacturers()
 }
@@ -736,13 +820,23 @@ async function removeModel(row: DeviceModel) {
 
 async function ensureDeviceModel(
   value: string | null,
-  opts?: { height_u?: number | null; power?: number | null },
+  opts?: {
+    height_u?: number | null
+    power?: number | null
+    manufacturer_id?: string | null
+  },
 ): Promise<string | null> {
   if (!value) return null
   if (models.value.some((m) => m.id === value)) return value
   const name = value.trim()
   if (!name) return null
-  const byName = models.value.find((m) => m.name === name || m.code === name)
+  const mfgId = opts?.manufacturer_id ?? form.manufacturer_id ?? null
+  const byName =
+    models.value.find(
+      (m) =>
+        (m.name === name || m.code === name)
+        && (!mfgId || m.manufacturer_id === mfgId),
+    ) || models.value.find((m) => m.name === name || m.code === name)
   if (byName) return byName.id
   let code = genModelCode(name)
   if (models.value.some((m) => m.code === code)) {
@@ -751,11 +845,15 @@ async function ensureDeviceModel(
   const created = await createDeviceModel({
     code,
     name,
+    manufacturer_id: mfgId,
     height_u: opts?.height_u || form.height_u || 1,
     power: opts?.power ?? form.power ?? null,
     description: null,
   })
   models.value = [...models.value, created].sort((a, b) => a.name.localeCompare(b.name))
+  if (created.manufacturer_id && !form.manufacturer_id) {
+    form.manufacturer_id = created.manufacturer_id
+  }
   ElMessage.success(`已新建型号「${created.name}」`)
   return created.id
 }
@@ -768,11 +866,34 @@ async function onDeviceModelSelect(value: string | null) {
     if (model) {
       form.height_u = model.height_u
       form.power = model.power
+      // 仅在未指定设备级厂商时，用型号厂商预填
+      if (!form.manufacturer_id && model.manufacturer_id) {
+        form.manufacturer_id = model.manufacturer_id
+      }
     }
   } catch (error: unknown) {
     form.device_model_id = ''
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '创建型号失败')
+  }
+}
+
+async function onManufacturerChange(value: string | null) {
+  try {
+    if (!value) {
+      form.manufacturer_id = null
+      return
+    }
+    if (manufacturers.value.some((m) => m.id === value)) {
+      form.manufacturer_id = value
+      return
+    }
+    const mfg = await ensureManufacturer(value)
+    form.manufacturer_id = mfg?.id || null
+  } catch (error: unknown) {
+    form.manufacturer_id = null
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '保存厂商失败')
   }
 }
 
@@ -809,6 +930,7 @@ async function saveModelForm() {
       const created = await createDeviceModel({
         code,
         name,
+        manufacturer_id: form.manufacturer_id,
         height_u: modelForm.height_u,
         power: modelForm.power,
         description: modelForm.description.trim() || null,
@@ -825,16 +947,6 @@ async function saveModelForm() {
     ElMessage.error(err.response?.data?.message || err.message || '保存型号失败')
   } finally {
     modelSaving.value = false
-  }
-}
-
-async function onWizardModelChange(row: BatchMountNewDevice, value: string | null) {
-  try {
-    row.device_model_id = (await ensureDeviceModel(value, { height_u: row.height_u })) || ''
-  } catch (error: unknown) {
-    row.device_model_id = ''
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    ElMessage.error(err.response?.data?.message || err.message || '创建型号失败')
   }
 }
 
@@ -1139,10 +1251,6 @@ const BIND_TYPE_OPTIONS: { value: IpBindType; label: string }[] = [
   { value: 'rack', label: '单机柜' },
   { value: 'rack_range', label: '机柜范围' },
 ]
-
-const wizardRacks = computed(() =>
-  racks.value.filter((r) => r.room_id === wizardForm.room_id),
-)
 
 /** 关联用机柜：可按机房筛选；有设备的机柜才列出 */
 const ipBindRacks = computed(() =>
@@ -1549,6 +1657,7 @@ function resetForm() {
   form.system_profile_id = null
   form.contract_id = null
   form.contract_item_key = ''
+  form.manufacturer_id = null
   form.height_u = 1
   form.power = null
   form.description = ''
@@ -1616,6 +1725,7 @@ function openEdit(row: Device) {
     row.name,
     row.device_model_name,
   )
+  form.manufacturer_id = row.manufacturer_id || null
   form.height_u = row.height_u
   form.power = row.power
   form.description = row.description || ''
@@ -1761,24 +1871,25 @@ async function handleSubmit() {
     ElMessage.warning('分配虚拟IP前请先选择业务地址或带外地址')
     return
   }
-  const payload = {
-    name: form.name || form.hostname || form.serial_number,
-    hostname: form.hostname || form.name || form.serial_number,
-    serial_number: form.serial_number,
-    device_model_id: form.device_model_id,
-    device_type_id: form.device_type_id || null,
-    param_profile_id: form.param_profile_id || null,
-    bmc_profile_id: form.bmc_profile_id || null,
-    contract_id: form.contract_id || '',
-    system_profile_id: form.system_profile_id || null,
-    height_u: form.height_u,
-    power: form.power,
-    description: form.description || null,
-    system_ip_id: form.system_ip_id || null,
-    bmc_ip_id: form.bmc_ip_id || null,
-    vip_ip_id: form.vip_ip_id || null,
-  }
   try {
+    const payload = {
+      name: form.name || form.hostname || form.serial_number,
+      hostname: form.hostname || form.name || form.serial_number,
+      serial_number: form.serial_number,
+      device_model_id: form.device_model_id,
+      device_type_id: form.device_type_id || null,
+      manufacturer_id: form.manufacturer_id || '',
+      param_profile_id: form.param_profile_id || null,
+      bmc_profile_id: form.bmc_profile_id || null,
+      contract_id: form.contract_id || '',
+      system_profile_id: form.system_profile_id || null,
+      height_u: form.height_u,
+      power: form.power,
+      description: form.description || null,
+      system_ip_id: form.system_ip_id || null,
+      bmc_ip_id: form.bmc_ip_id || null,
+      vip_ip_id: form.vip_ip_id || null,
+    }
     let deviceId = editingId.value
     if (editingId.value) {
       await updateDevice(editingId.value, payload)
@@ -1862,27 +1973,39 @@ async function handleBatchDelete() {
   }
 }
 
-async function handleBatchUnmount() {
-  const mounted = selectedDevices.value.filter((d) => d.rack_id)
-  if (!mounted.length) {
-    ElMessage.warning('请选择已上架设备')
+function openBatchEdit(mode: BatchEditMode) {
+  if (!selectedDevices.value.length) {
+    ElMessage.warning('请先选择设备')
     return
   }
-  await ElMessageBox.confirm(
-    `确定下架选中的 ${mounted.length} 台设备吗？已分配的 IP 将释放为空闲。`,
-    '批量下架',
-    { type: 'warning' },
-  )
-  batchBusy.value = true
-  try {
-    const result = await batchUnmountDevices(mounted.map((d) => d.id))
-    ElMessage.success(`下架 ${result.unmounted} 台，跳过 ${result.skipped} 台（已释放关联 IP）`)
-    if (result.errors.length) ElMessage.warning(result.errors.slice(0, 3).join('; '))
-    await loadData()
-    await refreshIpAfterDeviceChange()
-  } finally {
-    batchBusy.value = false
+  batchEditMode.value = mode
+  batchEditVisible.value = true
+}
+
+const BATCH_EDIT_COMMANDS: BatchEditMode[] = [
+  'contract',
+  'type',
+  'model',
+  'manufacturer',
+  'unmount',
+  'mount',
+  'ip',
+]
+
+function handleBatchCommand(command: string) {
+  if (command === 'delete') {
+    void handleBatchDelete()
+    return
   }
+  if ((BATCH_EDIT_COMMANDS as string[]).includes(command)) {
+    openBatchEdit(command as BatchEditMode)
+  }
+}
+
+async function onBatchEditSuccess() {
+  selectedDevices.value = []
+  await loadData()
+  await refreshIpAfterDeviceChange()
 }
 
 function openMount(row: Device) {
@@ -1993,134 +2116,20 @@ function onTypeCreated(created: DeviceType) {
 }
 
 function onModelCreated(created: DeviceModel) {
-  if (models.value.some((m) => m.id === created.id)) return
+  const idx = models.value.findIndex((m) => m.id === created.id)
+  if (idx >= 0) {
+    models.value[idx] = created
+    models.value = [...models.value]
+    return
+  }
   models.value = [...models.value, created].sort((a, b) => a.name.localeCompare(b.name))
 }
 
-async function onWizardTypeChange(row: BatchMountNewDevice, value: string | null) {
-  try {
-    row.device_type_id = await ensureDeviceType(value)
-  } catch (error: unknown) {
-    row.device_type_id = null
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    ElMessage.error(err.response?.data?.message || err.message || '创建设备类型失败')
-  }
-}
-
-function openWizard() {
-  wizardStep.value = 0
-  wizardSource.value = selectedDevices.value.some((d) => !d.rack_id) ? 'stock' : 'create'
-  wizardForm.room_id = rooms.value[0]?.id || ''
-  wizardForm.rack_ids = []
-  wizardForm.per_rack_count = 1
-  wizardForm.start_u = 1
-  wizardForm.gap_u = 1
-  wizardNewRows.value = [
-    {
-      name: '',
-      hostname: '',
-      serial_number: '',
-      device_model_id: '',
-      device_type_id: types.value[0]?.id || null,
-      height_u: 1,
-    },
-  ]
-  wizardPreview.value = []
-  wizardVisible.value = true
-}
-
-function addWizardRow() {
-  wizardNewRows.value.push({
-    name: '',
-    hostname: '',
-    serial_number: '',
-    device_model_id: '',
-    device_type_id: types.value[0]?.id || null,
-    height_u: models.value[0]?.height_u || 1,
-  })
-}
-
-function buildWizardPreview() {
-  const stockIds =
-    wizardSource.value === 'stock'
-      ? selectedDevices.value.filter((d) => !d.rack_id).map((d) => d.name || d.hostname)
-      : []
-  const created =
-    wizardSource.value === 'create'
-      ? wizardNewRows.value.filter((r) => r.serial_number).map((r) => r.name || r.serial_number)
-      : []
-  const targets = wizardForm.rack_ids.length
-    ? wizardRacks.value.filter((r) => wizardForm.rack_ids.includes(r.id))
-    : wizardRacks.value
-  const roomName = rooms.value.find((r) => r.id === wizardForm.room_id)?.name || ''
-  wizardPreview.value = [
-    `机房：${roomName}`,
-    `设备来源：${wizardSource.value === 'stock' ? `库存 ${stockIds.length} 台` : `新建 ${created.length} 台`}`,
-    `目标机柜：${targets.length} 台（每柜最多 ${wizardForm.per_rack_count} 台）`,
-    `起始 U：${wizardForm.start_u}，设备间隔：${wizardForm.gap_u}U`,
-    `预计分配上限：${targets.length * wizardForm.per_rack_count} 台`,
-  ]
-}
-
-async function nextWizardStep() {
-  if (wizardStep.value === 0) {
-    if (wizardSource.value === 'stock') {
-      const stock = selectedDevices.value.filter((d) => !d.rack_id)
-      if (!stock.length) {
-        ElMessage.warning('请先勾选库存设备，或改用现场新建')
-        return
-      }
-    } else if (!wizardNewRows.value.some((r) => r.serial_number && r.device_model_id)) {
-      ElMessage.warning('请至少填写一台新建设备')
-      return
-    }
-  }
-  if (wizardStep.value === 1) {
-    if (!wizardForm.room_id) {
-      ElMessage.warning('请选择机房')
-      return
-    }
-    if (!wizardRacks.value.length) {
-      ElMessage.warning('该机房暂无机柜')
-      return
-    }
-  }
-  if (wizardStep.value === 2) {
-    buildWizardPreview()
-  }
-  wizardStep.value += 1
-}
-
-async function submitWizard() {
-  wizardSubmitting.value = true
-  try {
-    const payload = {
-      room_id: wizardForm.room_id,
-      device_ids:
-        wizardSource.value === 'stock'
-          ? selectedDevices.value.filter((d) => !d.rack_id).map((d) => d.id)
-          : [],
-      new_devices:
-        wizardSource.value === 'create'
-          ? wizardNewRows.value.filter((r) => r.serial_number && r.device_model_id)
-          : [],
-      rack_ids: wizardForm.rack_ids,
-      per_rack_count: wizardForm.per_rack_count,
-      start_u: wizardForm.start_u,
-      gap_u: wizardForm.gap_u,
-    }
-    const result = await batchMountDevices(payload)
-    ElMessage.success(
-      `上架 ${result.mounted} 台，新建 ${result.created} 台，跳过 ${result.skipped} 台`,
-    )
-    if (result.errors.length) ElMessage.warning(result.errors.slice(0, 5).join('; '))
-    wizardVisible.value = false
-    await loadData()
-  } catch {
-    ElMessage.error('批量上架失败')
-  } finally {
-    wizardSubmitting.value = false
-  }
+function onManufacturerCreated(created: Manufacturer) {
+  if (manufacturers.value.some((m) => m.id === created.id)) return
+  manufacturers.value = [...manufacturers.value, created].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )
 }
 
 function openProfileCreate() {
@@ -2732,40 +2741,60 @@ watch(
               <el-button v-if="canCreate" type="primary" plain @click="openBatchCreate">
                 批量新建
               </el-button>
-              <el-button v-if="canUpdate" type="success" @click="openWizard">批量上架</el-button>
-              <el-button
-                v-if="canUpdate"
+              <el-dropdown
+                v-if="canUpdate || canDelete"
+                trigger="click"
                 :disabled="!selectedDevices.length"
-                :loading="batchBusy"
-                @click="handleBatchUnmount"
+                @command="handleBatchCommand"
               >
-                批量下架
-              </el-button>
-              <el-button
-                v-if="canDelete"
-                type="danger"
-                :disabled="!selectedDevices.length"
-                :loading="batchBusy"
-                @click="handleBatchDelete"
-              >
-                批量删除
-              </el-button>
+                <el-button :disabled="!selectedDevices.length" :loading="batchBusy">
+                  批量修改
+                  <span class="dropdown-caret">▾</span>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="canUpdate" command="contract">合同 / 合同设备</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="type">类型</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="model">型号</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="manufacturer">厂商</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="unmount">批量下架</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="mount">改位置</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="ip">改 IP</el-dropdown-item>
+                    <el-dropdown-item
+                      v-if="canDelete"
+                      command="delete"
+                      divided
+                      :disabled="batchBusy"
+                    >
+                      批量删除
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <span v-if="selectedDevices.length" class="batch-hint">已选 {{ selectedDevices.length }} 台</span>
             </div>
           </div>
 
           <el-table
             v-loading="loading"
+            class="device-list-table"
             :data="tableData"
             stripe
             @selection-change="onSelectionChange"
           >
-            <el-table-column type="selection" width="48" />
+            <el-table-column
+              type="selection"
+              width="36"
+              class-name="col-check"
+              label-class-name="col-check"
+            />
             <el-table-column
               type="index"
               label="序号"
-              width="64"
+              width="48"
               align="center"
+              class-name="col-index"
+              label-class-name="col-index"
               :index="(i: number) => (pagination.page - 1) * pagination.page_size + i + 1"
             />
             <el-table-column prop="hostname" label="设备编号" min-width="120" show-overflow-tooltip>
@@ -3088,13 +3117,38 @@ watch(
             <el-option
               v-for="it in formContractItems"
               :key="contractItemKey(it)"
-              :label="it.device_name"
+              :label="contractItemOptionLabel(it)"
               :value="contractItemKey(it)"
             />
           </el-select>
           <p v-if="form.contract_id && !formContractItems.length" class="bind-device-hint">
-            该合同暂无设备明细
+            该合同暂无可用硬件设备明细
           </p>
+          <p
+            v-else-if="form.contract_item_key && form.device_model_id"
+            class="bind-device-hint"
+          >
+            已自动关联型号「{{ models.find((m) => m.id === form.device_model_id)?.name || '—' }}」
+          </p>
+        </el-form-item>
+        <el-form-item label="厂商">
+          <el-select
+            v-model="form.manufacturer_id"
+            clearable
+            filterable
+            allow-create
+            default-first-option
+            style="width: 100%"
+            placeholder="选择或输入厂商；选合同设备时可自动匹配"
+            @change="onManufacturerChange"
+          >
+            <el-option
+              v-for="m in manufacturers"
+              :key="m.id"
+              :label="m.name"
+              :value="m.id"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="设备名称" required>
           <el-input
@@ -3422,10 +3476,27 @@ watch(
       :racks="racks"
       :models="models"
       :types="types"
+      :manufacturers="manufacturers"
       :contracts="contracts"
       @success="onBatchCreateSuccess"
       @type-created="onTypeCreated"
       @model-created="onModelCreated"
+      @manufacturer-created="onManufacturerCreated"
+    />
+
+    <BatchEditDeviceDialog
+      v-model="batchEditVisible"
+      :mode="batchEditMode"
+      :devices="selectedDevices"
+      :rooms="rooms"
+      :racks="racks"
+      :models="models"
+      :types="types"
+      :manufacturers="manufacturers"
+      :contracts="contracts"
+      @success="onBatchEditSuccess"
+      @model-created="onModelCreated"
+      @manufacturer-created="onManufacturerCreated"
     />
 
     <el-dialog
@@ -3483,111 +3554,6 @@ watch(
         <el-button @click="modelDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="modelSaving" @click="saveModelForm">
           {{ modelEditingId ? '保存' : '保存并选用' }}
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="wizardVisible" title="批量上架向导" width="780px" destroy-on-close>
-      <el-steps :active="wizardStep" finish-status="success" align-center style="margin-bottom: 20px">
-        <el-step title="设备来源" />
-        <el-step title="机房机柜" />
-        <el-step title="分配策略" />
-        <el-step title="确认提交" />
-      </el-steps>
-
-      <div v-if="wizardStep === 0">
-        <el-radio-group v-model="wizardSource" style="margin-bottom: 16px">
-          <el-radio-button value="stock">库存勾选</el-radio-button>
-          <el-radio-button value="create">现场新建</el-radio-button>
-        </el-radio-group>
-        <div v-if="wizardSource === 'stock'">
-          <el-alert
-            type="info"
-            :closable="false"
-            :title="`将上架已勾选且未上架的设备：${selectedDevices.filter((d) => !d.rack_id).length} 台`"
-          />
-        </div>
-        <div v-else>
-          <div v-for="(row, idx) in wizardNewRows" :key="idx" class="wizard-row">
-            <el-input v-model="row.name" placeholder="名称" style="width: 120px" />
-            <el-input v-model="row.serial_number" placeholder="序列号*" style="width: 140px" />
-            <el-select
-              v-model="row.device_model_id"
-              filterable
-              allow-create
-              default-first-option
-              style="width: 180px"
-              placeholder="自定义型号"
-              @change="(v: string | null) => onWizardModelChange(row, v)"
-            >
-              <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
-            </el-select>
-            <el-select
-              v-model="row.device_type_id"
-              clearable
-              filterable
-              allow-create
-              default-first-option
-              style="width: 140px"
-              placeholder="类型/自定义"
-              @change="(v: string | null) => onWizardTypeChange(row, v)"
-            >
-              <el-option v-for="t in types" :key="t.id" :label="t.name" :value="t.id" />
-            </el-select>
-          </div>
-          <el-button link type="primary" @click="addWizardRow">+ 添加一行</el-button>
-        </div>
-      </div>
-
-      <div v-else-if="wizardStep === 1">
-        <el-form label-width="90px">
-          <el-form-item label="机房" required>
-            <el-select v-model="wizardForm.room_id" style="width: 100%" filterable>
-              <el-option v-for="r in rooms" :key="r.id" :label="r.name" :value="r.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="机柜范围">
-            <RackRangePicker v-model="wizardForm.rack_ids" :racks="wizardRacks" empty-means-all />
-          </el-form-item>
-        </el-form>
-      </div>
-
-      <div v-else-if="wizardStep === 2">
-        <el-form label-width="120px">
-          <el-form-item label="起始 U 位">
-            <el-input-number v-model="wizardForm.start_u" :min="1" :max="100" />
-          </el-form-item>
-          <el-form-item label="设备间隔">
-            <el-input-number v-model="wizardForm.gap_u" :min="0" :max="10" />
-            <span class="text-muted" style="margin-left: 8px">U（默认 1）</span>
-          </el-form-item>
-          <el-form-item label="每柜上架台数">
-            <el-input-number v-model="wizardForm.per_rack_count" :min="1" :max="60" />
-          </el-form-item>
-          <el-alert
-            type="info"
-            :closable="false"
-            title="从起始 U 起自动寻找空位，设备间保留间隔；上架后机柜位置图与设备数量同步更新"
-          />
-        </el-form>
-      </div>
-
-      <div v-else>
-        <ul class="preview-list">
-          <li v-for="(line, i) in wizardPreview" :key="i">{{ line }}</li>
-        </ul>
-      </div>
-
-      <template #footer>
-        <el-button v-if="wizardStep > 0" @click="wizardStep -= 1">上一步</el-button>
-        <el-button v-if="wizardStep < 3" type="primary" @click="nextWizardStep">下一步</el-button>
-        <el-button
-          v-else
-          type="primary"
-          :loading="wizardSubmitting"
-          @click="submitWizard"
-        >
-          确认上架
         </el-button>
       </template>
     </el-dialog>
@@ -4373,6 +4339,27 @@ watch(
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+/* 多选框与序号紧挨，压缩列间距 */
+.device-list-table :deep(th.col-check),
+.device-list-table :deep(td.col-check) {
+  padding-left: 8px !important;
+  padding-right: 0 !important;
+}
+.device-list-table :deep(th.col-index),
+.device-list-table :deep(td.col-index) {
+  padding-left: 0 !important;
+  padding-right: 6px !important;
+}
+.device-list-table :deep(.col-check .cell),
+.device-list-table :deep(.col-index .cell) {
+  padding-left: 0;
+  padding-right: 0;
+}
+.device-list-table :deep(.el-table-column--selection .cell) {
+  display: flex;
+  justify-content: center;
+  padding: 0;
 }
 .wizard-row {
   display: flex;

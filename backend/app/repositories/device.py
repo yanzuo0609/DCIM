@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -182,6 +182,7 @@ class DeviceRepository(BaseRepository[Device]):
     def _with_relations(self):
         return (
             selectinload(Device.model).selectinload(DeviceModel.manufacturer),
+            selectinload(Device.manufacturer),
             selectinload(Device.device_type),
             selectinload(Device.param_profile),
             selectinload(Device.system_profile),
@@ -194,6 +195,7 @@ class DeviceRepository(BaseRepository[Device]):
         """List view: model/type/IP/contract — skip bulky profile payloads."""
         return (
             selectinload(Device.model).selectinload(DeviceModel.manufacturer),
+            selectinload(Device.manufacturer),
             selectinload(Device.device_type),
             selectinload(Device.contract),
             selectinload(Device.ip_addresses),
@@ -339,6 +341,24 @@ class DeviceRepository(BaseRepository[Device]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_mounted_by_type(
+        self, rack_id: uuid.UUID, device_type_id: uuid.UUID | None
+    ) -> int:
+        """Count active mounted devices on a rack with the same device_type_id.
+
+        When device_type_id is None, count devices whose type is also unset.
+        """
+        stmt = select(func.count()).select_from(Device).where(
+            Device.rack_id == rack_id,
+            Device.deleted_at.is_(None),
+        )
+        if device_type_id is None:
+            stmt = stmt.where(Device.device_type_id.is_(None))
+        else:
+            stmt = stmt.where(Device.device_type_id == device_type_id)
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one() or 0)
 
     async def list_by_exact_name(self, name: str) -> list[Device]:
         """Match inventory devices by exact 设备名称 (falls back to hostname)."""

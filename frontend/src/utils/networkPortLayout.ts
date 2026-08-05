@@ -1153,13 +1153,26 @@ export function portLabel(type: PortType, _slotIndex: number, portIndex: number,
 
 export function syncPortsFromSlotsDef(layout: PortLayout, preservePeers = true) {
   const slots_def = ensureSlotsDef(layout)
-  const peerMap = new Map<string, Pick<PortLayout['ports'][0], 'peer_node_id' | 'peer_port' | 'peer_label' | 'label'>>()
+  const peerMap = new Map<
+    string,
+    Pick<
+      PortLayout['ports'][0],
+      | 'peer_node_id'
+      | 'peer_port'
+      | 'peer_label'
+      | 'peer_device_id'
+      | 'peer_device_name'
+      | 'label'
+    >
+  >()
   if (preservePeers) {
     layout.ports.forEach((p) => {
       peerMap.set(p.id, {
         peer_node_id: p.peer_node_id,
         peer_port: p.peer_port,
         peer_label: p.peer_label,
+        peer_device_id: p.peer_device_id ?? null,
+        peer_device_name: p.peer_device_name ?? null,
         label: p.label,
       })
       if (p.group_id) {
@@ -1169,6 +1182,8 @@ export function syncPortsFromSlotsDef(layout: PortLayout, preservePeers = true) 
             peer_node_id: p.peer_node_id,
             peer_port: p.peer_port,
             peer_label: p.peer_label,
+            peer_device_id: p.peer_device_id ?? null,
+            peer_device_name: p.peer_device_name ?? null,
             label: p.label,
           })
         }
@@ -1200,6 +1215,8 @@ export function syncPortsFromSlotsDef(layout: PortLayout, preservePeers = true) 
           peer_node_id: peer?.peer_node_id ?? null,
           peer_port: peer?.peer_port ?? null,
           peer_label: peer?.peer_label ?? null,
+          peer_device_id: peer?.peer_device_id ?? null,
+          peer_device_name: peer?.peer_device_name ?? null,
         })
       }
     })
@@ -1407,23 +1424,41 @@ export function inferLinkType(source: NetworkNode, target: NetworkNode): Network
 
 export function syncLinksFromPortLayout(nodes: NetworkNode[], links: NetworkLink[]) {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+  const deviceNodeMap = new Map<string, NetworkNode>()
+  for (const n of nodes) {
+    if (n.device_id) deviceNodeMap.set(n.device_id, n)
+  }
+
   for (const node of nodes) {
     const layout = node.port_layout
     if (!layout) continue
     for (const port of layout.ports) {
-      if (!port.peer_node_id || !port.peer_port) continue
-      const peer = nodeMap.get(port.peer_node_id)
+      let peerNodeId = port.peer_node_id
+      let peerPort = port.peer_port
+      if ((!peerNodeId || !peerPort) && port.peer_device_id && port.peer_port) {
+        const bound = deviceNodeMap.get(port.peer_device_id)
+        if (bound) {
+          peerNodeId = bound.id
+          peerPort = port.peer_port
+          // 回填 node 对端，便于拓扑连线与后续编辑
+          port.peer_node_id = bound.id
+        } else {
+          continue
+        }
+      }
+      if (!peerNodeId || !peerPort) continue
+      const peer = nodeMap.get(peerNodeId)
       if (!peer) continue
       const existing = links.find(
         (l) =>
           (l.source_node_id === node.id
             && l.source_port === port.id
-            && l.target_node_id === port.peer_node_id
-            && l.target_port === port.peer_port)
+            && l.target_node_id === peerNodeId
+            && l.target_port === peerPort)
           || (l.target_node_id === node.id
             && l.target_port === port.id
-            && l.source_node_id === port.peer_node_id
-            && l.source_port === port.peer_port),
+            && l.source_node_id === peerNodeId
+            && l.source_port === peerPort),
       )
       if (existing) {
         existing.label = port.peer_label
@@ -1434,8 +1469,8 @@ export function syncLinksFromPortLayout(nodes: NetworkNode[], links: NetworkLink
           link_type: inferLinkType(node, peer),
           source_node_id: node.id,
           source_port: port.id,
-          target_node_id: port.peer_node_id,
-          target_port: port.peer_port,
+          target_node_id: peerNodeId,
+          target_port: peerPort,
           label: port.peer_label,
         })
       }

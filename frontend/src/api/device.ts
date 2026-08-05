@@ -220,6 +220,7 @@ export interface DevicePayload {
   serial_number: string
   device_model_id: string
   device_type_id?: string | null
+  manufacturer_id?: string | null
   param_profile_id?: string | null
   system_profile_id?: string | null
   bmc_profile_id?: string | null
@@ -240,6 +241,7 @@ export interface BatchMountNewDevice {
   serial_number: string
   device_model_id: string
   device_type_id?: string | null
+  manufacturer_id?: string | null
   height_u?: number | null
   power?: number | null
   description?: string | null
@@ -269,6 +271,8 @@ export interface BatchMountResult {
   created: number
   ip_bound: number
   skipped: number
+  /** 已创建但因无可用 U 位而未上架、保留在库存 */
+  stock_only?: number
   errors: string[]
   assignments: Array<{
     device_id: string
@@ -291,6 +295,42 @@ export interface BatchUnmountResult {
 
 export interface BatchDeleteResult {
   deleted: number
+  skipped: number
+  errors: string[]
+}
+
+export interface DeviceBatchUpdateFields {
+  name?: string | null
+  device_type_id?: string | null
+  device_model_id?: string | null
+  height_u?: number | null
+  manufacturer_id?: string | null
+  contract_id?: string | null
+  system_ip_id?: string | null
+  bmc_ip_id?: string | null
+  vip_ip_id?: string | null
+}
+
+export interface DeviceBatchMountSpec {
+  rack_id: string
+  start_u?: number
+  gap_u?: number
+}
+
+export interface DeviceBatchUpdatePayload {
+  ids: string[]
+  fields?: DeviceBatchUpdateFields
+  system_ip_ids?: string[]
+  bmc_ip_ids?: string[]
+  vip_ip_id?: string | null
+  unmount?: boolean
+  mount?: DeviceBatchMountSpec
+}
+
+export interface DeviceBatchUpdateResult {
+  updated: number
+  unmounted: number
+  mounted: number
   skipped: number
   errors: string[]
 }
@@ -360,6 +400,7 @@ export async function updateDeviceModel(
   payload: {
     code?: string
     name?: string
+    manufacturer_id?: string | null
     height_u?: number
     power?: number | null
     description?: string | null
@@ -580,7 +621,12 @@ export async function createParamProfile(payload: {
 
 export async function updateParamProfile(
   id: string,
-  payload: { name?: string; payload?: ParamProfilePayload | null; description?: string | null },
+  payload: {
+    code?: string
+    name?: string
+    payload?: ParamProfilePayload | null
+    description?: string | null
+  },
 ) {
   const response = await api.put<ApiResponse<ParamProfile>>(`/device-param-profiles/${id}`, payload)
   return unwrap(response)
@@ -660,6 +706,16 @@ export async function deleteDevice(id: string): Promise<void> {
 
 export async function batchDeleteDevices(ids: string[]): Promise<BatchDeleteResult> {
   const response = await api.post<ApiResponse<BatchDeleteResult>>('/devices/batch-delete', { ids })
+  return unwrap(response)
+}
+
+export async function batchUpdateDevices(
+  payload: DeviceBatchUpdatePayload,
+): Promise<DeviceBatchUpdateResult> {
+  const response = await api.post<ApiResponse<DeviceBatchUpdateResult>>(
+    '/devices/batch-update',
+    payload,
+  )
   return unwrap(response)
 }
 

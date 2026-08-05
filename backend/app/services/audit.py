@@ -38,6 +38,7 @@ class AuditService:
                 "resource_id": i.resource_id,
                 "method": i.method,
                 "path": i.path,
+                "ip_address": i.ip_address,
                 "status_code": i.status_code,
                 "detail": i.detail,
                 "created_at": i.created_at.isoformat(),
@@ -57,6 +58,7 @@ class AuditService:
         path: str,
         status_code: int = 200,
         detail: str | None = None,
+        ip_address: str | None = None,
     ) -> None:
         await self.repo.create_log(
             user_id=user_id,
@@ -68,4 +70,5 @@ class AuditService:
             path=path,
             status_code=status_code,
             detail=detail,
+            ip_address=ip_address,
         )

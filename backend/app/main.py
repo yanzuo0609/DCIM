@@ -7,6 +7,7 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.database import init_db
 from app.core.handlers import register_exception_handlers
+from app.middleware.audit import AuditLogMiddleware
 
 
 @asynccontextmanager
@@ -28,6 +29,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Audit outermost among app middlewares (runs after CORS in Starlette stack)
+    app.add_middleware(AuditLogMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

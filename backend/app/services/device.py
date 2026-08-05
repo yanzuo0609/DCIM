@@ -35,6 +35,8 @@ from app.schemas.device import (
     DeviceBatchDeleteRequest,
     DeviceBatchDeleteResult,
     DeviceBatchNextIndexResponse,
+    DeviceBatchUpdateRequest,
+    DeviceBatchUpdateResult,
     DeviceCreate,
     DeviceModelCreate,
     DeviceModelPanelApply,
@@ -162,7 +164,7 @@ def _to_device_response(
     vip_segment_id: str | None = None,
 ) -> DeviceResponse:
     model = device.model
-    mfg = model.manufacturer if model else None
+    mfg = getattr(device, "manufacturer", None) or (model.manufacturer if model else None)
     contract = getattr(device, "contract", None)
     (
         system_ip,
@@ -438,12 +440,19 @@ class DeviceService:
 
         height_u = payload.height_u or model.height_u
         contract_id = await self._resolve_contract_id(payload.contract_id)
+        manufacturer_id = None
+        if payload.manufacturer_id:
+            mfg = await self.mfg_repo.get_by_id(uuid.UUID(payload.manufacturer_id))
+            if not mfg:
+                raise NotFoundError("厂商不存在")
+            manufacturer_id = mfg.id
         entity = Device(
             name=name,
             hostname=hostname,
             serial_number=payload.serial_number,
             device_model_id=model.id,
             device_type_id=type_id,
+            manufacturer_id=manufacturer_id,
             param_profile_id=uuid.UUID(payload.param_profile_id) if payload.param_profile_id else None,
             system_profile_id=uuid.UUID(payload.system_profile_id) if payload.system_profile_id else None,
             bmc_profile_id=uuid.UUID(payload.bmc_profile_id) if payload.bmc_profile_id else None,
@@ -502,6 +511,14 @@ class DeviceService:
                 if not await self.type_repo.get_by_id(type_id):
                     raise NotFoundError("设备类型不存在")
                 device.device_type_id = type_id
+        if payload.manufacturer_id is not None:
+            if payload.manufacturer_id == "":
+                device.manufacturer_id = None
+            else:
+                mfg = await self.mfg_repo.get_by_id(uuid.UUID(payload.manufacturer_id))
+                if not mfg:
+                    raise NotFoundError("厂商不存在")
+                device.manufacturer_id = mfg.id
         if payload.param_profile_id is not None:
             device.param_profile_id = (
                 uuid.UUID(payload.param_profile_id) if payload.param_profile_id else None
@@ -598,6 +615,331 @@ class DeviceService:
                 await self.repo.soft_delete(device, deleted_by=user_id)
                 await self.repo.free_unique_for_soft_deleted(device)
                 result.deleted += 1
+        await self.session.flush()
+        return result
+
+    async def batch_update(
+        self, payload: DeviceBatchUpdateRequest, user_id: uuid.UUID | None = None
+    ) -> DeviceBatchUpdateResult:
+        """批量修改属性 / 下架 / 上架 / IP。顺序：属性 → 下架 → 上架 → 按序配 IP。
+
+        性能：设备一次加载、共享 FK 一次校验、属性写回后单次 flush；避免逐台 update_device/_enrich。
+        """
+        from app.schemas.device import BatchUnmountRequest
+        from app.services.layout import LayoutService
+
+        result = DeviceBatchUpdateResult()
+        field_data = (
+            payload.fields.model_dump(exclude_unset=True) if payload.fields is not None else {}
+        )
+        has_paired_ip = (
+            payload.system_ip_ids is not None
+            or payload.bmc_ip_ids is not None
+            or payload.vip_ip_id is not None
+        )
+        if (
+            not field_data
+            and not payload.unmount
+            and payload.mount is None
+            and not has_paired_ip
+        ):
+            raise ValidationError("请至少选择一项要修改的内容", code=10004)
+
+        seen: set[uuid.UUID] = set()
+        requested: list[uuid.UUID] = []
+        for raw in payload.ids:
+            try:
+                device_id = uuid.UUID(raw)
+            except ValueError:
+                result.skipped += 1
+                result.errors.append(f"{raw}: 无效 ID")
+                continue
+            if device_id in seen:
+                continue
+            seen.add(device_id)
+            requested.append(device_id)
+
+        if not requested:
+            return result
+
+        loaded = await self.repo.list_by_ids_with_relations(requested)
+        by_id = {d.id: d for d in loaded}
+        ordered: list[Device] = []
+        for device_id in requested:
+            device = by_id.get(device_id)
+            if not device:
+                result.skipped += 1
+                result.errors.append(f"{device_id}: 不存在")
+                continue
+            ordered.append(device)
+
+        if not ordered:
+            return result
+
+        layout = LayoutService(self.session)
+        attr_keys = {
+            k: v
+            for k, v in field_data.items()
+            if k not in ("system_ip_id", "bmc_ip_id", "vip_ip_id")
+        }
+
+        # —— 共享 FK 一次解析 ——
+        resolved_model_id: uuid.UUID | None = None
+        resolved_type_id: uuid.UUID | None = None
+        clear_type = False
+        resolved_mfg_id: uuid.UUID | None = None
+        clear_mfg = False
+        resolved_contract_id: uuid.UUID | None = None
+        clear_contract = False
+
+        if attr_keys:
+            if "device_model_id" in attr_keys and attr_keys["device_model_id"]:
+                model = await self.model_repo.get_by_id(uuid.UUID(str(attr_keys["device_model_id"])))
+                if not model:
+                    raise ValidationError("设备型号不存在", code=10004)
+                resolved_model_id = model.id
+            if "device_type_id" in attr_keys:
+                raw_type = attr_keys["device_type_id"]
+                if raw_type == "" or raw_type is None:
+                    clear_type = True
+                else:
+                    type_id = uuid.UUID(str(raw_type))
+                    if not await self.type_repo.get_by_id(type_id):
+                        raise ValidationError("设备类型不存在", code=10004)
+                    resolved_type_id = type_id
+            if "manufacturer_id" in attr_keys:
+                raw_mfg = attr_keys["manufacturer_id"]
+                if raw_mfg == "" or raw_mfg is None:
+                    clear_mfg = True
+                else:
+                    mfg = await self.mfg_repo.get_by_id(uuid.UUID(str(raw_mfg)))
+                    if not mfg:
+                        raise ValidationError("厂商不存在", code=10004)
+                    resolved_mfg_id = mfg.id
+            if "contract_id" in attr_keys:
+                raw_c = attr_keys["contract_id"]
+                if raw_c == "" or raw_c is None:
+                    clear_contract = True
+                else:
+                    resolved_contract_id = await self._resolve_contract_id(str(raw_c))
+
+            # 已上架改高度：按机柜缓存占用图，避免每台查库
+            height_val = attr_keys.get("height_u")
+            need_height_check = (
+                height_val is not None
+                and not payload.unmount
+                and payload.mount is None
+            )
+            rack_cache: dict[uuid.UUID, tuple[int, dict[int, uuid.UUID | None]]] = {}
+
+            for device in ordered:
+                label = device.hostname
+                try:
+                    if need_height_check and device.rack_id and device.u_position:
+                        new_h = int(height_val)  # type: ignore[arg-type]
+                        if new_h != device.height_u:
+                            rack_id = device.rack_id
+                            if rack_id not in rack_cache:
+                                rack = await self.rack_repo.get_by_id(rack_id)
+                                if not rack:
+                                    raise ValidationError("机柜不存在", code=10004)
+                                occupied_map = {
+                                    pos.u_position: pos.device_id
+                                    for pos in await self.position_repo.list_by_rack(rack_id)
+                                    if pos.occupied
+                                }
+                                rack_cache[rack_id] = (rack.total_u, occupied_map)
+                            total_u, occupied_map = rack_cache[rack_id]
+                            check = validate_mount(
+                                total_u=total_u,
+                                u_position=device.u_position,
+                                height_u=new_h,
+                                occupied_map=occupied_map,
+                                exclude_device_id=device.id,
+                            )
+                            if not check.valid:
+                                raise ValidationError(
+                                    f"高度变更后当前位置不合法：{check.message}；请同时勾选下架或改位置",
+                                    code=10004,
+                                )
+
+                    if "name" in attr_keys and attr_keys["name"] is not None:
+                        device.name = str(attr_keys["name"])
+                    if resolved_model_id is not None:
+                        device.device_model_id = resolved_model_id
+                    if "device_type_id" in attr_keys:
+                        device.device_type_id = None if clear_type else resolved_type_id
+                    if "manufacturer_id" in attr_keys:
+                        device.manufacturer_id = None if clear_mfg else resolved_mfg_id
+                    if "contract_id" in attr_keys:
+                        device.contract_id = None if clear_contract else resolved_contract_id
+                    if height_val is not None:
+                        device.height_u = int(height_val)
+
+                    device.updated_by = user_id
+                    device.version += 1
+                    result.updated += 1
+                except Exception as exc:  # noqa: BLE001
+                    result.skipped += 1
+                    result.errors.append(f"{label}: {exc}")
+
+            await self.session.flush()
+
+        # 2) 下架（批量清位 + 批量释 IP）
+        if payload.unmount:
+            um = await layout.batch_unmount(
+                BatchUnmountRequest(device_ids=[str(d.id) for d in ordered]),
+                user_id=user_id,
+            )
+            result.unmounted = um.unmounted
+            result.skipped += um.skipped
+            result.errors.extend(um.errors)
+
+        # 3) 上架：机柜/占用图只加载一次，内存推进 U
+        if payload.mount is not None:
+            try:
+                rack_id = uuid.UUID(payload.mount.rack_id)
+            except ValueError:
+                result.errors.append(f"{payload.mount.rack_id}: 无效机柜 ID")
+                rack_id = None
+            if rack_id is not None:
+                rack = await self.rack_repo.get_by_id_with_positions(rack_id)
+                if not rack:
+                    result.errors.append("机柜不存在")
+                else:
+                    positions = await self.position_repo.list_by_rack(rack_id)
+                    pos_map = {p.u_position: p for p in positions}
+                    occupied_map = {
+                        p.u_position: p.device_id for p in positions if p.occupied
+                    }
+                    cursor_u = payload.mount.start_u
+                    gap = payload.mount.gap_u
+
+                    # 刷新设备状态（下架后可能已变）
+                    refreshed = await self.repo.list_by_ids_with_relations([d.id for d in ordered])
+                    device_map = {d.id: d for d in refreshed}
+
+                    for device_id in [d.id for d in ordered]:
+                        device = device_map.get(device_id)
+                        if not device:
+                            continue
+                        label = device.hostname
+                        # 若仍在其它柜，先就地清位
+                        if device.rack_id and device.rack_id != rack_id and device.u_position:
+                            old_positions = await self.position_repo.list_by_rack(device.rack_id)
+                            for pos in old_positions:
+                                if pos.device_id == device.id:
+                                    pos.occupied = False
+                                    pos.device_id = None
+                                    pos.updated_by = user_id
+                            device.rack_id = None
+                            device.u_position = None
+
+                        height = device.height_u or 1
+                        check = validate_mount(
+                            total_u=rack.total_u,
+                            u_position=cursor_u,
+                            height_u=height,
+                            occupied_map=occupied_map,
+                            exclude_device_id=device.id if device.rack_id == rack_id else None,
+                        )
+                        if not check.valid:
+                            result.skipped += 1
+                            result.errors.append(f"{label}@U{cursor_u}: {check.message}")
+                            cursor_u = cursor_u + 1
+                            continue
+
+                        # 同柜重挂：先清旧位
+                        if device.rack_id == rack_id and device.u_position:
+                            for u, did in list(occupied_map.items()):
+                                if did == device.id:
+                                    occupied_map[u] = None
+                                    pos = pos_map.get(u)
+                                    if pos:
+                                        pos.occupied = False
+                                        pos.device_id = None
+                                        pos.updated_by = user_id
+
+                        target_us = occupied_range(cursor_u, height)
+                        ok = True
+                        for u in target_us:
+                            pos = pos_map.get(u)
+                            if not pos:
+                                result.skipped += 1
+                                result.errors.append(f"{label}@U{cursor_u}: U{u} 不存在")
+                                ok = False
+                                break
+                            pos.occupied = True
+                            pos.device_id = device.id
+                            pos.updated_by = user_id
+                            occupied_map[u] = device.id
+                        if not ok:
+                            cursor_u = cursor_u + 1
+                            continue
+
+                        device.rack_id = rack_id
+                        device.u_position = cursor_u
+                        device.status = DeviceStatus.MOUNTED.value
+                        device.updated_by = user_id
+                        device.version += 1
+                        result.mounted += 1
+                        cursor_u = cursor_u + height + gap
+
+                    await self.session.flush()
+
+        # 4) IP：按序配对 / 统一值；避免多余 get_by_id
+        touch_any = (
+            payload.system_ip_ids is not None
+            or payload.bmc_ip_ids is not None
+            or payload.vip_ip_id is not None
+            or any(k in field_data for k in ("system_ip_id", "bmc_ip_id", "vip_ip_id"))
+        )
+        if touch_any:
+            for idx, device in enumerate(ordered):
+                label = device.hostname
+                sys_id = None
+                bmc_id = None
+                vip_id = None
+                touch = False
+                if payload.system_ip_ids is not None:
+                    touch = True
+                    sys_id = (
+                        payload.system_ip_ids[idx]
+                        if idx < len(payload.system_ip_ids)
+                        else None
+                    )
+                elif "system_ip_id" in field_data:
+                    touch = True
+                    sys_id = field_data.get("system_ip_id")
+                if payload.bmc_ip_ids is not None:
+                    touch = True
+                    bmc_id = (
+                        payload.bmc_ip_ids[idx] if idx < len(payload.bmc_ip_ids) else None
+                    )
+                elif "bmc_ip_id" in field_data:
+                    touch = True
+                    bmc_id = field_data.get("bmc_ip_id")
+                if payload.vip_ip_id is not None:
+                    touch = True
+                    vip_id = payload.vip_ip_id
+                elif "vip_ip_id" in field_data:
+                    touch = True
+                    vip_id = field_data.get("vip_ip_id")
+                if not touch:
+                    continue
+                try:
+                    await self.ip_service.assign_device_ips(
+                        device.id,
+                        system_ip_id=sys_id,
+                        bmc_ip_id=bmc_id,
+                        vip_ip_id=vip_id,
+                        user_id=user_id,
+                        replace_existing=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.skipped += 1
+                    result.errors.append(f"{label} IP: {exc}")
+
         await self.session.flush()
         return result
 
@@ -896,6 +1238,14 @@ class DeviceService:
         entity = await self.param_repo.get_by_id(entity_id)
         if not entity:
             raise NotFoundError("档案不存在")
+        if payload.code is not None:
+            code = payload.code.strip()
+            if not code:
+                raise ValidationError("设备ID不能为空", code=10004)
+            existing = await self.param_repo.get_by_code(code)
+            if existing and existing.id != entity.id:
+                raise ConflictError("设备ID已存在")
+            entity.code = code
         if payload.name is not None:
             entity.name = payload.name
         if payload.payload is not None:
@@ -1409,6 +1759,12 @@ class DeviceService:
             if not name:
                 raise ValidationError("型号名称不能为空", code=10004)
             entity.name = name
+        if payload.manufacturer_id is not None:
+            mfg = await self.mfg_repo.get_by_id(uuid.UUID(payload.manufacturer_id))
+            if not mfg:
+                raise NotFoundError("厂商不存在")
+            entity.manufacturer_id = mfg.id
+            entity.manufacturer = mfg
         if payload.height_u is not None:
             entity.height_u = payload.height_u
         if payload.power is not None:

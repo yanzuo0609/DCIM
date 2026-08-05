@@ -239,6 +239,8 @@ function panelKind(device: RackLayoutDevice | null | undefined) {
 }
 
 function showSectionDivider(u: number) {
+  // 仅经典立面保留分段粗线；线框/表格占位保持细线，避免三条粗分割线干扰
+  if (styleKey.value !== 'classic') return false
   return u === 10 || u === 18 || u === 29
 }
 
@@ -266,24 +268,35 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
     <!-- ========== 表格占位 (grid) ========== -->
     <template v-if="styleKey === 'grid'">
       <div class="grid-title">{{ code || '机柜' }}</div>
-      <div class="grid-body">
-        <div
-          v-for="slot in displaySlots"
-          :key="slot.u_position"
-          class="grid-row"
-          :class="[{ divider: showSectionDivider(slot.u_position) }, rowState(slot)]"
-          :style="rowStyle(slot)"
-          @click="onSlotClick(slot)"
-        >
-          <span class="grid-u">{{ slot.u_position }}U</span>
-          <div class="grid-cell">
-            <template v-if="slot.is_span_start && slot.device">
-              {{ slot.device.hostname || '设备' }}
-            </template>
-          </div>
-          <span class="grid-u">{{ slot.u_position }}U</span>
-        </div>
-      </div>
+      <table class="grid-table">
+        <tbody>
+          <tr
+            v-for="row in layoutTableRows"
+            :key="row.slot.u_position"
+            class="grid-row"
+            :class="[
+              { divider: showSectionDivider(row.slot.u_position) },
+              rowState(row.slot),
+              heightClass(row.slot.device),
+            ]"
+            :style="rowStyle(row.slot)"
+            @click="onSlotClick(row.slot)"
+          >
+            <td class="grid-u">{{ row.slot.u_position }}U</td>
+            <!-- 无 IP / 功率列：仅合并设备名格（同经典立面 device rowspan） -->
+            <td
+              v-if="row.showDevice"
+              class="grid-cell"
+              :rowspan="row.deviceRowspan"
+            >
+              <template v-if="row.slot.device">
+                {{ row.slot.device.hostname || '设备' }}
+              </template>
+            </td>
+            <td class="grid-u">{{ row.slot.u_position }}U</td>
+          </tr>
+        </tbody>
+      </table>
     </template>
 
     <!-- ========== 正面面板 (realistic) ========== -->
@@ -369,8 +382,10 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
                   :rowspan="row.deviceRowspan"
                 >
                     <template v-if="row.slot.device">
-                      <span class="sch-host">{{ row.slot.device.hostname }}</span>
-                      <span v-if="row.slot.device.model_name" class="sch-model">{{ row.slot.device.model_name }}</span>
+                      <div class="sch-device-inner">
+                        <span class="sch-host">{{ row.slot.device.hostname }}</span>
+                        <span v-if="row.slot.device.model_name" class="sch-model">{{ row.slot.device.model_name }}</span>
+                      </div>
                     </template>
                   <template v-else><span class="sch-idle">空闲</span></template>
                 </td>
@@ -867,14 +882,14 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
 .style-schematic { color: #1f2937; }
 .style-schematic .sch-ears {
   display: flex;
-  border: 3px solid #3a4252;
-  border-radius: 4px;
-  background: #2b3240;
+  border: 1px solid #c5ccd6;
+  border-radius: 6px;
+  background: #e8ecf1;
   overflow: hidden;
 }
 .style-schematic .sch-ear {
-  width: 14px;
-  background: linear-gradient(90deg, #252b36, #3a4252);
+  width: 10px;
+  background: linear-gradient(90deg, #d1d5db, #9ca3af);
   flex-shrink: 0;
 }
 .style-schematic .sch-body {
@@ -886,8 +901,8 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  padding: 8px 10px;
-  background: #3a4252;
+  padding: 6px 10px;
+  background: #4b5563;
   color: #e8edf5;
 }
 .style-schematic .sch-power {
@@ -930,12 +945,23 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   text-align: center;
   box-sizing: border-box;
 }
-.style-schematic .sch-row.divider td { border-bottom: 2px solid #111827; }
-.style-schematic .sch-row.occupied.h-2u td { background: #d1fae5; }
-.style-schematic .sch-row.occupied.h-4u td { background: #fef3c7; }
-.style-schematic .sch-row.occupied.h-other td { background: #dbeafe; }
+.style-schematic .sch-row.divider td { border-bottom: 1px solid #e5e7eb; }
+/* 多 U 合并：着色落在设备/IP/功率上，延续行 U 列去顶边，视觉上连成一块 */
+.style-schematic .sch-row.occupied.h-2u .sch-cell-device,
+.style-schematic .sch-row.occupied.h-2u .sch-cell-ip,
+.style-schematic .sch-row.occupied.h-2u .sch-cell-power { background: #d1fae5; }
+.style-schematic .sch-row.occupied.h-4u .sch-cell-device,
+.style-schematic .sch-row.occupied.h-4u .sch-cell-ip,
+.style-schematic .sch-row.occupied.h-4u .sch-cell-power { background: #fef3c7; }
+.style-schematic .sch-row.occupied.h-other .sch-cell-device,
+.style-schematic .sch-row.occupied.h-other .sch-cell-ip,
+.style-schematic .sch-row.occupied.h-other .sch-cell-power { background: #dbeafe; }
+.style-schematic .sch-row.continuation td.sch-cell-u {
+  border-top-color: transparent;
+}
 .style-schematic .sch-row.selectable { cursor: pointer; }
 .style-schematic .sch-row.selectable:hover td { background: #eff6ff; }
+.style-schematic .sch-row.selectable:hover .sch-cell-u { background: #4b5563 !important; }
 .style-schematic .sch-row.selected td { outline: 2px solid #3b82f6; outline-offset: -2px; }
 .style-schematic .sch-cell-u {
   text-align: center;
@@ -947,6 +973,17 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   padding: 2px 4px;
   min-width: 0;
   text-align: center;
+  vertical-align: middle;
+}
+.style-schematic .sch-device-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
 }
 .style-schematic .sch-host {
   display: block;
@@ -972,6 +1009,7 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   padding: 2px 3px;
   line-height: 1.3;
   text-align: center;
+  vertical-align: middle;
 }
 .style-schematic .sch-cell-ip {
   font-size: clamp(7px, 1.35vw, 10px);
@@ -1009,7 +1047,7 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   max-width: 280px;
   color: #111;
   background: #fff;
-  --grid-line: 1px solid #111;
+  --grid-line: 1px solid #d1d5db;
 }
 .style-grid.compact { max-width: 240px; }
 .grid-title {
@@ -1019,35 +1057,36 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   padding: 6px 0 8px;
   color: #111827;
 }
-.grid-body {
-  border: var(--grid-line);
+.grid-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  border: 1px solid #c5ccd6;
+  border-radius: 4px;
+  overflow: hidden;
   box-sizing: border-box;
 }
-.grid-row {
-  display: grid;
-  grid-template-columns: 36px 1fr 36px;
+.grid-row td {
   border-bottom: var(--grid-line);
   box-sizing: border-box;
+  vertical-align: middle;
 }
-.grid-row:last-child { border-bottom: none; }
+.grid-row:last-child td { border-bottom: none; }
+.grid-row.divider td { border-bottom: var(--grid-line); }
 .grid-u {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 36px;
+  text-align: center;
   font-size: 9px;
-  background: #f3f4f6;
+  background: #f8fafc;
   border-right: var(--grid-line);
-  box-sizing: border-box;
-  color: #374151;
+  color: #64748b;
 }
 .grid-row .grid-u:last-child {
   border-right: none;
   border-left: var(--grid-line);
 }
 .grid-cell {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  text-align: center;
   font-size: 11px;
   font-weight: 600;
   background: #fff;
@@ -1056,10 +1095,14 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 0 4px;
-  box-sizing: border-box;
+  vertical-align: middle;
 }
+/* 多 U 设备：中间格 rowspan 合并为一块浅黄底 */
 .grid-row.occupied .grid-cell,
-.grid-row.continuation .grid-cell { background: #facc15; }
+.grid-row.span-start .grid-cell { background: #fde68a; }
+.grid-row.continuation .grid-u {
+  border-top-color: transparent;
+}
 .grid-row.selectable { cursor: pointer; }
 .grid-row.selectable:hover .grid-cell { background: #fef9c3; }
 .grid-row.selected .grid-cell {

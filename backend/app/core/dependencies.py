@@ -29,6 +29,7 @@ from app.services.network import NetworkDesignService
 from app.services.network_interface_export import NetworkInterfaceExportService
 from app.services.rack import RackService, RackTemplateService
 from app.services.svg import SVGService
+from app.services.personnel import PersonnelService
 from app.services.user_mgmt import RoleManagementService, UserManagementService
 
 security_scheme = HTTPBearer(auto_error=False)
@@ -128,6 +129,12 @@ async def get_audit_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> AuditService:
     return AuditService(session)
+
+
+async def get_personnel_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> PersonnelService:
+    return PersonnelService(session)
 
 
 async def get_device_export_service(

@@ -17,6 +17,8 @@ from app.schemas.device import (
     DeviceBatchDeleteRequest,
     DeviceBatchDeleteResult,
     DeviceBatchNextIndexResponse,
+    DeviceBatchUpdateRequest,
+    DeviceBatchUpdateResult,
     DeviceCreate,
     DeviceModelCreate,
     DeviceModelPanelApply,
@@ -128,6 +130,16 @@ async def batch_delete_devices(
     current_user: Annotated[User, Depends(require_permissions("device:delete"))],
 ) -> ApiResponse[DeviceBatchDeleteResult]:
     data = await service.batch_delete(payload, user_id=current_user.id)
+    return ApiResponse(data=data, timestamp=datetime.now())
+
+
+@router.post("/devices/batch-update", response_model=ApiResponse[DeviceBatchUpdateResult])
+async def batch_update_devices(
+    payload: DeviceBatchUpdateRequest,
+    service: Annotated[DeviceService, Depends(get_device_service)],
+    current_user: Annotated[User, Depends(require_permissions("device:update"))],
+) -> ApiResponse[DeviceBatchUpdateResult]:
+    data = await service.batch_update(payload, user_id=current_user.id)
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

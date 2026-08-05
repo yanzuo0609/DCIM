@@ -24,6 +24,13 @@ from app.models import (  # noqa: F401
     Floor,
     Manufacturer,
     Permission,
+    PersonnelInternal,
+    PersonnelOrgChart,
+    PersonnelOrgLink,
+    PersonnelOrgNode,
+    PersonnelSupplier,
+    PersonnelSupplierContract,
+    PersonnelSupplierProduct,
     Rack,
     RackPosition,
     RackTemplate,
@@ -197,6 +204,7 @@ async def _ensure_sqlite_device_columns(connection) -> None:
             "network_panel_bound",
             "ALTER TABLE device ADD COLUMN network_panel_bound BOOLEAN NOT NULL DEFAULT 0",
         ),
+        ("manufacturer_id", "ALTER TABLE device ADD COLUMN manufacturer_id CHAR(36)"),
     ]
     for col, sql in alters:
         if col not in columns:

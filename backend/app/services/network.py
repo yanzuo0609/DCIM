@@ -605,7 +605,7 @@ class NetworkDesignService:
             device_type_name = device.device_type.name if device.device_type else None
             device_type_code = device.device_type.code if device.device_type else None
             model_name = device.model.name if getattr(device, "model", None) else None
-            system_ip, bmc_ip, vip = _ip_fields_from_device(device)
+            system_ip, bmc_ip, vip, *_ = _ip_fields_from_device(device)
             result[device.id] = NetworkDeviceBrief(
                 device_id=device.id,
                 name=device.name or device.hostname,

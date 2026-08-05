@@ -66,6 +66,12 @@ class FramePort(BaseModel):
     peer_node_id: uuid.UUID | None = None
     peer_port: str | None = Field(default=None, max_length=50)
     peer_label: str | None = Field(default=None, max_length=200)
+    peer_device_id: uuid.UUID | None = Field(
+        default=None, description="对端台账设备 ID（设备管理）"
+    )
+    peer_device_name: str | None = Field(
+        default=None, max_length=200, description="对端台账设备展示名缓存"
+    )
     layout_locked: bool | None = None
 
 

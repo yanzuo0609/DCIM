@@ -7,6 +7,7 @@ import { useNetworkTopology } from '@/composables/useNetworkTopology'
 import {
   CORE_CARD_TYPE_LABELS,
   NODE_KIND_LABELS,
+  PORT_TYPE_LABELS,
   SERVER_FORM_FACTOR_LABELS,
   SWITCH_SUBTYPE_DEFAULTS,
   SWITCH_SUBTYPE_LABELS,
@@ -14,8 +15,10 @@ import {
   newCoreLineCard,
   type CoreCardType,
   type CoreLineCard,
+  type FramePort,
   type NetworkNode,
   type NetworkNodeKind,
+  type PortType,
   type ServerFormFactor,
   type SwitchSubtype,
   type UplinkPosition,
@@ -114,6 +117,13 @@ const applyPanelLoading = ref(false)
 const applyPanelDialogVisible = ref(false)
 const selectedSummaryKey = ref<string | null>(null)
 const selectedNodeId = ref<string | null>(null)
+/** 展开行（单行展开编辑） */
+const expandedRowKeys = ref<string[]>([])
+const frameEditorRef = ref<{
+  openPeerDialog: (port: FramePort) => void
+  openPortEdit: (port: FramePort) => void
+  onPortClick: (port: FramePort) => void
+} | null>(null)
 const basicVisible = ref(false)
 const projectDialogVisible = ref(false)
 const projectDialogMode = ref<'create' | 'edit'>('create')
@@ -248,8 +258,12 @@ async function handleRemoveProject() {
 async function onProjectChange(id: string) {
   if (!id || id === currentProjectId.value) return
   selectedNodeId.value = null
+  expandedRowKeys.value = []
   await selectProject(id)
-  if (nodes.value.length) selectNode(nodes.value[0])
+  if (nodes.value.length) {
+    selectNode(nodes.value[0])
+    expandedRowKeys.value = [nodes.value[0].id]
+  }
 }
 
 function onSwitchSubtypeChange(subtype: SwitchSubtype) {
@@ -362,6 +376,7 @@ function confirmCreate() {
   syncLegacyFromPortLayout(node)
   nodes.value.push(node)
   selectNode(node)
+  expandedRowKeys.value = [node.id]
   basicVisible.value = false
 }
 
@@ -370,6 +385,80 @@ function selectNode(node: NetworkNode) {
   node.port_layout = ensurePortLayout(node)
   syncSummaryKeyFromNode(node)
 }
+
+function expandNode(node: NetworkNode) {
+  selectNode(node)
+  expandedRowKeys.value = [node.id]
+}
+
+function onExpandChange(row: NetworkNode, expandedRows: NetworkNode[]) {
+  const isExpanded = expandedRows.some((r) => r.id === row.id)
+  if (isExpanded) {
+    expandedRowKeys.value = [row.id]
+    selectNode(row)
+  } else {
+    expandedRowKeys.value = expandedRows.map((r) => r.id)
+    if (selectedNodeId.value === row.id) {
+      const next = expandedRowKeys.value[0]
+      if (next) {
+        const n = nodes.value.find((x) => x.id === next)
+        if (n) selectNode(n)
+      } else {
+        selectedNodeId.value = null
+        selectedSummaryKey.value = null
+      }
+    }
+  }
+}
+
+function nodeKindLabel(node: NetworkNode) {
+  if (node.kind === 'switch' && node.port_layout?.switch_subtype) {
+    return SWITCH_SUBTYPE_LABELS[node.port_layout.switch_subtype]
+  }
+  return NODE_KIND_LABELS[node.kind]
+}
+
+function nodeBindStatus(node: NetworkNode) {
+  const parts: string[] = []
+  if (node.contract_device_name) parts.push(`合同:${node.contract_device_name}`)
+  if (node.device_id) parts.push('已绑台账')
+  return parts.length ? parts.join(' · ') : '未绑定'
+}
+
+function portPeerSummary(port: FramePort) {
+  if (port.peer_device_id) {
+    return `台账 ${port.peer_device_name || port.peer_device_id} / ${port.peer_port || '—'}`
+  }
+  if (port.peer_node_id) {
+    const n = nodes.value.find((x) => x.id === port.peer_node_id)
+    return `${n?.name || '未知'} / ${port.peer_port || '—'}`
+  }
+  return '—'
+}
+
+function portSlotLabel(port: FramePort) {
+  if (port.slot_index != null) return `Slot ${port.slot_index}`
+  if (port.group_id) return port.group_id
+  return '—'
+}
+
+function onPortRowClick(port: FramePort) {
+  frameEditorRef.value?.onPortClick(port)
+}
+
+function openPortPeerFromTable(port: FramePort) {
+  frameEditorRef.value?.openPeerDialog(port)
+}
+
+function portTypeLabel(portType: PortType | string | null | undefined) {
+  const key = (portType || '1g') as PortType
+  return PORT_TYPE_LABELS[key] || String(portType || '1g')
+}
+
+const portTypeOptions = Object.entries(PORT_TYPE_LABELS).map(([value, label]) => ({
+  value: value as PortType,
+  label,
+}))
 
 function syncSummaryKeyFromNode(node: NetworkNode) {
   if (!node.contract_device_name && !node.device_model_id) {
@@ -441,7 +530,7 @@ const canApplyPanel = computed(
 )
 
 const applyPanelHint = computed(() => {
-  if (!selectedNode.value) return '请先选择左侧设备'
+  if (!selectedNode.value) return '请先展开设备'
   if (!selectedNode.value.device_model_id || !selectedNode.value.contract_device_name) {
     return '请先在上方选择「关联合同厂商型号采购汇总」，再应用面板到设备清单'
   }
@@ -484,8 +573,16 @@ function removeNode(node: NetworkNode) {
   links.value = links.value.filter(
     (l) => l.source_node_id !== node.id && l.target_node_id !== node.id,
   )
+  expandedRowKeys.value = expandedRowKeys.value.filter((id) => id !== node.id)
   if (selectedNodeId.value === node.id) {
-    selectedNodeId.value = nodes.value[0]?.id ?? null
+    const next = nodes.value[0]
+    selectedNodeId.value = next?.id ?? null
+    if (next) {
+      expandedRowKeys.value = [next.id]
+      syncSummaryKeyFromNode(next)
+    } else {
+      selectedSummaryKey.value = null
+    }
   }
 }
 
@@ -524,10 +621,15 @@ watch(
   () => {
     if (selectedNodeId.value && !nodes.value.some((n) => n.id === selectedNodeId.value)) {
       selectedNodeId.value = nodes.value[0]?.id ?? null
+      expandedRowKeys.value = selectedNodeId.value ? [selectedNodeId.value] : []
     }
     if (!selectedNodeId.value && nodes.value.length) {
       selectNode(nodes.value[0])
+      if (!expandedRowKeys.value.length) expandedRowKeys.value = [nodes.value[0].id]
     }
+    expandedRowKeys.value = expandedRowKeys.value.filter((id) =>
+      nodes.value.some((n) => n.id === id),
+    )
   },
   { deep: true },
 )
@@ -537,6 +639,7 @@ onMounted(async () => {
   await loadContractSummaries()
   if (nodes.value.length && !selectedNodeId.value) {
     selectNode(nodes.value[0])
+    expandedRowKeys.value = [nodes.value[0].id]
   }
 })
 </script>
@@ -576,7 +679,7 @@ onMounted(async () => {
                 :disabled="!canCreate && !canEdit"
               >
                 <el-button type="primary" plain>
-                  新建项目
+                  新建
                   <span class="dropdown-caret">▾</span>
                 </el-button>
                 <template #dropdown>
@@ -636,107 +739,165 @@ onMounted(async () => {
         </div>
 
         <div v-if="currentId" class="content">
-          <aside class="device-list">
-            <div
-              v-for="node in nodes"
-              :key="node.id"
-              class="device-item"
-              :class="{ active: selectedNodeId === node.id }"
-              @click="selectNode(node)"
-            >
-              <div class="name">{{ node.name }}</div>
-              <div class="meta">
-                {{ node.kind === 'switch' && node.port_layout?.switch_subtype
-                  ? SWITCH_SUBTYPE_LABELS[node.port_layout.switch_subtype]
-                  : NODE_KIND_LABELS[node.kind] }}
-                · {{ node.port_layout?.height_u ?? 1 }}U
-                · {{ node.port_layout?.ports?.length ?? 0 }} 接口
-                <template v-if="node.contract_device_name">
-                  · 合同:{{ node.contract_device_name }}
-                </template>
-              </div>
-              <div class="item-actions">
-                <el-button
-                  v-if="canEdit"
-                  type="danger"
-                  link
-                  size="small"
-                  @click.stop="removeNode(node)"
-                >
-                  删除
-                </el-button>
-              </div>
-            </div>
-            <el-empty v-if="!nodes.length" description="请添加设备" />
-          </aside>
+          <el-table
+            :data="nodes"
+            row-key="id"
+            class="device-table"
+            :expand-row-keys="expandedRowKeys"
+            @expand-change="onExpandChange"
+          >
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <div v-if="selectedNodeId === row.id && selectedNode" class="expand-panel">
+                  <div class="panel-header">
+                    <el-input
+                      v-model="selectedNode.name"
+                      :disabled="!canEdit"
+                      style="width: 200px"
+                      placeholder="设备名称"
+                    />
+                    <el-select
+                      v-model="selectedSummaryKey"
+                      filterable
+                      clearable
+                      :loading="summaryLoading"
+                      placeholder="① 关联合同厂商型号采购汇总（必选）"
+                      :disabled="!canEdit"
+                      style="width: 420px"
+                      @change="bindContractSummary"
+                      @focus="() => { if (!contractSummaries.length) loadContractSummaries() }"
+                    >
+                      <el-option
+                        v-for="sum in contractSummaries"
+                        :key="summaryOptionKey(sum)"
+                        :label="formatSummaryOptionLabel(sum)"
+                        :value="summaryOptionKey(sum)"
+                      />
+                    </el-select>
+                    <el-tag v-if="layoutLocked" type="info" size="small">布局已锁定</el-tag>
+                    <el-tag v-else-if="canEdit" type="warning" size="small">布局编辑中</el-tag>
+                    <el-button
+                      v-if="canEdit && layoutLocked"
+                      type="primary"
+                      @click="startLayoutEdit"
+                    >
+                      编辑布局
+                    </el-button>
+                  </div>
 
-          <section v-if="selectedNode" class="editor-panel">
-            <div class="panel-header">
-              <el-input
-                v-model="selectedNode.name"
-                :disabled="!canEdit"
-                style="width: 200px"
-                placeholder="设备名称"
-              />
-              <el-select
-                v-model="selectedSummaryKey"
-                filterable
-                clearable
-                :loading="summaryLoading"
-                placeholder="① 关联合同厂商型号采购汇总（必选）"
-                :disabled="!canEdit"
-                style="width: 420px"
-                @change="bindContractSummary"
-                @focus="() => { if (!contractSummaries.length) loadContractSummaries() }"
-              >
-                <el-option
-                  v-for="row in contractSummaries"
-                  :key="summaryOptionKey(row)"
-                  :label="formatSummaryOptionLabel(row)"
-                  :value="summaryOptionKey(row)"
-                />
-              </el-select>
-              <el-tag v-if="layoutLocked" type="info" size="small">布局已锁定</el-tag>
-              <el-tag v-else-if="canEdit" type="warning" size="small">布局编辑中</el-tag>
-              <el-button
-                v-if="canEdit && layoutLocked"
-                type="primary"
-                @click="startLayoutEdit"
-              >
-                编辑布局
-              </el-button>
-            </div>
+                  <div v-if="canEdit" class="apply-bar">
+                    <div class="apply-bar-main">
+                      <span class="apply-title">② 应用面板到设备</span>
+                      <span class="apply-hint">{{ applyPanelHint }}</span>
+                    </div>
+                    <el-button
+                      type="success"
+                      :loading="applyPanelLoading"
+                      :disabled="!canApplyPanel"
+                      @click="openApplyPanelDialog"
+                    >
+                      应用面板到设备
+                    </el-button>
+                  </div>
 
-            <div v-if="canEdit" class="apply-bar">
-              <div class="apply-bar-main">
-                <span class="apply-title">② 应用面板到设备</span>
-                <span class="apply-hint">{{ applyPanelHint }}</span>
-              </div>
-              <el-button
-                type="success"
-                :loading="applyPanelLoading"
-                :disabled="!canApplyPanel"
-                @click="openApplyPanelDialog"
-              >
-                应用面板到设备
-              </el-button>
-            </div>
+                  <p v-if="selectedNode.contract_device_name" class="mode-hint">
+                    已关联采购汇总设备名称「{{ selectedNode.contract_device_name }}」：应用时仅显示该名称对应的设备管理台账
+                  </p>
+                  <p v-if="layoutLocked" class="mode-hint">
+                    布局已锁定，不可拖动/调整结构；单击选中接口，双击配置对端；下方接口表可改标签与对端
+                  </p>
 
-            <p v-if="selectedNode.contract_device_name" class="mode-hint">
-              已关联采购汇总设备名称「{{ selectedNode.contract_device_name }}」：应用时仅显示该名称对应的设备管理台账
-            </p>
-            <p v-if="layoutLocked" class="mode-hint">
-              布局已锁定，不可拖动/调整结构；单击选中接口，双击配置对端
-            </p>
-            <NetworkDeviceFrameEditor
-              :key="selectedNode.id"
-              :node="selectedNode"
-              :peer-nodes="peerNodes"
-              :editable="canConfigPorts"
-              :layout-editable="canEditLayout"
-            />
-          </section>
-          <el-empty v-else description="请选择设备以编辑接口构成" class="editor-empty" />
+                  <NetworkDeviceFrameEditor
+                    ref="frameEditorRef"
+                    :key="selectedNode.id"
+                    :node="selectedNode"
+                    :peer-nodes="peerNodes"
+                    :editable="canConfigPorts"
+                    :layout-editable="canEditLayout"
+                  />
+
+                  <div class="ports-section">
+                    <div class="ports-title">接口列表</div>
+                    <el-table
+                      :data="selectedNode.port_layout?.ports || []"
+                      size="small"
+                      border
+                      max-height="280"
+                      @row-click="onPortRowClick"
+                    >
+                      <el-table-column prop="id" label="端口 ID" min-width="100" show-overflow-tooltip />
+                      <el-table-column label="标签" min-width="120">
+                        <template #default="{ row: port }">
+                          <el-input
+                            v-if="canConfigPorts"
+                            v-model="port.label"
+                            size="small"
+                            @click.stop
+                          />
+                          <span v-else>{{ port.label }}</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="类型" width="130">
+                        <template #default="{ row: port }">
+                          <el-select
+                            v-if="canEditLayout"
+                            v-model="port.port_type"
+                            size="small"
+                            style="width: 100%"
+                            @click.stop
+                          >
+                            <el-option
+                              v-for="opt in portTypeOptions"
+                              :key="opt.value"
+                              :label="opt.label"
+                              :value="opt.value"
+                            />
+                          </el-select>
+                          <span v-else>{{ portTypeLabel(port.port_type) }}</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="板卡/槽位" width="110" show-overflow-tooltip>
+                        <template #default="{ row: port }">{{ portSlotLabel(port) }}</template>
+                      </el-table-column>
+                      <el-table-column label="对端" min-width="180" show-overflow-tooltip>
+                        <template #default="{ row: port }">{{ portPeerSummary(port) }}</template>
+                      </el-table-column>
+                      <el-table-column v-if="canConfigPorts" label="操作" width="100" fixed="right">
+                        <template #default="{ row: port }">
+                          <el-button type="primary" link size="small" @click.stop="openPortPeerFromTable(port)">
+                            对端
+                          </el-button>
+                        </template>
+                      </el-table-column>
+                    </el-table>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="name" label="名称" min-width="160">
+              <template #default="{ row }">
+                <button type="button" class="name-link" @click="expandNode(row)">{{ row.name }}</button>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="140">
+              <template #default="{ row }">{{ nodeKindLabel(row) }}</template>
+            </el-table-column>
+            <el-table-column label="U 高" width="72" align="center">
+              <template #default="{ row }">{{ row.port_layout?.height_u ?? 1 }}U</template>
+            </el-table-column>
+            <el-table-column label="端口数" width="80" align="center">
+              <template #default="{ row }">{{ row.port_layout?.ports?.length ?? 0 }}</template>
+            </el-table-column>
+            <el-table-column label="合同/台账" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">{{ nodeBindStatus(row) }}</template>
+            </el-table-column>
+            <el-table-column v-if="canEdit" label="操作" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button type="danger" link size="small" @click.stop="removeNode(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!nodes.length" description="请添加设备" />
         </div>
         <el-empty v-else description="请先新建或选择项目，再添加设备" />
       </section>
@@ -970,58 +1131,45 @@ onMounted(async () => {
 }
 
 .content {
-  display: grid;
-  grid-template-columns: 240px 1fr;
-  gap: 12px;
   flex: 1;
   min-height: 0;
-}
-
-.device-list {
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  padding: 8px;
   overflow: auto;
 }
 
-.device-item {
-  padding: 10px;
-  border-radius: 6px;
+.device-table {
+  width: 100%;
+}
+
+.name-link {
+  border: none;
+  background: transparent;
+  color: #409eff;
   cursor: pointer;
-  margin-bottom: 6px;
-  border: 1px solid transparent;
+  padding: 0;
+  font: inherit;
 }
 
-.device-item:hover {
-  background: #f5f7fa;
+.name-link:hover {
+  text-decoration: underline;
 }
 
-.device-item.active {
-  background: #ecf5ff;
-  border-color: #b3d8ff;
-}
-
-.device-item .name {
-  font-weight: 500;
-  font-size: 14px;
-}
-
-.device-item .meta {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
-}
-
-.item-actions {
-  margin-top: 6px;
-}
-
-.editor-panel {
+.expand-panel {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding: 8px 12px 16px;
   min-width: 0;
-  min-height: 0;
+}
+
+.ports-section {
+  margin-top: 4px;
+}
+
+.ports-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: #303133;
 }
 
 .panel-header {
@@ -1068,10 +1216,6 @@ onMounted(async () => {
   margin: 0;
   font-size: 12px;
   color: #909399;
-}
-
-.editor-empty {
-  grid-column: 2;
 }
 
 .card-list {

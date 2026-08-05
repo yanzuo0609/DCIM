@@ -89,6 +89,8 @@ import {
   patchSecurityZoneSlot,
   type SecurityPanelView,
 } from '@/utils/securityFrontPanel'
+import { listDevices, type Device } from '@/api/device'
+import type { PortLayout as DevicePortLayout } from '@/api/network'
 
 const props = defineProps<{
   node: NetworkNode
@@ -236,10 +238,16 @@ const serverForm = reactive({
 })
 
 const peerForm = reactive({
+  source: 'define' as 'define' | 'inventory',
   peer_node_id: '' as string | null,
   peer_port: '' as string | null,
   peer_label: '',
+  peer_device_id: '' as string | null,
+  peer_device_name: '' as string | null,
 })
+
+const inventoryDevices = ref<Device[]>([])
+const inventoryLoading = ref(false)
 
 const portForm = reactive({
   label: '',
@@ -396,7 +404,22 @@ const selectedPort = computed(() =>
   layout.value.ports.find((p) => p.id === selectedPortId.value) || null,
 )
 
+function asDevicePortLayout(layout: Record<string, unknown> | null | undefined): DevicePortLayout | null {
+  if (!layout || !Array.isArray(layout.ports)) return null
+  return layout as unknown as DevicePortLayout
+}
+
 const peerPortOptions = computed(() => {
+  if (peerForm.source === 'inventory') {
+    if (!peerForm.peer_device_id) return []
+    const device = inventoryDevices.value.find((d) => d.id === peerForm.peer_device_id)
+    const layout = asDevicePortLayout(device?.port_layout)
+    const ports = layout?.ports || []
+    return ports.map((p) => ({
+      id: p.id,
+      label: `${p.label} (${PORT_TYPE_LABELS[p.port_type] || p.port_type})`,
+    }))
+  }
   if (!peerForm.peer_node_id) return []
   const peer = props.peerNodes.find((n) => n.id === peerForm.peer_node_id)
   return peer ? listNodePortOptions(peer) : []
@@ -405,6 +428,48 @@ const peerPortOptions = computed(() => {
 const selectedPeerNode = computed(() =>
   props.peerNodes.find((n) => n.id === peerForm.peer_node_id) || null,
 )
+
+const selectedInventoryDevice = computed(
+  () => inventoryDevices.value.find((d) => d.id === peerForm.peer_device_id) || null,
+)
+
+const peerHintText = computed(() => {
+  const port = selectedPort.value
+  if (!port) return ''
+  if (port.peer_device_id) {
+    return `→ 台账 ${port.peer_device_name || port.peer_device_id} / ${port.peer_port || '—'}`
+  }
+  if (port.peer_node_id) {
+    const n = props.peerNodes.find((x) => x.id === port.peer_node_id)
+    return `→ ${n?.name || '未知'} · ${formatNodeLocation(n || props.node)} / ${port.peer_port || '—'}`
+  }
+  return ''
+})
+
+async function loadInventoryDevices() {
+  inventoryLoading.value = true
+  try {
+    const data = await listDevices({ page: 1, page_size: 200, network_panel_bound: true })
+    const items = (data.items || []) as Device[]
+    inventoryDevices.value = items.filter((d) => {
+      const layout = asDevicePortLayout(d.port_layout)
+      return !!d.network_panel_bound && !!layout && (layout.ports?.length || 0) > 0
+    })
+    if (!inventoryDevices.value.length) {
+      // 回退：拉一页台账再前端过滤
+      const all = await listDevices({ page: 1, page_size: 200 })
+      inventoryDevices.value = ((all.items || []) as Device[]).filter((d) => {
+        const layout = asDevicePortLayout(d.port_layout)
+        return !!d.network_panel_bound && !!layout && (layout.ports?.length || 0) > 0
+      })
+    }
+  } catch {
+    inventoryDevices.value = []
+    ElMessage.error('加载已绑定面板的台账设备失败')
+  } finally {
+    inventoryLoading.value = false
+  }
+}
 
 function portCaptionY(port: FramePort) {
   const siblings = layout.value.ports.filter((p) => p.group_id === port.group_id)
@@ -957,10 +1022,83 @@ function openPeerDialog(port: FramePort) {
   if (!portsCanEdit.value) return
   selectedPortId.value = port.id
   selectedGroupId.value = port.group_id
+  const useInventory = !!port.peer_device_id
+  peerForm.source = useInventory ? 'inventory' : 'define'
   peerForm.peer_node_id = port.peer_node_id
   peerForm.peer_port = port.peer_port
   peerForm.peer_label = port.peer_label || ''
+  peerForm.peer_device_id = port.peer_device_id || null
+  peerForm.peer_device_name = port.peer_device_name || null
   peerVisible.value = true
+  if (peerForm.source === 'inventory') void loadInventoryDevices()
+}
+
+function onPeerSourceChange(source: string | number | boolean | undefined) {
+  const next: 'define' | 'inventory' = source === 'inventory' ? 'inventory' : 'define'
+  peerForm.source = next
+  peerForm.peer_port = null
+  if (next === 'define') {
+    peerForm.peer_device_id = null
+    peerForm.peer_device_name = null
+  } else {
+    peerForm.peer_node_id = null
+    void loadInventoryDevices()
+  }
+}
+
+function onInventoryDeviceChange(deviceId: string | null) {
+  peerForm.peer_device_id = deviceId
+  peerForm.peer_port = null
+  const device = inventoryDevices.value.find((d) => d.id === deviceId)
+  peerForm.peer_device_name = device
+    ? device.name || device.hostname
+    : null
+  // 若台账已绑定项目内定义节点，顺带记下 node id（保存时建 link）
+  if (deviceId) {
+    const bound = props.peerNodes.find((n) => n.device_id === deviceId)
+    peerForm.peer_node_id = bound?.id || null
+  } else {
+    peerForm.peer_node_id = null
+  }
+}
+
+function confirmPeer() {
+  if (!selectedPort.value) return
+  if (peerForm.source === 'inventory') {
+    selectedPort.value.peer_device_id = peerForm.peer_device_id || null
+    selectedPort.value.peer_device_name = peerForm.peer_device_name || null
+    selectedPort.value.peer_port = peerForm.peer_port || null
+    selectedPort.value.peer_label = peerForm.peer_label.trim() || null
+    // 有绑定节点则写 peer_node_id，否则清空定义对端
+    selectedPort.value.peer_node_id = peerForm.peer_node_id || null
+  } else {
+    selectedPort.value.peer_node_id = peerForm.peer_node_id || null
+    selectedPort.value.peer_port = peerForm.peer_port || null
+    selectedPort.value.peer_label = peerForm.peer_label.trim() || null
+    selectedPort.value.peer_device_id = null
+    selectedPort.value.peer_device_name = null
+  }
+  peerVisible.value = false
+}
+
+function confirmPortEdit() {
+  if (!selectedPort.value) return
+  selectedPort.value.label = portForm.label.trim() || selectedPort.value.id
+  portEditVisible.value = false
+}
+
+function clearPeer() {
+  if (!selectedPort.value) return
+  selectedPort.value.peer_node_id = null
+  selectedPort.value.peer_port = null
+  selectedPort.value.peer_label = null
+  selectedPort.value.peer_device_id = null
+  selectedPort.value.peer_device_name = null
+  peerForm.peer_node_id = null
+  peerForm.peer_port = null
+  peerForm.peer_label = ''
+  peerForm.peer_device_id = null
+  peerForm.peer_device_name = null
 }
 
 function openPortEdit(port: FramePort) {
@@ -978,30 +1116,6 @@ function onPortClick(port: FramePort) {
 function onGroupClick(groupId: string) {
   selectedGroupId.value = groupId
   selectedPortId.value = null
-}
-
-function confirmPeer() {
-  if (!selectedPort.value) return
-  selectedPort.value.peer_node_id = peerForm.peer_node_id || null
-  selectedPort.value.peer_port = peerForm.peer_port || null
-  selectedPort.value.peer_label = peerForm.peer_label.trim() || null
-  peerVisible.value = false
-}
-
-function confirmPortEdit() {
-  if (!selectedPort.value) return
-  selectedPort.value.label = portForm.label.trim() || selectedPort.value.id
-  portEditVisible.value = false
-}
-
-function clearPeer() {
-  if (!selectedPort.value) return
-  selectedPort.value.peer_node_id = null
-  selectedPort.value.peer_port = null
-  selectedPort.value.peer_label = null
-  peerForm.peer_node_id = null
-  peerForm.peer_port = null
-  peerForm.peer_label = ''
 }
 
 function portHitPad(port: FramePort) {
@@ -1437,6 +1551,17 @@ watch(
 watch(
   () => peerForm.peer_node_id,
   () => {
+    if (peerForm.source !== 'define') return
+    if (peerForm.peer_port && !peerPortOptions.value.some((p) => p.id === peerForm.peer_port)) {
+      peerForm.peer_port = null
+    }
+  },
+)
+
+watch(
+  () => peerForm.peer_device_id,
+  () => {
+    if (peerForm.source !== 'inventory') return
     if (peerForm.peer_port && !peerPortOptions.value.some((p) => p.id === peerForm.peer_port)) {
       peerForm.peer_port = null
     }
@@ -1448,6 +1573,12 @@ syncServerFormFromLayout()
 refreshSwitchPanel()
 refreshServerPanel()
 refreshSecurityPanel()
+
+defineExpose({
+  openPeerDialog,
+  openPortEdit,
+  onPortClick,
+})
 </script>
 
 <template>
@@ -1928,7 +2059,7 @@ refreshSecurityPanel()
             v-for="port in layout.ports"
             :key="port.id"
             class="port port-interactive"
-            :class="{ selected: selectedPortId === port.id, linked: !!port.peer_node_id }"
+            :class="{ selected: selectedPortId === port.id, linked: !!(port.peer_node_id || port.peer_device_id) }"
             @click.stop="onPortClick(port)"
             @dblclick.stop="openPeerDialog(port)"
           >
@@ -2336,7 +2467,7 @@ refreshSecurityPanel()
             v-for="port in layout.ports"
             :key="port.id"
             class="port port-interactive server-port"
-            :class="{ selected: selectedPortId === port.id, linked: !!port.peer_node_id, locked: port.layout_locked }"
+            :class="{ selected: selectedPortId === port.id, linked: !!(port.peer_node_id || port.peer_device_id), locked: port.layout_locked }"
             @mousedown="onServerPortMouseDown($event, port)"
             @click.stop="onPortClick(port)"
             @dblclick.stop="openPeerDialog(port)"
@@ -2668,7 +2799,7 @@ refreshSecurityPanel()
             v-for="port in layout.ports"
             :key="port.id"
             class="port port-interactive"
-            :class="{ selected: selectedPortId === port.id, linked: !!port.peer_node_id }"
+            :class="{ selected: selectedPortId === port.id, linked: !!(port.peer_node_id || port.peer_device_id) }"
             @mousedown="onSecurityPortMouseDown($event, port)"
             @click.stop="onPortClick(port)"
             @dblclick.stop="openPeerDialog(port)"
@@ -2827,7 +2958,7 @@ refreshSecurityPanel()
             v-for="port in layout.ports"
             :key="port.id"
             class="port port-interactive"
-            :class="{ selected: selectedPortId === port.id, linked: !!port.peer_node_id }"
+            :class="{ selected: selectedPortId === port.id, linked: !!(port.peer_node_id || port.peer_device_id) }"
             @click.stop="onPortClick(port)"
             @dblclick.stop="openPeerDialog(port)"
           >
@@ -2872,11 +3003,7 @@ refreshSecurityPanel()
       </span>
       <el-button v-if="portsCanEdit" type="primary" @click="openPortEdit(selectedPort)">编辑标签</el-button>
       <el-button v-if="portsCanEdit" type="primary" @click="openPeerDialog(selectedPort)">配置对端</el-button>
-      <span v-if="selectedPort?.peer_node_id" class="peer-hint">
-        → {{ peerNodes.find((n) => n.id === selectedPort!.peer_node_id)?.name || '未知' }}
-        · {{ formatNodeLocation(peerNodes.find((n) => n.id === selectedPort!.peer_node_id) || props.node) }}
-        / {{ selectedPort!.peer_port }}
-      </span>
+      <span v-if="peerHintText" class="peer-hint">{{ peerHintText }}</span>
     </div>
     <p v-else-if="isServer" class="hint">
       <template v-if="layoutCanEdit">
@@ -3093,25 +3220,61 @@ refreshSecurityPanel()
         <el-form-item label="当前接口">
           <el-tag>{{ selectedPort?.label }} ({{ PORT_TYPE_LABELS[selectedPort?.port_type || '1g'] }})</el-tag>
         </el-form-item>
-        <el-form-item label="对端设备">
-          <el-select v-model="peerForm.peer_node_id" clearable filterable style="width: 100%">
-            <el-option
-              v-for="n in peerNodes"
-              :key="n.id"
-              :label="`${n.name} · ${formatNodeLocation(n)}`"
-              :value="n.id"
-            />
-          </el-select>
+        <el-form-item label="对端来源">
+          <el-radio-group :model-value="peerForm.source" @change="onPeerSourceChange">
+            <el-radio-button value="define">设备定义</el-radio-button>
+            <el-radio-button value="inventory">台账设备</el-radio-button>
+          </el-radio-group>
         </el-form-item>
-        <el-form-item v-if="selectedPeerNode" label="设备位置">
-          <span class="location-text">{{ formatNodeLocation(selectedPeerNode) }}</span>
-        </el-form-item>
+        <template v-if="peerForm.source === 'define'">
+          <el-form-item label="对端设备">
+            <el-select v-model="peerForm.peer_node_id" clearable filterable style="width: 100%">
+              <el-option
+                v-for="n in peerNodes"
+                :key="n.id"
+                :label="`${n.name} · ${formatNodeLocation(n)}`"
+                :value="n.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="selectedPeerNode" label="设备位置">
+            <span class="location-text">{{ formatNodeLocation(selectedPeerNode) }}</span>
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="台账设备">
+            <el-select
+              v-model="peerForm.peer_device_id"
+              clearable
+              filterable
+              :loading="inventoryLoading"
+              style="width: 100%"
+              @change="onInventoryDeviceChange"
+            >
+              <el-option
+                v-for="d in inventoryDevices"
+                :key="d.id"
+                :label="`${d.name || d.hostname}${d.rack_code ? ` · ${d.rack_code}` : ''}${d.u_position != null ? `/U${d.u_position}` : ''}`"
+                :value="d.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="selectedInventoryDevice" label="设备位置">
+            <span class="location-text">
+              {{ selectedInventoryDevice.room_name || '—' }}
+              / {{ selectedInventoryDevice.rack_code || '—' }}
+              <template v-if="selectedInventoryDevice.u_position != null">
+                / U{{ selectedInventoryDevice.u_position }}
+              </template>
+            </span>
+          </el-form-item>
+        </template>
         <el-form-item label="对端接口">
           <el-select
             v-model="peerForm.peer_port"
             clearable
             filterable
-            :disabled="!peerForm.peer_node_id"
+            :disabled="peerForm.source === 'define' ? !peerForm.peer_node_id : !peerForm.peer_device_id"
             style="width: 100%"
           >
             <el-option v-for="p in peerPortOptions" :key="p.id" :label="p.label" :value="p.id" />
