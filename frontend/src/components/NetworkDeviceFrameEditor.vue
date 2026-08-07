@@ -229,6 +229,8 @@ const switchForm = reactive({
   main_port_count: 48,
   uplink_port_count: 4,
   uplink_position: 'right' as UplinkPosition,
+  optical_card_count: 1,
+  optical_ports_per_card: 48,
   line_cards: [newCoreLineCard()] as CoreLineCard[],
 })
 
@@ -597,6 +599,17 @@ function syncSwitchFormFromLayout() {
   switchForm.main_port_count = config.mainPortCount
   switchForm.uplink_port_count = config.uplinkPortCount
   switchForm.uplink_position = config.uplinkPosition
+  if (
+    config.subtype === 'gigabit' ||
+    config.subtype === 'ten_gigabit' ||
+    config.subtype === 'aggregation'
+  ) {
+    const cards = Math.max(1, switchForm.optical_card_count || 1)
+    const ppc = Math.max(1, Math.floor(config.mainPortCount / cards) || 48)
+    switchForm.optical_card_count = cards
+    switchForm.optical_ports_per_card = ppc
+    switchForm.main_port_count = cards * ppc
+  }
   switchForm.line_cards = config.lineCards?.length
     ? config.lineCards.map((c) => ({ ...c }))
     : [newCoreLineCard()]
@@ -606,9 +619,26 @@ function onSwitchSubtypeChange(subtype: SwitchSubtype) {
   const defaults = SWITCH_SUBTYPE_DEFAULTS[subtype]
   switchForm.main_port_count = defaults.mainPortCount
   switchForm.uplink_port_count = defaults.uplinkPortCount
+  if (subtype === 'gigabit' || subtype === 'ten_gigabit' || subtype === 'aggregation') {
+    switchForm.optical_card_count = 1
+    switchForm.optical_ports_per_card = defaults.mainPortCount
+  }
   if (subtype === 'core' && !switchForm.line_cards.length) {
     switchForm.line_cards = [newCoreLineCard()]
   }
+}
+
+function syncAccessSwitchMainFromCards() {
+  const cards = Math.max(1, Math.min(16, switchForm.optical_card_count || 1))
+  const ppc = Math.max(1, Math.min(128, switchForm.optical_ports_per_card || 48))
+  switchForm.optical_card_count = cards
+  switchForm.optical_ports_per_card = ppc
+  switchForm.main_port_count = Math.max(1, Math.min(256, cards * ppc))
+}
+
+function onAccessSwitchCardChange() {
+  syncAccessSwitchMainFromCards()
+  onSwitchFormChange()
 }
 
 function onSubtypeSelect(subtype: SwitchSubtype) {
@@ -633,6 +663,13 @@ function onEditorLineCardTypeChange(card: CoreLineCard) {
 }
 
 function applySwitchTemplate() {
+  if (
+    switchForm.subtype === 'gigabit' ||
+    switchForm.subtype === 'ten_gigabit' ||
+    switchForm.subtype === 'aggregation'
+  ) {
+    syncAccessSwitchMainFromCards()
+  }
   applySwitchLayoutConfig(layout.value, {
     subtype: switchForm.subtype,
     mainPortCount: switchForm.main_port_count,
@@ -1596,53 +1633,40 @@ defineExpose({
             <el-option v-for="(label, key) in SWITCH_SUBTYPE_LABELS" :key="key" :label="label" :value="key" />
           </el-select>
 
-          <template v-if="isGigabitSwitch">
-            <label>电口数量</label>
+          <template v-if="isGigabitSwitch || isTenGigabitSwitch || isAggregationSwitch">
+            <label>板卡数</label>
             <el-input-number
-              v-model="switchForm.main_port_count"
+              v-model="switchForm.optical_card_count"
+              :min="1"
+              :max="16"
+              size="small"
+              @change="onAccessSwitchCardChange"
+            />
+            <label>{{ isGigabitSwitch ? '电口个数' : '光口个数' }}</label>
+            <el-input-number
+              v-model="switchForm.optical_ports_per_card"
               :min="1"
               :max="128"
               size="small"
-              @change="onSwitchFormChange"
-            />
-            <label>上联光口</label>
-            <el-input-number
-              v-model="switchForm.uplink_port_count"
-              :min="0"
-              :max="8"
-              :step="1"
-              size="small"
-              @change="onGigabitUplinkChange"
-            />
-            <span class="field-hint">≤8；&gt;4 为 6/8（点加号 4→6）</span>
-            <label>上联位置</label>
-            <el-radio-group v-model="switchForm.uplink_position" size="small" @change="onSwitchFormChange">
-              <el-radio-button v-for="(label, key) in UPLINK_POSITION_LABELS" :key="key" :value="key">
-                {{ label }}
-              </el-radio-button>
-            </el-radio-group>
-          </template>
-
-          <template v-else-if="isTenGigabitSwitch || isAggregationSwitch">
-            <label>{{ isAggregationSwitch ? '下联光口' : '光口数量' }}</label>
-            <el-input-number
-              v-model="switchForm.main_port_count"
-              :min="1"
-              :max="128"
-              size="small"
-              @change="onSwitchFormChange"
-            />
-            <label>40/100G上联</label>
-            <el-input-number
-              v-model="switchForm.uplink_port_count"
-              :min="0"
-              :max="8"
-              :step="2"
-              size="small"
-              @change="onTenGigabitUplinkChange"
+              @change="onAccessSwitchCardChange"
             />
             <span class="field-hint">
-              {{ isAggregationSwitch ? '汇聚：10G下联接入，40/100G上联核心' : '≤8，须为偶数，两排向后扩展' }}
+              总{{ isGigabitSwitch ? '电口' : '光口' }} {{ switchForm.main_port_count }}（板卡数 ×
+              {{ isGigabitSwitch ? '电口' : '光口' }}个数）
+            </span>
+            <label>{{ isGigabitSwitch ? '上联光口' : '40/100G上联' }}</label>
+            <el-input-number
+              v-model="switchForm.uplink_port_count"
+              :min="0"
+              :max="8"
+              :step="isGigabitSwitch ? 1 : 2"
+              size="small"
+              @change="isGigabitSwitch ? onGigabitUplinkChange : onTenGigabitUplinkChange"
+            />
+            <span class="field-hint">
+              <template v-if="isGigabitSwitch">≤8；&gt;4 为 6/8（点加号 4→6）</template>
+              <template v-else-if="isAggregationSwitch">汇聚：10G下联接入，40/100G上联核心</template>
+              <template v-else>≤8，须为偶数，两排向后扩展</template>
             </span>
             <label>上联位置</label>
             <el-radio-group v-model="switchForm.uplink_position" size="small" @change="onSwitchFormChange">

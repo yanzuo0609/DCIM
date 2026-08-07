@@ -78,7 +78,10 @@ function toCanvasNodes(nodes: NetworkNode[]): CanvasNodeInput[] {
       name: n.name,
       device_id: n.device_id,
       device_model_id: n.device_model_id ?? null,
+      design_model_id: n.design_model_id ?? null,
       contract_device_name: n.contract_device_name ?? null,
+      network_role: n.network_role ?? null,
+      device_group: n.device_group ?? null,
       pos_x: n.pos_x,
       pos_y: n.pos_y,
       switch_port_count: Math.max(1, Math.min(128, n.switch_port_count || 48)),
@@ -103,6 +106,14 @@ function toCanvasLinks(links: NetworkLink[]): CanvasLinkInput[] {
     cable_type: l.cable_type ?? null,
     interface_class: l.interface_class ?? null,
     link_role: l.link_role ?? null,
+    connection_type: l.connection_type ?? null,
+    speed: l.speed ?? null,
+    lag_group: l.lag_group ?? null,
+    redundancy_path: l.redundancy_path ?? null,
+    media: l.media ?? null,
+    module: l.module ?? null,
+    cable_length_m: l.cable_length_m ?? null,
+    wiring_rule_id: l.wiring_rule_id ?? null,
   }))
 }
 
@@ -217,7 +228,7 @@ export function useNetworkTopology() {
     try {
       const data = await listNetworkProjects({ page_size: 100, sort: 'updated_at', order: 'desc' })
       // 再次过滤，避免偶发返回已删除项；DEFAULT 置顶
-      const items = (data.items || []).filter((p) => !!p?.id)
+      const items = ((data.items || []) as NetworkProject[]).filter((p) => !!p?.id)
       items.sort((a, b) => {
         const aDef = a.code?.toUpperCase() === 'DEFAULT' ? 0 : 1
         const bDef = b.code?.toUpperCase() === 'DEFAULT' ? 0 : 1

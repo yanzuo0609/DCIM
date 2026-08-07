@@ -27,6 +27,7 @@ from app.services.infrastructure import (
 from app.services.layout import LayoutService
 from app.services.network import NetworkDesignService
 from app.services.network_interface_export import NetworkInterfaceExportService
+from app.services.network_model_design import NetworkModelDesignService
 from app.services.rack import RackService, RackTemplateService
 from app.services.svg import SVGService
 from app.services.personnel import PersonnelService
@@ -99,6 +100,12 @@ async def get_network_design_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> NetworkDesignService:
     return NetworkDesignService(session)
+
+
+async def get_network_model_design_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> NetworkModelDesignService:
+    return NetworkModelDesignService(session)
 
 
 async def get_network_interface_export_service(

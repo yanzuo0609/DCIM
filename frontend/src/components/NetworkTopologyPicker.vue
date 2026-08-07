@@ -3,11 +3,15 @@ import { reactive, ref } from 'vue'
 import type { NetworkTopology } from '@/api/network'
 import { useAuthStore } from '@/stores/auth'
 
-defineProps<{
-  topologies: NetworkTopology[]
-  currentId: string | null
-  loading?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    topologies: NetworkTopology[]
+    currentId: string | null
+    loading?: boolean
+    title?: string
+  }>(),
+  { title: '拓扑列表' },
+)
 
 const emit = defineEmits<{
   select: [id: string]
@@ -38,7 +42,7 @@ function submitCreate() {
 <template>
   <aside class="topology-picker">
     <div class="picker-header">
-      <span>拓扑列表</span>
+      <span>{{ title }}</span>
       <el-button v-if="canCreate" type="primary" link @click="openCreateDialog">新建</el-button>
     </div>
     <el-scrollbar v-loading="loading" class="topology-list">

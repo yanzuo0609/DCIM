@@ -168,6 +168,7 @@ class NetworkDesignService:
             name=project.name,
             description=project.description,
             topology_id=topology_id,
+            model_root_folder_id=project.model_root_folder_id,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -225,9 +226,12 @@ class NetworkDesignService:
             code=code,
             name=name,
             description=payload.description,
+            model_root_folder_id=payload.model_root_folder_id,
             created_by=user_id,
             updated_by=user_id,
         )
+        if payload.model_root_folder_id:
+            await self._ensure_model_folder(payload.model_root_folder_id)
         created = await self.project_repo.create(project)
         topology = NetworkTopology(
             name=name,
@@ -273,6 +277,10 @@ class NetworkDesignService:
             entity.name = name
         if payload.description is not None:
             entity.description = payload.description
+        if "model_root_folder_id" in payload.model_fields_set:
+            if payload.model_root_folder_id is not None:
+                await self._ensure_model_folder(payload.model_root_folder_id)
+            entity.model_root_folder_id = payload.model_root_folder_id
         entity.updated_by = user_id
 
         topo = await self.project_repo.get_primary_topology(project_id)
@@ -284,7 +292,21 @@ class NetworkDesignService:
             topo.updated_by = user_id
 
         await self.session.flush()
+        await self.session.refresh(entity)
+        if topo is not None:
+            await self.session.refresh(topo)
         return self._to_project_response(entity, topo.id if topo else None)
+
+    async def _ensure_model_folder(self, folder_id: uuid.UUID) -> None:
+        from app.models.network_model_design import NetworkModelFolder
+        from app.repositories.network_model_design import NetworkModelFolderRepository
+
+        folder = await NetworkModelFolderRepository(self.session).get_by_id(folder_id)
+        if not folder:
+            # fallback: raw get (covers edge cases)
+            folder = await self.session.get(NetworkModelFolder, folder_id)
+        if not folder or folder.deleted_at is not None:
+            raise NotFoundError("模型项目/文件夹不存在")
 
     async def delete_project(
         self, project_id: uuid.UUID, user_id: uuid.UUID | None = None
@@ -438,7 +460,10 @@ class NetworkDesignService:
                 node.name = item.name.strip()
                 node.device_id = item.device_id
                 node.device_model_id = item.device_model_id
+                node.design_model_id = item.design_model_id
                 node.contract_device_name = item.contract_device_name
+                node.network_role = item.network_role
+                node.device_group = item.device_group
                 node.pos_x = item.pos_x
                 node.pos_y = item.pos_y
                 node.switch_port_count = item.switch_port_count
@@ -459,7 +484,10 @@ class NetworkDesignService:
                     name=item.name.strip(),
                     device_id=item.device_id,
                     device_model_id=item.device_model_id,
+                    design_model_id=item.design_model_id,
                     contract_device_name=item.contract_device_name,
+                    network_role=item.network_role,
+                    device_group=item.device_group,
                     pos_x=item.pos_x,
                     pos_y=item.pos_y,
                     switch_port_count=item.switch_port_count,
@@ -517,6 +545,14 @@ class NetworkDesignService:
                     cable_type=link_input.cable_type,
                     interface_class=link_input.interface_class,
                     link_role=link_input.link_role,
+                    connection_type=link_input.connection_type,
+                    speed=link_input.speed,
+                    lag_group=link_input.lag_group,
+                    redundancy_path=link_input.redundancy_path,
+                    media=link_input.media,
+                    module=link_input.module,
+                    cable_length_m=link_input.cable_length_m,
+                    wiring_rule_id=link_input.wiring_rule_id,
                     created_by=user_id,
                     updated_by=user_id,
                 )

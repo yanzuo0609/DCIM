@@ -8,14 +8,18 @@ const props = defineProps<{
   nodes: NetworkNode[]
   links: NetworkLink[]
   selectedNodeId: string | null
+  selectedLinkId?: string | null
   linkMode: boolean
   linkSourceId?: string | null
   /** 选中模板后，点击空白处可连续创建设备 */
   stampMode?: boolean
+  /** 仿真节点状态：nodeId -> running|stopped|error */
+  nodeLabStatus?: Record<string, string> | null
 }>()
 
 const emit = defineEmits<{
   selectNode: [id: string | null]
+  selectLink: [id: string | null]
   moveNode: [id: string, x: number, y: number]
   placeNode: [id: string, x: number, y: number]
   canvasClick: [x: number, y: number]
@@ -63,6 +67,7 @@ function svgPointFromEvent(event: MouseEvent | DragEvent) {
 
 function onNodeMouseDown(event: MouseEvent, node: NetworkNode) {
   event.stopPropagation()
+  emit('selectLink', null)
   emit('selectNode', node.id)
   if (props.linkMode) return
   const cursor = svgPointFromEvent(event)
@@ -92,11 +97,12 @@ function onMouseUp() {
 
 function onBackgroundClick(event: MouseEvent) {
   if (props.linkMode) return
-  // 点击落在设备上时由节点自己处理，避免松开鼠标后清空右侧详情
+  // 点击落在设备/连线上时由自身处理
   const target = event.target as Element | null
-  if (target?.closest?.('.node')) return
+  if (target?.closest?.('.node') || target?.closest?.('.link-hit')) return
   const cursor = svgPointFromEvent(event)
   if (!cursor) {
+    emit('selectLink', null)
     emit('selectNode', null)
     return
   }
@@ -104,13 +110,22 @@ function onBackgroundClick(event: MouseEvent) {
     emit('canvasClick', Math.max(0, cursor.x - ICON / 2), Math.max(0, cursor.y - ICON / 2))
     return
   }
+  emit('selectLink', null)
   emit('selectNode', null)
   emit('canvasClick', cursor.x, cursor.y)
 }
 
 function onNodeClick(event: MouseEvent, node: NetworkNode) {
   event.stopPropagation()
+  emit('selectLink', null)
   emit('selectNode', node.id)
+}
+
+function onLinkClick(event: MouseEvent, link: NetworkLink) {
+  event.stopPropagation()
+  if (props.linkMode || props.stampMode) return
+  emit('selectNode', null)
+  emit('selectLink', link.id)
 }
 
 function onDragOver(event: DragEvent) {
@@ -186,19 +201,36 @@ function linkColor(linkType: string) {
       </defs>
 
       <g class="links">
-        <g v-for="link in canvasLinks" :key="link.id">
+        <g
+          v-for="link in canvasLinks"
+          :key="link.id"
+          class="link-group"
+          :class="{ selected: selectedLinkId === link.id }"
+        >
+          <!-- 加宽命中区域，便于点选 -->
           <path
+            class="link-hit"
             :d="linkPath(link)"
             fill="none"
-            :stroke="linkColor(link.link_type)"
-            stroke-width="2.2"
+            stroke="transparent"
+            stroke-width="14"
+            @click.stop="onLinkClick($event, link)"
+          />
+          <path
+            class="link-line"
+            :d="linkPath(link)"
+            fill="none"
+            :stroke="selectedLinkId === link.id ? '#f56c6c' : linkColor(link.link_type)"
+            :stroke-width="selectedLinkId === link.id ? 3.2 : 2.2"
             marker-end="url(#topo-arrow)"
+            pointer-events="none"
           />
           <text
             :x="linkLabelPos(link).x"
             :y="linkLabelPos(link).y"
             class="link-label"
             text-anchor="middle"
+            @click.stop="onLinkClick($event, link)"
           >
             {{ link.label || `${link.source_port} → ${link.target_port}` }}
           </text>
@@ -234,11 +266,28 @@ function linkColor(linkType: string) {
           <text :x="ICON / 2" :y="ICON + 14" text-anchor="middle" class="node-name">
             {{ node.name }}
           </text>
+          <text
+            v-if="node.device_group"
+            :x="ICON / 2"
+            :y="ICON + 28"
+            text-anchor="middle"
+            class="node-group"
+          >
+            {{ node.device_group }}
+          </text>
+          <circle
+            v-if="nodeLabStatus?.[node.id]"
+            :cx="ICON - 6"
+            :cy="8"
+            r="5"
+            class="lab-dot"
+            :class="`lab-${nodeLabStatus[node.id]}`"
+          />
         </g>
       </g>
     </svg>
     <div v-if="!canvasNodes.length" class="canvas-empty">
-      {{ stampMode ? '点击画布连续放置选中设备' : '将左侧设备拖拽到此处，或选中后点击画布放置' }}
+      {{ stampMode ? '点击画布连续放置选中模型' : '从左侧模型库选择模型后点击画布放置' }}
     </div>
   </div>
 </template>
@@ -291,16 +340,32 @@ function linkColor(linkType: string) {
   pointer-events: none;
 }
 
+.node-group {
+  fill: #909399;
+  font-size: 10px;
+  pointer-events: none;
+}
+
 .icon-host {
   width: 72px;
   height: 72px;
   line-height: 0;
 }
 
+.link-hit {
+  cursor: pointer;
+}
+
 .link-label {
   fill: #606266;
   font-size: 11px;
-  pointer-events: none;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.link-group.selected .link-label {
+  fill: #f56c6c;
+  font-weight: 600;
 }
 
 .canvas-empty {
@@ -312,5 +377,19 @@ function linkColor(linkType: string) {
   color: #909399;
   font-size: 14px;
   pointer-events: none;
+}
+
+.lab-dot {
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+.lab-dot.lab-running {
+  fill: #67c23a;
+}
+.lab-dot.lab-stopped {
+  fill: #909399;
+}
+.lab-dot.lab-error {
+  fill: #f56c6c;
 }
 </style>

@@ -21,6 +21,10 @@ from app.models import (  # noqa: F401
     NetworkNode,
     NetworkProject,
     NetworkTopology,
+    NetworkLabSession,
+    NetworkDesignModel,
+    NetworkModelFolder,
+    NetworkWiringRule,
     Floor,
     Manufacturer,
     Permission,
@@ -537,6 +541,101 @@ async def _ensure_sqlite_network_node_columns(connection) -> None:
         await connection.exec_driver_sql(
             "ALTER TABLE network_node ADD COLUMN contract_device_name VARCHAR(100)"
         )
+    if "design_model_id" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN design_model_id CHAR(36)"
+        )
+    if "network_role" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN network_role VARCHAR(20)"
+        )
+    if "device_group" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN device_group VARCHAR(80)"
+        )
+
+
+async def _ensure_sqlite_uuid_hyphen_normalize(connection) -> None:
+    """Normalize legacy hyphenated UUID strings to compact form for consistent lookups."""
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+
+    async def _normalize(table: str, column: str) -> None:
+        result = await connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        cols = {row[1] for row in result.fetchall()}
+        if column not in cols:
+            return
+        await connection.exec_driver_sql(
+            f"""
+            UPDATE {table}
+            SET {column} = REPLACE({column}, '-', '')
+            WHERE {column} IS NOT NULL AND INSTR({column}, '-') > 0
+            """
+        )
+
+    # network project graph
+    await _normalize("network_project", "id")
+    await _normalize("network_project", "model_root_folder_id")
+    await _normalize("network_topology", "id")
+    await _normalize("network_topology", "project_id")
+    await _normalize("network_node", "id")
+    await _normalize("network_node", "topology_id")
+    await _normalize("network_node", "design_model_id")
+    await _normalize("network_link", "id")
+    await _normalize("network_link", "topology_id")
+    await _normalize("network_link", "source_node_id")
+    await _normalize("network_link", "target_node_id")
+    await _normalize("network_lab_session", "id")
+    await _normalize("network_lab_session", "topology_id")
+    await _normalize("network_model_folder", "id")
+    await _normalize("network_model_folder", "parent_id")
+    await _normalize("network_design_model", "id")
+    await _normalize("network_design_model", "folder_id")
+    await _normalize("network_wiring_rule", "id")
+    await _normalize("network_wiring_rule", "topology_id")
+
+
+async def _ensure_sqlite_network_project_model_folder(connection) -> None:
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    result = await connection.exec_driver_sql("PRAGMA table_info(network_project)")
+    columns = {row[1] for row in result.fetchall()}
+    if "model_root_folder_id" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_project ADD COLUMN model_root_folder_id CHAR(36)"
+        )
+
+
+async def _ensure_sqlite_network_lab_session(connection) -> None:
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    tables = await connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='network_lab_session'"
+    )
+    if tables.fetchall():
+        return
+    await connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS network_lab_session (
+          id CHAR(36) NOT NULL PRIMARY KEY,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_by CHAR(36),
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_by CHAR(36),
+          deleted_at DATETIME,
+          deleted_by CHAR(36),
+          version INTEGER NOT NULL DEFAULT 1,
+          topology_id CHAR(36) NOT NULL UNIQUE,
+          engine VARCHAR(20) NOT NULL DEFAULT 'eve-ng',
+          external_lab_path VARCHAR(500),
+          status VARCHAR(30) NOT NULL DEFAULT 'idle',
+          last_sync_at DATETIME,
+          error_message TEXT,
+          node_map JSON,
+          node_status JSON
+        )
+        """
+    )
 
 
 async def _ensure_sqlite_device_model_panel_columns(connection) -> None:
@@ -561,11 +660,31 @@ async def _ensure_sqlite_network_link_columns(connection) -> None:
         return
     result = await connection.exec_driver_sql("PRAGMA table_info(network_link)")
     columns = {row[1] for row in result.fetchall()}
-    for name in ("source_label", "target_label", "cable_type", "interface_class", "link_role"):
+    for name in (
+        "source_label",
+        "target_label",
+        "cable_type",
+        "interface_class",
+        "link_role",
+        "connection_type",
+        "speed",
+        "lag_group",
+        "redundancy_path",
+        "media",
+        "module",
+    ):
         if name not in columns:
             await connection.exec_driver_sql(
                 f"ALTER TABLE network_link ADD COLUMN {name} VARCHAR(200)"
             )
+    if "cable_length_m" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_link ADD COLUMN cable_length_m FLOAT"
+        )
+    if "wiring_rule_id" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_link ADD COLUMN wiring_rule_id CHAR(36)"
+        )
 
 
 async def _ensure_sqlite_network_project(connection) -> None:
@@ -648,6 +767,9 @@ async def init_db() -> None:
         await _ensure_sqlite_network_node_columns(conn)
         await _ensure_sqlite_network_link_columns(conn)
         await _ensure_sqlite_network_project(conn)
+        await _ensure_sqlite_network_project_model_folder(conn)
+        await _ensure_sqlite_network_lab_session(conn)
+        await _ensure_sqlite_uuid_hyphen_normalize(conn)
         await _ensure_sqlite_device_model_panel_columns(conn)
 
     async with async_session_factory() as session:

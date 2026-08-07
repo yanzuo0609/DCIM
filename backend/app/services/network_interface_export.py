@@ -26,6 +26,13 @@ class NetworkInterfaceExportService:
     EXPORT_HEADERS = [
         "场景",
         "连线类型",
+        "连接类型",
+        "速率",
+        "LAG",
+        "冗余路径",
+        "介质",
+        "模块",
+        "线长m",
         "本端类型",
         "本端名称",
         "本端位置",
@@ -43,6 +50,7 @@ class NetworkInterfaceExportService:
         "本端标签",
         "对端标签",
         "备注",
+        "规则ID",
         "本端节点ID",
         "对端节点ID",
         "连线ID",
@@ -170,6 +178,15 @@ class NetworkInterfaceExportService:
                 [
                     self.ROLE_LABEL.get(role, role),
                     self.TYPE_LABEL.get(str(ltype), str(ltype)),
+                    getattr(link, "connection_type", None) or "",
+                    getattr(link, "speed", None) or "",
+                    getattr(link, "lag_group", None) or "",
+                    getattr(link, "redundancy_path", None) or "",
+                    getattr(link, "media", None) or "",
+                    getattr(link, "module", None) or "",
+                    ""
+                    if getattr(link, "cable_length_m", None) is None
+                    else str(link.cable_length_m),
                     self._kind_label(source) if source else "",
                     source.name if source else "",
                     s_loc,
@@ -187,6 +204,7 @@ class NetworkInterfaceExportService:
                     link.source_label or "",
                     link.target_label or "",
                     link.label or "",
+                    str(getattr(link, "wiring_rule_id", None) or ""),
                     str(link.source_node_id),
                     str(link.target_node_id),
                     str(link.id),
@@ -205,6 +223,13 @@ class NetworkInterfaceExportService:
             [
                 "服务器接入",
                 "交换机-服务器",
+                "SERVER",
+                "25G",
+                "",
+                "A",
+                "DAC",
+                "",
+                "2",
                 "交换机",
                 "示例交换机",
                 "",
@@ -219,6 +244,7 @@ class NetworkInterfaceExportService:
                 "NIC1",
                 "电口",
                 "超六类铜缆",
+                "",
                 "",
                 "",
                 "",
@@ -276,7 +302,10 @@ class NetworkInterfaceExportService:
                     name=n.name,
                     device_id=n.device_id,
                     device_model_id=getattr(n, "device_model_id", None),
+                    design_model_id=getattr(n, "design_model_id", None),
                     contract_device_name=getattr(n, "contract_device_name", None),
+                    network_role=getattr(n, "network_role", None),
+                    device_group=getattr(n, "device_group", None),
                     pos_x=n.pos_x,
                     pos_y=n.pos_y,
                     switch_port_count=n.switch_port_count,
@@ -304,6 +333,14 @@ class NetworkInterfaceExportService:
                     cable_type=l.cable_type,
                     interface_class=l.interface_class,
                     link_role=l.link_role,
+                    connection_type=getattr(l, "connection_type", None),
+                    speed=getattr(l, "speed", None),
+                    lag_group=getattr(l, "lag_group", None),
+                    redundancy_path=getattr(l, "redundancy_path", None),
+                    media=getattr(l, "media", None),
+                    module=getattr(l, "module", None),
+                    cable_length_m=getattr(l, "cable_length_m", None),
+                    wiring_rule_id=getattr(l, "wiring_rule_id", None),
                 )
             )
         return result
@@ -380,6 +417,20 @@ class NetworkInterfaceExportService:
                         link_uuid = uuid.UUID(link_id_raw)
                     except ValueError:
                         link_uuid = None
+                length_raw = take(row, "线长m")
+                length_m = None
+                if length_raw:
+                    try:
+                        length_m = float(length_raw)
+                    except ValueError:
+                        length_m = None
+                rule_raw = take(row, "规则ID")
+                rule_uuid = None
+                if rule_raw:
+                    try:
+                        rule_uuid = uuid.UUID(rule_raw)
+                    except ValueError:
+                        rule_uuid = None
                 payload = CanvasLinkInput(
                     id=link_uuid,
                     link_type=NetworkLinkType(link_type),
@@ -393,6 +444,14 @@ class NetworkInterfaceExportService:
                     cable_type=cable,
                     interface_class=iface,
                     link_role=link_role,
+                    connection_type=take(row, "连接类型") or None,
+                    speed=take(row, "速率") or None,
+                    lag_group=take(row, "LAG") or None,
+                    redundancy_path=take(row, "冗余路径") or None,
+                    media=take(row, "介质") or None,
+                    module=take(row, "模块") or None,
+                    cable_length_m=length_m,
+                    wiring_rule_id=rule_uuid,
                 )
                 if link_uuid and str(link_uuid) in by_id:
                     links[by_id[str(link_uuid)]] = payload

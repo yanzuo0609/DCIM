@@ -46,6 +46,14 @@ export interface InterfaceDesignRow {
   sourceLabel: string
   targetLabel: string
   remark: string
+  connectionType: string
+  speed: string
+  lagGroup: string
+  redundancyPath: string
+  media: string
+  module: string
+  cableLengthM: string
+  wiringRuleId: string
 }
 
 function switchSubtype(node: NetworkNode | undefined): SwitchSubtype | null {
@@ -271,6 +279,14 @@ export function toInterfaceDesignRow(
     sourceLabel: labels.source_label,
     targetLabel: labels.target_label,
     remark: link.label || '',
+    connectionType: link.connection_type || '',
+    speed: link.speed || '',
+    lagGroup: link.lag_group || '',
+    redundancyPath: link.redundancy_path || '',
+    media: link.media || '',
+    module: link.module || '',
+    cableLengthM: link.cable_length_m != null ? String(link.cable_length_m) : '',
+    wiringRuleId: link.wiring_rule_id || '',
   }
 }
 

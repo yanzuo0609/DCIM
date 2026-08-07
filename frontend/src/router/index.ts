@@ -133,13 +133,17 @@ const router = createRouter({
           children: [
             {
               path: '',
-              redirect: '/network/devices',
+              redirect: '/network/models',
+            },
+            {
+              path: 'models',
+              name: 'network-models',
+              component: () => import('@/views/network/NetworkModelDesignView.vue'),
+              meta: { permission: 'network:view' },
             },
             {
               path: 'devices',
-              name: 'network-devices',
-              component: () => import('@/views/network/NetworkDeviceDefineView.vue'),
-              meta: { permission: 'network:view' },
+              redirect: '/network/models',
             },
             {
               path: 'topology',

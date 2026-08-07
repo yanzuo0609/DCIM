@@ -93,7 +93,7 @@ async function handleLogout() {
         </el-sub-menu>
         <el-sub-menu v-if="auth.hasPermission('network:view')" index="network-menu">
           <template #title><span>网络设计</span></template>
-          <el-menu-item index="/network/devices">设备定义</el-menu-item>
+          <el-menu-item index="/network/models">模型设计</el-menu-item>
           <el-menu-item index="/network/topology">拓扑设计</el-menu-item>
           <el-menu-item index="/network/interfaces">接口设计</el-menu-item>
         </el-sub-menu>

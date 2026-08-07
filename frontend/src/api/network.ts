@@ -98,6 +98,10 @@ export interface FramePort {
   peer_device_name?: string | null
   /** 手动拖动后锁定，布局引擎不再覆盖坐标 */
   layout_locked?: boolean | null
+  /** 布线用途 UPLINK/SERVER/PEER/MGMT/DOWNLINK/OTHER */
+  purpose?: string | null
+  reserved?: boolean | null
+  port_group?: string | null
 }
 
 export interface CoreLineCard {
@@ -139,8 +143,14 @@ export interface NetworkNode {
   device_id: string | null
   /** 关联合同厂商型号采购汇总对应的档案型号 */
   device_model_id?: string | null
+  /** 模型设计模板 ID */
+  design_model_id?: string | null
   /** 合同设备名称：面板按此名称一对多应用到设备清单 */
   contract_device_name?: string | null
+  /** 网络角色 CORE/AGG/ACCESS/SERVER/FIREWALL（可覆盖模型继承） */
+  network_role?: string | null
+  /** 设备组，如 CORE-G01 / ACCESS-A */
+  device_group?: string | null
   pos_x: number
   pos_y: number
   switch_port_count: number
@@ -165,6 +175,14 @@ export interface NetworkLink {
   cable_type?: CableType | string | null
   interface_class?: InterfaceClass | string | null
   link_role?: NetworkLinkRole | string | null
+  connection_type?: string | null
+  speed?: string | null
+  lag_group?: string | null
+  redundancy_path?: string | null
+  media?: string | null
+  module?: string | null
+  cable_length_m?: number | null
+  wiring_rule_id?: string | null
 }
 
 export interface NetworkTopology {
@@ -187,6 +205,7 @@ export interface NetworkProject {
   name: string
   description: string | null
   topology_id: string | null
+  model_root_folder_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -197,7 +216,10 @@ export interface CanvasNodeInput {
   name: string
   device_id?: string | null
   device_model_id?: string | null
+  design_model_id?: string | null
   contract_device_name?: string | null
+  network_role?: string | null
+  device_group?: string | null
   pos_x: number
   pos_y: number
   switch_port_count?: number
@@ -219,6 +241,14 @@ export interface CanvasLinkInput {
   cable_type?: string | null
   interface_class?: string | null
   link_role?: string | null
+  connection_type?: string | null
+  speed?: string | null
+  lag_group?: string | null
+  redundancy_path?: string | null
+  media?: string | null
+  module?: string | null
+  cable_length_m?: number | null
+  wiring_rule_id?: string | null
 }
 
 export function defaultSlots(): SlotConfig[] {
@@ -371,6 +401,7 @@ export async function createNetworkProject(payload: {
   code: string
   name: string
   description?: string | null
+  model_root_folder_id?: string | null
 }) {
   const response = await api.post<ApiResponse<NetworkProject>>('/network-projects', payload)
   return unwrap(response)
@@ -383,7 +414,12 @@ export async function getNetworkProject(id: string): Promise<NetworkProject> {
 
 export async function updateNetworkProject(
   id: string,
-  payload: { code?: string; name?: string; description?: string | null },
+  payload: {
+    code?: string
+    name?: string
+    description?: string | null
+    model_root_folder_id?: string | null
+  },
 ) {
   const response = await api.put<ApiResponse<NetworkProject>>(`/network-projects/${id}`, payload)
   return unwrap(response)
@@ -391,6 +427,74 @@ export async function updateNetworkProject(
 
 export async function deleteNetworkProject(id: string) {
   await api.delete(`/network-projects/${id}`)
+}
+
+export interface NetworkLabSession {
+  id: string
+  topology_id: string
+  engine: string
+  external_lab_path: string | null
+  status: string
+  last_sync_at: string | null
+  error_message: string | null
+  node_map: Record<string, string> | null
+  node_status: Record<string, string> | null
+  created_at: string
+  updated_at: string
+}
+
+export interface LabEngineInfo {
+  engine: string
+  configured: boolean
+  base_url: string | null
+  message: string | null
+}
+
+export async function getLabEngineInfo() {
+  const response = await api.get<ApiResponse<LabEngineInfo>>('/network-topologies/lab/engine')
+  return unwrap(response)
+}
+
+export async function getTopologyLabSession(topologyId: string) {
+  const response = await api.get<ApiResponse<NetworkLabSession>>(
+    `/network-topologies/${topologyId}/lab`,
+  )
+  return unwrap(response)
+}
+
+export async function syncTopologyLab(topologyId: string) {
+  const response = await api.post<ApiResponse<NetworkLabSession>>(
+    `/network-topologies/${topologyId}/lab/sync`,
+  )
+  return unwrap(response)
+}
+
+export async function startTopologyLab(topologyId: string) {
+  const response = await api.post<ApiResponse<NetworkLabSession>>(
+    `/network-topologies/${topologyId}/lab/start`,
+  )
+  return unwrap(response)
+}
+
+export async function stopTopologyLab(topologyId: string) {
+  const response = await api.post<ApiResponse<NetworkLabSession>>(
+    `/network-topologies/${topologyId}/lab/stop`,
+  )
+  return unwrap(response)
+}
+
+export async function refreshTopologyLabStatus(topologyId: string) {
+  const response = await api.get<ApiResponse<NetworkLabSession>>(
+    `/network-topologies/${topologyId}/lab/status`,
+  )
+  return unwrap(response)
+}
+
+export async function getTopologyLabConsole(topologyId: string, nodeId: string) {
+  const response = await api.get<
+    ApiResponse<{ node_id: string; console_url: string | null; message: string | null }>
+  >(`/network-topologies/${topologyId}/lab/console/${nodeId}`)
+  return unwrap(response)
 }
 
 export const PORT_TYPE_LABELS: Record<PortType, string> = {

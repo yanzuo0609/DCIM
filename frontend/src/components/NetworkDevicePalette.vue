@@ -63,7 +63,7 @@ function onItemClick(node: NetworkNode) {
     <p class="palette-hint">选中后可多次点击/拖拽画布创建带序号的设备</p>
     <div class="palette-section">
       <div class="section-title">待放置 ({{ pending.length }})</div>
-      <div v-if="!pending.length" class="empty-hint">请先在「设备定义」中添加设备</div>
+      <div v-if="!pending.length" class="empty-hint">画布设备实例会出现在此；请从上方模型库放置</div>
       <div
         v-for="node in pending"
         :key="node.id"

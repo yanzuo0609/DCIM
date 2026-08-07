@@ -13,7 +13,12 @@ from app.models.device import (
 )
 from app.models.ip_address import IpAddress, IpSegment
 from app.models.infrastructure import Building, DataCenter, Floor, Room
-from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology
+from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology, NetworkLabSession
+from app.models.network_model_design import (
+    NetworkDesignModel,
+    NetworkModelFolder,
+    NetworkWiringRule,
+)
 from app.models.personnel import (
     PersonnelInternal,
     PersonnelOrgChart,
@@ -56,6 +61,10 @@ __all__ = [
     "NetworkTopology",
     "NetworkNode",
     "NetworkLink",
+    "NetworkLabSession",
+    "NetworkModelFolder",
+    "NetworkDesignModel",
+    "NetworkWiringRule",
     "PersonnelOrgChart",
     "PersonnelOrgNode",
     "PersonnelOrgLink",

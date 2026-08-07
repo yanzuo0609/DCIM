@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NODE_KIND_LABELS,
   PORT_TYPE_LABELS,
@@ -9,18 +9,24 @@ import {
   type NetworkNode,
   type SwitchSubtype,
 } from '@/api/network'
+import { FABRIC_ROLE_OPTIONS, type FabricRole } from '@/utils/wiringTypes'
+import { resolveNodeFabricRole } from '@/utils/fabricRole'
 
 const props = defineProps<{
   node: NetworkNode
   nodes: NetworkNode[]
   links: NetworkLink[]
   editable?: boolean
+  /** 拓扑内可选设备组 */
+  groupOptions?: string[]
 }>()
 
 const emit = defineEmits<{
   connectPort: [portId: string]
   clearPort: [portId: string]
   rename: [name: string]
+  updateMeta: [patch: { network_role?: string | null; device_group?: string | null }]
+  manageGroups: []
   unplace: []
   remove: []
   goDevice: [deviceId: string]
@@ -28,6 +34,17 @@ const emit = defineEmits<{
 
 const editingName = ref(false)
 const nameDraft = ref('')
+const roleDraft = ref<FabricRole | ''>('')
+const groupDraft = ref('')
+
+watch(
+  () => props.node.id,
+  () => {
+    roleDraft.value = (props.node.network_role as FabricRole) || resolveNodeFabricRole(props.node)
+    groupDraft.value = props.node.device_group || ''
+  },
+  { immediate: true },
+)
 
 const kindLabel = computed(() => {
   const n = props.node
@@ -36,6 +53,8 @@ const kindLabel = computed(() => {
   }
   return NODE_KIND_LABELS[n.kind]
 })
+
+const effectiveRole = computed(() => resolveNodeFabricRole(props.node))
 
 const portRows = computed(() => {
   const opts = listNodePortOptions(props.node)
@@ -66,6 +85,7 @@ const portRows = computed(() => {
       id: opt.id,
       label: opt.label,
       portType: opt.port_type,
+      purpose: frame?.purpose || null,
       linked: !!(peerNodeId && peerPort),
       peerNodeId,
       peerPort,
@@ -86,6 +106,16 @@ function commitRename() {
   const name = nameDraft.value.trim()
   if (name && name !== props.node.name) emit('rename', name)
   editingName.value = false
+}
+
+function commitRole() {
+  emit('updateMeta', { network_role: roleDraft.value || null })
+}
+
+function commitGroup() {
+  const raw = typeof groupDraft.value === 'string' ? groupDraft.value.trim() : ''
+  groupDraft.value = raw
+  emit('updateMeta', { device_group: raw || null })
 }
 
 function peerTitle(row: (typeof portRows.value)[0]) {
@@ -110,6 +140,44 @@ function peerTitle(row: (typeof portRows.value)[0]) {
     </div>
 
     <p><span class="label">类型</span>{{ kindLabel }}</p>
+    <div class="field">
+      <span class="label">角色</span>
+      <el-select
+        v-if="editable"
+        v-model="roleDraft"
+        size="small"
+        style="width: 140px"
+        @change="commitRole"
+      >
+        <el-option
+          v-for="o in FABRIC_ROLE_OPTIONS"
+          :key="o.value"
+          :label="o.label"
+          :value="o.value"
+        />
+      </el-select>
+      <span v-else>{{ effectiveRole }}</span>
+    </div>
+    <div class="field">
+      <span class="label">设备组</span>
+      <div v-if="editable" class="group-edit">
+        <el-select
+          v-model="groupDraft"
+          size="small"
+          clearable
+          filterable
+          allow-create
+          default-first-option
+          placeholder="选择或新建"
+          style="width: 140px"
+          @change="commitGroup"
+        >
+          <el-option v-for="g in groupOptions || []" :key="g" :label="g" :value="g" />
+        </el-select>
+        <el-button type="primary" link size="small" @click="emit('manageGroups')">管理</el-button>
+      </div>
+      <span v-else>{{ node.device_group || '-' }}</span>
+    </div>
     <p>
       <span class="label">状态</span>
       {{ node.on_canvas === false ? '待放置 / 可作模板' : '已放置' }}
@@ -140,6 +208,7 @@ function peerTitle(row: (typeof portRows.value)[0]) {
           <div class="port-id">{{ row.id }}</div>
           <div class="port-meta">
             {{ PORT_TYPE_LABELS[row.portType] || row.portType }}
+            <span v-if="row.purpose"> · {{ row.purpose }}</span>
             <span v-if="row.label && row.label !== row.id"> · {{ row.label }}</span>
           </div>
           <div class="peer" :class="{ free: !row.linked }">
@@ -211,6 +280,12 @@ function peerTitle(row: (typeof portRows.value)[0]) {
 .name-edit {
   display: inline-block;
   width: 160px;
+}
+
+.group-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 p {

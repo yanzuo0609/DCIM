@@ -81,6 +81,7 @@ export function cloneNodeOntoCanvas(
     name: nextDeviceName(allNodes, template),
     device_id: null,
     device_model_id: template.device_model_id ?? null,
+    design_model_id: template.design_model_id ?? null,
     contract_device_name: template.contract_device_name ?? null,
     pos_x: x,
     pos_y: y,

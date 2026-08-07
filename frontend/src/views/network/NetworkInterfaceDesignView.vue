@@ -507,6 +507,21 @@ watch(currentId, () => {
               <span v-else>{{ row.linkRoleLabel }}</span>
             </template>
           </el-table-column>
+          <el-table-column label="连接类型" width="90" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.connectionType || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="速率" width="72" align="center">
+            <template #default="{ row }">{{ row.speed || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="LAG" min-width="100" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.lagGroup || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="冗余" width="64" align="center">
+            <template #default="{ row }">{{ row.redundancyPath || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="介质" width="80" align="center">
+            <template #default="{ row }">{{ row.media || '-' }}</template>
+          </el-table-column>
           <el-table-column label="本端设备" min-width="110" show-overflow-tooltip>
             <template #default="{ row }">{{ row.sourceKind }}</template>
           </el-table-column>

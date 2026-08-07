@@ -32,7 +32,7 @@ const previewNode = computed<NetworkNode | null>(() => {
 
 <template>
   <div v-if="previewNode" class="panel-preview">
-    <div class="preview-title">设备定义面板</div>
+    <div class="preview-title">面板简图（只读 · 由属性自动生成）</div>
     <NetworkDeviceFrameEditor :node="previewNode" :peer-nodes="[]" :editable="false" />
   </div>
   <el-empty v-else description="尚未关联设备定义面板" :image-size="64" />

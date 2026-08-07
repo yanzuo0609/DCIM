@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
-from sqlalchemy import Select, asc, desc, func, or_, select
+from sqlalchemy import Select, asc, desc, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import BaseModel
@@ -48,7 +48,12 @@ class BaseRepository(Generic[T]):
 
         if in_filters:
             for key, values in in_filters.items():
-                if values is not None and hasattr(self.model, key):
+                if values is None or not hasattr(self.model, key):
+                    continue
+                # 空列表必须得到空结果，避免误返回全表
+                if len(values) == 0:
+                    stmt = stmt.where(false())
+                else:
                     stmt = stmt.where(getattr(self.model, key).in_(values))
 
         if keyword and search_fields:

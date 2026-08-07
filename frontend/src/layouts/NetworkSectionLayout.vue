@@ -9,7 +9,7 @@ const auth = useAuthStore()
 
 const tabs = computed(() => {
   const items = [
-    { path: '/network/devices', label: '设备定义' },
+    { path: '/network/models', label: '模型设计' },
     { path: '/network/topology', label: '拓扑设计' },
     { path: '/network/interfaces', label: '接口设计' },
   ]

@@ -73,6 +73,10 @@ class FramePort(BaseModel):
         default=None, max_length=200, description="对端台账设备展示名缓存"
     )
     layout_locked: bool | None = None
+    # 布线用途：UPLINK / SERVER / PEER / MGMT / DOWNLINK / OTHER
+    purpose: str | None = Field(default=None, max_length=20)
+    reserved: bool | None = None
+    port_group: str | None = Field(default=None, max_length=50)
 
 
 class CoreLineCard(BaseModel):
@@ -153,7 +157,10 @@ class NetworkNodeResponse(BaseModel):
     name: str
     device_id: uuid.UUID | None
     device_model_id: uuid.UUID | None = None
+    design_model_id: uuid.UUID | None = None
     contract_device_name: str | None = None
+    network_role: str | None = None
+    device_group: str | None = None
     pos_x: float
     pos_y: float
     switch_port_count: int
@@ -179,6 +186,14 @@ class NetworkLinkResponse(BaseModel):
     cable_type: str | None = None
     interface_class: str | None = None
     link_role: str | None = None
+    connection_type: str | None = None
+    speed: str | None = None
+    lag_group: str | None = None
+    redundancy_path: str | None = None
+    media: str | None = None
+    module: str | None = None
+    cable_length_m: float | None = None
+    wiring_rule_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
@@ -198,12 +213,14 @@ class NetworkProjectCreate(BaseModel):
     code: str = Field(min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=100)
     description: str | None = None
+    model_root_folder_id: uuid.UUID | None = None
 
 
 class NetworkProjectUpdate(BaseModel):
     code: str | None = Field(default=None, min_length=1, max_length=50)
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = None
+    model_root_folder_id: uuid.UUID | None = None
 
 
 class NetworkProjectResponse(BaseModel):
@@ -212,6 +229,7 @@ class NetworkProjectResponse(BaseModel):
     name: str
     description: str | None
     topology_id: uuid.UUID | None = None
+    model_root_folder_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -349,7 +367,10 @@ class CanvasNodeInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     device_id: uuid.UUID | None = None
     device_model_id: uuid.UUID | None = None
+    design_model_id: uuid.UUID | None = None
     contract_device_name: str | None = Field(default=None, max_length=100)
+    network_role: str | None = Field(default=None, max_length=20)
+    device_group: str | None = Field(default=None, max_length=80)
     pos_x: float = 100.0
     pos_y: float = 100.0
     switch_port_count: int = Field(default=48, ge=1, le=128)
@@ -410,8 +431,45 @@ class CanvasLinkInput(BaseModel):
     cable_type: str | None = Field(default=None, max_length=30)
     interface_class: str | None = Field(default=None, max_length=30)
     link_role: str | None = Field(default=None, max_length=30)
+    connection_type: str | None = Field(default=None, max_length=30)
+    speed: str | None = Field(default=None, max_length=20)
+    lag_group: str | None = Field(default=None, max_length=80)
+    redundancy_path: str | None = Field(default=None, max_length=10)
+    media: str | None = Field(default=None, max_length=30)
+    module: str | None = Field(default=None, max_length=80)
+    cable_length_m: float | None = None
+    wiring_rule_id: uuid.UUID | None = None
 
 
 class CanvasSaveRequest(BaseModel):
     nodes: list[CanvasNodeInput]
     links: list[CanvasLinkInput]
+
+
+class NetworkLabSessionResponse(BaseModel):
+    id: uuid.UUID
+    topology_id: uuid.UUID
+    engine: str
+    external_lab_path: str | None = None
+    status: str
+    last_sync_at: datetime | None = None
+    error_message: str | None = None
+    node_map: dict[str, str] | None = None
+    node_status: dict[str, str] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class LabEngineInfoResponse(BaseModel):
+    engine: str
+    configured: bool
+    base_url: str | None = None
+    message: str | None = None
+
+
+class LabConsoleResponse(BaseModel):
+    node_id: uuid.UUID
+    console_url: str | None = None
+    message: str | None = None

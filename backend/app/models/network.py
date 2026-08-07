@@ -1,6 +1,7 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +15,13 @@ class NetworkProject(BaseModel):
     code: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 绑定的模型设计根目录（项目或文件夹）
+    model_root_folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("network_model_folder.id"),
+        nullable=True,
+        index=True,
+    )
 
     topologies: Mapped[list["NetworkTopology"]] = relationship(
         "NetworkTopology",
@@ -73,7 +81,17 @@ class NetworkNode(BaseModel):
         nullable=True,
         index=True,
     )
+    # 来自模型设计的模板实例
+    design_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("network_design_model.id"),
+        nullable=True,
+        index=True,
+    )
     contract_device_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 网络角色 CORE/AGG/ACCESS/SERVER/FIREWALL；可覆盖模型继承值
+    network_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    device_group: Mapped[str | None] = mapped_column(String(80), nullable=True)
     pos_x: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
     pos_y: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
     switch_port_count: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
@@ -114,5 +132,39 @@ class NetworkLink(BaseModel):
     cable_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     interface_class: Mapped[str | None] = mapped_column(String(30), nullable=True)
     link_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    connection_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    speed: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    lag_group: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    redundancy_path: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    media: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    module: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    cable_length_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wiring_rule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
     topology: Mapped["NetworkTopology"] = relationship("NetworkTopology", back_populates="links")
+
+
+class NetworkLabSession(BaseModel):
+    """拓扑与外部仿真实验室（Eve-NG / GNS3）的会话映射。"""
+
+    __tablename__ = "network_lab_session"
+
+    topology_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("network_topology.id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    # eve-ng | gns3 | none
+    engine: Mapped[str] = mapped_column(String(20), nullable=False, default="eve-ng")
+    external_lab_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="idle")
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # { network_node_id: external_node_id }
+    node_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # { network_node_id: running|stopped|error }
+    node_status: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    topology: Mapped["NetworkTopology"] = relationship("NetworkTopology")

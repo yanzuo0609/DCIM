@@ -44,13 +44,10 @@ export interface SwitchPanelView {
 }
 
 function portBox(type: PortType): { w: number; h: number } {
-  if (type === '40_100g') return { w: 20, h: 14 }
-  if (type === '10g') return { w: 13, h: 10 }
-  return { w: 11, h: 9 }
-}
-
-function clusterGap(col: number): number {
-  return col > 0 && col % 4 === 0 ? 5 : 2
+  // 1U 交换机简图：方口（与面板示意图一致）
+  if (type === '40_100g') return { w: 14, h: 14 }
+  if (type === '10g') return { w: 12, h: 12 }
+  return { w: 11, h: 11 }
 }
 
 function measureTwoRowBlockWidth(ports: FramePort[]): number {
@@ -58,14 +55,13 @@ function measureTwoRowBlockWidth(ports: FramePort[]): number {
   const type = ports[0].port_type || '1g'
   const { w } = portBox(type)
   const cols = Math.max(1, Math.ceil(ports.length / 2))
-  let xCursor = 0
-  for (let c = 0; c < cols; c += 1) {
-    xCursor += clusterGap(c)
-    xCursor += w
-  }
-  return xCursor + 2
+  return cols * w
 }
 
+/**
+ * 1U 交换机双排：列向编号（上奇下偶）
+ * 例：上 1 3 5 … / 下 2 4 6 …
+ */
 function placeTwoRowBlock(
   ports: FramePort[],
   originX: number,
@@ -75,37 +71,34 @@ function placeTwoRowBlock(
 ): { width: number; height: number } {
   if (!ports.length) return { width: 0, height: 0 }
   const type = ports[0].port_type || '1g'
-  const { w, h } = portBox(type)
+  const { w: size } = portBox(type)
   const cols = Math.max(1, Math.ceil(ports.length / 2))
-  const topCount = Math.min(cols, ports.length)
-  const labelH = 10
-  const rowGap = 6
-  const blockH = labelH + h + rowGap + h + labelH
+  const rows = ports.length <= 1 ? 1 : 2
+  const blockH = rows * size
+  const naturalW = cols * size
+  const spanW = Math.max(targetWidth ?? naturalW, size)
   const startY = originY + Math.max(0, (areaH - blockH) / 2)
 
-  const naturalW = measureTwoRowBlockWidth(ports)
-  const spanW = Math.max(targetWidth ?? naturalW, w)
   const colX: number[] = []
-
   if (cols === 1) {
-    // 单列：贴左端，右端由共享宽度保证区域对齐
     colX.push(originX)
+  } else if (spanW <= naturalW + 0.5) {
+    for (let c = 0; c < cols; c += 1) colX.push(originX + c * size)
   } else {
-    // 多列：首列贴左、末列贴右，中间均匀分布（两端对齐）
-    const travel = Math.max(0, spanW - w)
+    // 拉伸到目标宽时仍保持列均匀，口本身保持方形紧贴感
+    const travel = Math.max(0, spanW - size)
     for (let c = 0; c < cols; c += 1) {
       colX.push(originX + (travel * c) / (cols - 1))
     }
   }
 
   ports.forEach((port, i) => {
-    const row = i < topCount ? 0 : 1
-    const col = i < topCount ? i : i - topCount
-    const y = row === 0 ? startY + labelH : startY + labelH + h + rowGap
-    port.x = colX[col]
-    port.y = y
-    port.w = w
-    port.h = h
+    const col = Math.floor(i / 2)
+    const row = i % 2
+    port.x = colX[Math.min(col, colX.length - 1)]
+    port.y = startY + row * size
+    port.w = size
+    port.h = size
     port.label = String(i + 1)
   })
 
@@ -117,65 +110,29 @@ function placeUplinkBlock(
   originX: number,
   originY: number,
   areaH: number,
-  subtype: SwitchSubtype,
+  _subtype: SwitchSubtype,
 ): { width: number; height: number; label: string } {
   if (!ports.length) return { width: 0, height: 0, label: '' }
   const type = ports[0].port_type || '10g'
-  const { w, h } = portBox(type)
-  const gap = 4
+  const { w: size } = portBox(type)
   const count = ports.length
   const label =
     type === '40_100g' ? `${count} × 10G/40G QSFP+` : `${count} × 1G/10G SFP+`
-  const labelH = 12
 
-  // 万兆 40/100G：固定两排，列数随数量向后（向右）扩展
-  if (type === '40_100g' || subtype === 'ten_gigabit' || subtype === 'aggregation') {
-    const rows = 2
-    const cols = Math.max(1, Math.ceil(count / rows))
-    const width = cols * w + (cols - 1) * gap
-    const height = labelH + rows * h + (rows - 1) * gap
-    const startY = originY + Math.max(0, (areaH - height) / 2)
-    ports.forEach((port, i) => {
-      const col = Math.floor(i / rows)
-      const row = i % rows
-      port.x = originX + col * (w + gap)
-      port.y = startY + labelH + row * (h + gap)
-      port.w = w
-      port.h = h
-      port.label = `U${i + 1}`
-    })
-    return { width, height, label }
-  }
-
-  // 千兆上联>4：两排，每排 count/2
-  if (subtype === 'gigabit' && count > 4) {
-    const cols = count / 2
-    const rows = 2
-    const width = cols * w + (cols - 1) * gap
-    const height = labelH + rows * h + (rows - 1) * gap
-    const startY = originY + Math.max(0, (areaH - height) / 2)
-    ports.forEach((port, i) => {
-      const row = Math.floor(i / cols)
-      const col = i % cols
-      port.x = originX + col * (w + gap)
-      port.y = startY + labelH + row * (h + gap)
-      port.w = w
-      port.h = h
-      port.label = `U${i + 1}`
-    })
-    return { width, height, label }
-  }
-
-  // 千兆上联 ≤4：单排
-  const width = count * w + Math.max(0, count - 1) * gap
-  const height = labelH + h
+  // 上联也按双排列向奇偶（与主口同一套 1U 样式）；口数=1 时单口
+  const rows = count <= 1 ? 1 : 2
+  const cols = Math.max(1, Math.ceil(count / rows))
+  const width = cols * size
+  const height = rows * size
   const startY = originY + Math.max(0, (areaH - height) / 2)
   ports.forEach((port, i) => {
-    port.x = originX + i * (w + gap)
-    port.y = startY + labelH
-    port.w = w
-    port.h = h
-    port.label = `U${i + 1}`
+    const col = Math.floor(i / rows)
+    const row = i % rows
+    port.x = originX + col * size
+    port.y = startY + row * size
+    port.w = size
+    port.h = size
+    port.label = String(i + 1)
   })
   return { width, height, label }
 }
