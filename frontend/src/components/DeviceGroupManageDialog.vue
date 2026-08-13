@@ -13,7 +13,7 @@ import {
   type DeviceGroupSlot,
 } from '@/utils/deviceGroupSlots'
 import { FABRIC_ROLE_OPTIONS, type FabricRole } from '@/utils/wiringTypes'
-import { groupKindFromRole, groupKindLabel, nodeKindForGroupRole } from '@/utils/deviceGroupVisual'
+import { DEVICE_GROUP_KIND_LABELS, groupKindLabel, resolveDeviceGroupKind, nodeKindForGroupRole } from '@/utils/deviceGroupVisual'
 
 export type { DeviceGroupPortRef, DeviceGroupSlot }
 /** @deprecated 兼容旧 import 名 */
@@ -85,6 +85,13 @@ const tableRows = computed(() =>
     ruleCount: g.wiring_rule_ids?.length || 0,
   })),
 )
+
+function visualKind(role: FabricRole | null | undefined, slotList: DeviceGroupSlot[] = slots.value) {
+  return resolveDeviceGroupKind({
+    role,
+    slotRoles: slotList.map((s) => s.role),
+  })
+}
 
 function metaOf(name: string): DeviceGroupDef {
   return allGroups.value.find((g) => g.name === name) || {
@@ -300,8 +307,8 @@ const title = computed(() => {
         <el-table-column label="图标" width="100">
           <template #default="{ row }">
             <span class="kind-cell">
-              <TopologyGroupIcon :kind="groupKindFromRole(row.role)" :size="28" />
-              <span>{{ groupKindLabel(row.role) }}</span>
+              <TopologyGroupIcon :kind="visualKind(row.role, row.slots)" :size="28" />
+              <span>{{ DEVICE_GROUP_KIND_LABELS[visualKind(row.role, row.slots)] }}</span>
             </span>
           </template>
         </el-table-column>
@@ -342,8 +349,8 @@ const title = computed(() => {
             />
           </el-select>
           <div class="kind-preview">
-            <TopologyGroupIcon :kind="groupKindFromRole(form.role || slots[0]?.role)" :size="36" />
-            <span>{{ groupKindLabel(form.role || slots[0]?.role) }}</span>
+            <TopologyGroupIcon :kind="visualKind(form.role)" :size="36" />
+            <span>{{ DEVICE_GROUP_KIND_LABELS[visualKind(form.role)] }}</span>
           </div>
         </el-form-item>
 

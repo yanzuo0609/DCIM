@@ -6,10 +6,17 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology
+from app.models.network import (
+    NetworkLabSession,
+    NetworkLink,
+    NetworkNode,
+    NetworkProject,
+    NetworkTopology,
+)
 from app.repositories.device import DeviceRepository
 from app.repositories.infrastructure import RoomRepository
 from app.repositories.network import (
@@ -245,6 +252,7 @@ class NetworkDesignService:
             updated_by=user_id,
         )
         topo = await self.topology_repo.create(topology)
+        await self.session.commit()
         return self._to_project_response(created, topo.id)
 
     async def update_project(
@@ -295,7 +303,7 @@ class NetworkDesignService:
             topo.description = entity.description
             topo.updated_by = user_id
 
-        await self.session.flush()
+        await self.session.commit()
         await self.session.refresh(entity)
         if topo is not None:
             await self.session.refresh(topo)
@@ -326,7 +334,7 @@ class NetworkDesignService:
         now = datetime.now(timezone.utc)
         entity.deleted_at = now
         entity.deleted_by = user_id
-        await self.session.flush()
+        await self.session.commit()
         # 删除后确保默认项目仍存在
         await self.ensure_default_project(user_id=user_id)
 
@@ -366,6 +374,8 @@ class NetworkDesignService:
             updated_by=user_id,
         )
         created = await self.topology_repo.create(entity)
+        await self.session.commit()
+        await self.session.refresh(created)
         return NetworkTopologyResponse.model_validate(created)
 
     async def update_topology(
@@ -387,7 +397,8 @@ class NetworkDesignService:
                 raise NotFoundError("Network project not found")
             entity.project_id = payload.project_id
         entity.updated_by = user_id
-        await self.session.flush()
+        await self.session.commit()
+        await self.session.refresh(entity)
         return NetworkTopologyResponse.model_validate(entity)
 
     async def delete_topology(
@@ -405,7 +416,15 @@ class NetworkDesignService:
         for link in await self.link_repo.list_by_topology(topology_id):
             link.deleted_at = now
             link.deleted_by = user_id
-        await self.session.flush()
+        lab_stmt = select(NetworkLabSession).where(
+            NetworkLabSession.topology_id == topology_id,
+            NetworkLabSession.deleted_at.is_(None),
+        )
+        for lab in (await self.session.execute(lab_stmt)).scalars():
+            lab.deleted_at = now
+            lab.deleted_by = user_id
+        # 先提交，避免响应未消费完时审计中间件再开连接把 SQLite 锁死
+        await self.session.commit()
 
     async def get_detail(self, topology_id: uuid.UUID) -> NetworkTopologyDetailResponse:
         entity = await self.topology_repo.get_by_id(topology_id)
@@ -569,6 +588,7 @@ class NetworkDesignService:
                 link.module = link_input.module
                 link.cable_length_m = link_input.cable_length_m
                 link.wiring_rule_id = link_input.wiring_rule_id
+                link.line_style = link_input.line_style
                 link.deleted_at = None
                 link.deleted_by = None
                 link.updated_by = user_id
@@ -596,6 +616,7 @@ class NetworkDesignService:
                     module=link_input.module,
                     cable_length_m=link_input.cable_length_m,
                     wiring_rule_id=link_input.wiring_rule_id,
+                    line_style=link_input.line_style,
                     created_by=user_id,
                     updated_by=user_id,
                 )
@@ -608,7 +629,7 @@ class NetworkDesignService:
                 link.deleted_by = user_id
 
         entity.updated_by = user_id
-        await self.session.flush()
+        await self.session.commit()
         return await self.get_detail(topology_id)
 
     def _validate_canvas(self, payload: CanvasSaveRequest) -> None:

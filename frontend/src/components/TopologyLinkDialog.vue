@@ -34,6 +34,7 @@ import {
   type LinkEndTypeFilter,
   wiringHint,
 } from '@/utils/interfaceDesign'
+import { LINE_STYLE_OPTIONS } from '@/utils/topologyLinkStyle'
 
 export type LinkConfirmPayload = {
   link_type: NetworkLinkType
@@ -47,6 +48,7 @@ export type LinkConfirmPayload = {
   cable_type: CableType | null
   interface_class: InterfaceClass | null
   link_role: NetworkLinkRole | null
+  line_style?: string | null
 }
 
 const props = withDefaults(
@@ -95,6 +97,7 @@ const form = reactive({
   cable_type: 'copper_cat6' as CableType,
   interface_class: 'electric' as InterfaceClass,
   link_role: 'server' as NetworkLinkRole,
+  line_style: 'orthogonal' as string,
   autoLabel: true,
 })
 
@@ -432,6 +435,7 @@ function resetCreateForm() {
   form.label = ''
   form.cable_type = 'copper_cat6'
   form.interface_class = 'electric'
+  form.line_style = 'orthogonal'
   form.autoLabel = true
   clearEndpoints()
   applyPreferredRole()
@@ -455,6 +459,7 @@ function loadEditingLink(link: NetworkLink) {
   form.cable_type = (link.cable_type as CableType) || 'copper_cat6'
   form.interface_class = (link.interface_class as InterfaceClass) || 'electric'
   form.link_role = (link.link_role as NetworkLinkRole) || 'server'
+  form.line_style = link.line_style || 'orthogonal'
   form.autoLabel = !(link.source_label || link.target_label)
   sourceBindId.value = sourceNode.value?.device_id || null
   targetBindId.value = targetNode.value?.device_id || null
@@ -571,6 +576,7 @@ function onConfirm() {
     cable_type: form.cable_type,
     interface_class: form.interface_class,
     link_role: form.link_role || inferLinkRole(form.link_type, sourceNode.value, targetNode.value),
+    line_style: form.line_style || null,
   })
   if (editing) {
     dialogVisible.value = false
@@ -626,6 +632,11 @@ const assocRuleTitle = computed(() => {
       <el-form-item label="连线场景">
         <el-select v-model="form.link_role" style="width: 100%" :disabled="lockEndpoints">
           <el-option v-for="(label, key) in LINK_ROLE_LABELS" :key="key" :label="label" :value="key" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="连线样式">
+        <el-select v-model="form.line_style" style="width: 100%">
+          <el-option v-for="o in LINE_STYLE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </el-form-item>
 

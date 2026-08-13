@@ -3,7 +3,8 @@
  */
 
 import type { NetworkLink, NetworkNode } from '@/api/network'
-import { nodeGroupList } from '@/utils/deviceGroups'
+import { nodeParentGroups } from '@/utils/deviceGroups'
+import { resolveDeviceGroupKind, type DeviceGroupKind } from '@/utils/deviceGroupVisual'
 import type { FabricRole } from '@/utils/wiringTypes'
 
 export interface CanvasGroupGlyph {
@@ -14,6 +15,7 @@ export interface CanvasGroupGlyph {
   pos_y: number
   count: number
   role: FabricRole | null
+  kind: DeviceGroupKind
   memberIds: string[]
   /** 组内连线数 */
   intraLinkCount: number
@@ -28,52 +30,57 @@ export interface CanvasGroupEdge {
   label: string
 }
 
-/** 节点主组：多组时取第一个；无组返回 null */
+/** 节点主组：父组名；无组返回 null */
 export function primaryGroupName(node: NetworkNode): string | null {
-  const g = nodeGroupList(node)[0]
-  return g || null
+  return nodeParentGroups(node)[0] || null
+}
+
+/** 画布组图标使用的组名：父组，不含「组::子组」引用；同一设备只显示一个组 */
+export function canvasGroupNamesOf(node: NetworkNode): string[] {
+  return nodeParentGroups(node).slice(0, 1)
 }
 
 export function buildGroupGlyphs(
   nodes: NetworkNode[],
   links: NetworkLink[],
   roleByGroup?: Map<string, FabricRole | null>,
+  positions?: Record<string, { x: number; y: number }>,
 ): CanvasGroupGlyph[] {
   const onCanvas = nodes.filter((n) => n.on_canvas !== false)
   const byGroup = new Map<string, NetworkNode[]>()
   for (const n of onCanvas) {
-    const g = primaryGroupName(n)
-    if (!g) continue
-    const list = byGroup.get(g) || []
-    list.push(n)
-    byGroup.set(g, list)
-  }
-
-  const memberSetByGroup = new Map<string, Set<string>>()
-  for (const [g, list] of byGroup) {
-    memberSetByGroup.set(g, new Set(list.map((n) => n.id)))
+    for (const g of canvasGroupNamesOf(n)) {
+      const list = byGroup.get(g) || []
+      list.push(n)
+      byGroup.set(g, list)
+    }
   }
 
   const glyphs: CanvasGroupGlyph[] = []
   for (const [name, members] of byGroup) {
     const ids = members.map((m) => m.id)
-    const idSet = memberSetByGroup.get(name)!
+    const idSet = new Set(ids)
     let sx = 0
     let sy = 0
     for (const m of members) {
       sx += m.pos_x
       sy += m.pos_y
     }
+    const stored = positions?.[name]
     const intraLinkCount = links.filter(
       (l) => idSet.has(l.source_node_id) && idSet.has(l.target_node_id),
     ).length
     glyphs.push({
       id: name,
       name,
-      pos_x: Math.round(sx / members.length),
-      pos_y: Math.round(sy / members.length),
+      pos_x: stored ? stored.x : Math.round(sx / members.length),
+      pos_y: stored ? stored.y : Math.round(sy / members.length),
       count: members.length,
       role: roleByGroup?.get(name) ?? (members[0]?.network_role as FabricRole) ?? null,
+      kind: resolveDeviceGroupKind({
+        role: roleByGroup?.get(name) ?? (members[0]?.network_role as FabricRole) ?? null,
+        members,
+      }),
       memberIds: ids,
       intraLinkCount,
     })

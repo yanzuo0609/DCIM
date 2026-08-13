@@ -125,83 +125,233 @@ CORE_CARD_TYPE_OPTIONS = [
     TaxonomyOption(value="blank", label="空白板卡"),
 ]
 
+IFACE_BOARD_OPTIONS = [
+    TaxonomyOption(value="10ge", label="万兆以太网光接口板"),
+    TaxonomyOption(value="25ge", label="25GE 以太网光接口板"),
+    TaxonomyOption(value="40ge", label="40GE 光接口板"),
+    TaxonomyOption(value="100ge", label="100GE 光接口板"),
+    TaxonomyOption(value="400ge", label="400GE 光接口板"),
+]
+
+AIRFLOW_OPTIONS = [
+    TaxonomyOption(value="front_to_rear", label="标准前后风道"),
+    TaxonomyOption(value="custom", label="自定义"),
+]
+
+
+def _clamp_int(value: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(lo, min(hi, n))
+
+
+def _map_core_card_type(raw: str) -> str:
+    if raw in ("25g", "ten_gigabit"):
+        return "ten_gigabit"
+    if raw in ("40g", "100g", "400g"):
+        return "100g"
+    if raw in ("gigabit", "blank"):
+        return raw
+    return "ten_gigabit"
+
+
+def _normalize_blank_panel_rows(raw: Any, height: int, expansion: int) -> list[int]:
+    """空白面板行号（1-based），数量 = 整机 U − 扩展插槽。"""
+    want = max(0, height - expansion)
+    used: set[int] = set()
+    kept: list[int] = []
+    if isinstance(raw, list):
+        for item in raw:
+            try:
+                row = int(item)
+            except (TypeError, ValueError):
+                continue
+            if row < 1 or row > height or row in used:
+                continue
+            used.add(row)
+            kept.append(row)
+    kept.sort()
+    while len(kept) > want:
+        kept.pop()
+    row = height
+    while len(kept) < want and row >= 1:
+        if row not in used:
+            used.add(row)
+            kept.append(row)
+        row -= 1
+    kept.sort()
+    return kept
+
+
+_SYSTEM_PORT_NS = {
+    "eth_mgmt": "eth-mgmt",
+    "console": "console",
+    "usb": "usb",
+    "stack": "stack",
+}
+_SYSTEM_PORT_CODE = {
+    "eth_mgmt": "MGT",
+    "console": "CON",
+    "usb": "USB",
+    "stack": "STACK",
+}
+_SYSTEM_PORT_DEFAULTS = {
+    "eth_mgmt": {"iface_type": "copper", "speed": "1GE", "module": "RJ45", "connector": "RJ45", "fiber_mode": "na"},
+    "console": {"iface_type": "copper", "speed": "1GE", "module": "RJ45", "connector": "RJ45", "fiber_mode": "na"},
+    "usb": {"iface_type": "copper", "speed": "USB", "module": "USB", "connector": "USB", "fiber_mode": "na"},
+    "stack": {"iface_type": "optical", "speed": "10GE", "module": "SFP+", "connector": "LC", "fiber_mode": "mm"},
+}
+
+
+def _normalize_system_ports(attrs: dict[str, Any], core: bool) -> None:
+    """为管理口 / Console / USB / 堆叠口写入稳定唯一 ID 与编号。"""
+    if core:
+        counts = {
+            "console": _clamp_int(attrs.get("console_ports"), 1, 0, 8),
+            "eth_mgmt": _clamp_int(attrs.get("eth_mgmt_ports"), 1, 0, 8),
+            "usb": _clamp_int(attrs.get("usb_ports"), 1, 0, 8),
+            "stack": _clamp_int(attrs.get("stack_cluster_ports"), 2, 0, 16),
+        }
+    else:
+        counts = {
+            "console": 0,
+            "eth_mgmt": _clamp_int(attrs.get("mgmt_ports"), 1, 0, 8),
+            "usb": 0,
+            "stack": _clamp_int(attrs.get("stack_cluster_ports"), 0, 0, 16),
+        }
+    prev: dict[tuple[str, int], dict[str, Any]] = {}
+    raw = attrs.get("system_ports")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "")
+            if kind not in _SYSTEM_PORT_NS:
+                continue
+            try:
+                index = max(0, int(item.get("index") or 0))
+            except (TypeError, ValueError):
+                continue
+            prev[(kind, index)] = item
+    next_ports: list[dict[str, Any]] = []
+    for kind in ("console", "eth_mgmt", "usb", "stack"):
+        count = counts[kind]
+        defaults = _SYSTEM_PORT_DEFAULTS[kind]
+        for i in range(count):
+            old = prev.get((kind, i)) or {}
+            iface = str(old.get("iface_type") or defaults["iface_type"])
+            if iface not in ("optical", "copper"):
+                iface = defaults["iface_type"]
+            next_ports.append(
+                {
+                    "kind": kind,
+                    "index": i,
+                    "id": f"{_SYSTEM_PORT_NS[kind]}-p{i}",
+                    "code": f"{_SYSTEM_PORT_CODE[kind]}{i + 1}",
+                    "iface_type": iface,
+                    "speed": str(old.get("speed") or defaults["speed"]),
+                    "module": str(old.get("module") or defaults["module"]),
+                    "connector": str(old.get("connector") or defaults["connector"]),
+                    "fiber_mode": str(old.get("fiber_mode") or defaults["fiber_mode"]),
+                }
+            )
+    attrs["system_ports"] = next_ports
+
 
 def _normalize_switch_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
-    """交换机角色驱动上下联类型/数量，核心机按板卡口数布局。"""
+    """交换机角色驱动上下联类型/数量；核心/汇聚按模块化扩展槽与接口板布局。"""
     role = str(attrs.get("switch_role") or "").strip()
     if role not in ("gigabit", "ten_gigabit", "core", "aggregation"):
         dt = str(attrs.get("downlink_type") or "1g")
         role = "ten_gigabit" if dt in ("10g", "25g", "40_100g") else "gigabit"
     attrs["switch_role"] = role
+    core = role in ("core", "aggregation")
 
-    if role in ("gigabit", "ten_gigabit", "aggregation"):
+    if role in ("gigabit", "ten_gigabit"):
         if role == "gigabit":
             attrs["downlink_type"] = "1g"
             attrs["uplink_type"] = "10g"
-        else:
-            attrs["downlink_type"] = "10g"
-            attrs["uplink_type"] = "40_100g"
-        try:
-            cards = max(1, min(16, int(attrs.get("optical_card_count") or 1)))
-        except (TypeError, ValueError):
-            cards = 1
-        try:
-            ppc = int(attrs.get("optical_ports_per_card") or 0)
-        except (TypeError, ValueError):
-            ppc = 0
-        if ppc <= 0:
-            # 兼容旧数据：仅有总口数时，视为 1 板 × N 口
-            try:
-                total = max(1, min(256, int(attrs.get("downlink_count") or 48)))
-            except (TypeError, ValueError):
-                total = 48
-            ppc = max(1, min(128, total // max(1, cards)))
-        else:
-            ppc = max(1, min(128, ppc))
-        attrs["optical_card_count"] = cards
-        attrs["optical_ports_per_card"] = ppc
-        attrs["downlink_count"] = max(1, min(256, cards * ppc))
-        try:
-            up = int(attrs.get("uplink_count") or 0)
-        except (TypeError, ValueError):
-            up = 4
-        if role == "gigabit":
+            media = str(attrs.get("downlink_media") or "copper").lower()
+            attrs["downlink_media"] = "optical" if media in ("optical", "fiber") else "copper"
+            attrs["uplink_position"] = "right"
+            down = _clamp_int(attrs.get("downlink_count"), 48, 1, 128)
+            attrs["downlink_count"] = down
+            attrs["optical_card_count"] = 1
+            attrs["optical_ports_per_card"] = down
+            up = _clamp_int(attrs.get("uplink_count"), 8, 0, 8)
             if up > 4 and up % 2 != 0:
                 up -= 1
-        elif up % 2 != 0:
-            up -= 1
-        attrs["uplink_count"] = max(0, min(8, up))
-        pos = str(attrs.get("uplink_position") or "right")
-        attrs["uplink_position"] = pos if pos in ("middle", "right") else "right"
+            attrs["uplink_count"] = up
+        else:
+            attrs["downlink_type"] = "10g"
+            ut = str(attrs.get("uplink_type") or "40g").lower()
+            attrs["uplink_type"] = "100g" if ut in ("100g", "100ge") else "40g"
+            down = _clamp_int(attrs.get("downlink_count"), 48, 1, 128)
+            attrs["downlink_count"] = down
+            attrs["optical_card_count"] = 1
+            attrs["optical_ports_per_card"] = down
+            up = _clamp_int(attrs.get("uplink_count"), 6, 0, 8)
+            if up > 0 and up % 2 != 0:
+                up -= 1
+            attrs["uplink_count"] = up
+            pos = str(attrs.get("uplink_position") or "right")
+            attrs["uplink_position"] = pos if pos in ("middle", "right") else "right"
     else:
-        # core：板卡数由机箱高度(U)决定，上下联字段不参与布局
-        attrs["downlink_count"] = 0
-        attrs["uplink_count"] = 0
-        try:
-            height = int(attrs.get("chassis_height_u") or 1)
-        except (TypeError, ValueError):
-            height = 1
-        height = max(1, min(16, height))
-        attrs["chassis_height_u"] = height
+        # 核心/汇聚：板卡数由模块化扩展插槽决定，不再用整机高度补齐 line_cards
+        expansion = _clamp_int(attrs.get("modular_expansion_slots"), 6, 1, 48)
+        height = _clamp_int(attrs.get("chassis_height_u"), 10, 1, 48)
+        if expansion > height:
+            expansion = height
+        filled = _clamp_int(attrs.get("service_board_count"), 4, 0, expansion)
+        attrs["modular_expansion_slots"] = expansion
+        attrs["service_board_count"] = filled
+        attrs["blank_panel_rows"] = _normalize_blank_panel_rows(
+            attrs.get("blank_panel_rows"), height, expansion
+        )
+        attrs["uplink_count"] = _clamp_int(attrs.get("uplink_count"), 0, 0, 256)
+        attrs["downlink_count"] = _clamp_int(attrs.get("downlink_count"), 0, 0, 1024)
         raw_cards = attrs.get("line_cards")
         cards: list[dict[str, Any]] = []
         if isinstance(raw_cards, list):
-            for i, item in enumerate(raw_cards):
+            for i, item in enumerate(raw_cards[:48]):
                 if not isinstance(item, dict):
                     continue
-                ct = str(item.get("card_type") or "ten_gigabit")
-                if ct not in ("gigabit", "ten_gigabit", "100g", "blank"):
-                    ct = "ten_gigabit"
+                ct = _map_core_card_type(str(item.get("card_type") or "ten_gigabit"))
                 try:
                     pc = 0 if ct == "blank" else max(1, min(128, int(item.get("port_count") or 48)))
                 except (TypeError, ValueError):
                     pc = 0 if ct == "blank" else 48
                 cid = str(item.get("id") or f"card{i + 1}")
                 cards.append({"id": cid, "card_type": ct, "port_count": pc})
-        while len(cards) < height:
-            idx = len(cards) + 1
-            cards.append({"id": f"card{idx}", "card_type": "ten_gigabit", "port_count": 48})
-        attrs["line_cards"] = cards[:height]
+        if cards:
+            attrs["line_cards"] = cards
+
+    attrs["chassis_height_u"] = _clamp_int(attrs.get("chassis_height_u"), 10 if core else 1, 1, 48)
+    attrs["fabric_slot_count"] = _clamp_int(attrs.get("fabric_slot_count"), 2 if core else 0, 0, 16)
+    attrs["max_power_watt"] = _clamp_int(attrs.get("max_power_watt"), 3000 if core else 150, 0, 100000)
+    attrs["chassis_dim_a"] = _clamp_int(attrs.get("chassis_dim_a"), 442, 1, 10000)
+    attrs["chassis_dim_b"] = _clamp_int(attrs.get("chassis_dim_b"), 660 if core else 420, 1, 10000)
+    attrs["chassis_dim_c"] = _clamp_int(attrs.get("chassis_dim_c"), 175 if core else 44, 1, 10000)
+    airflow = str(attrs.get("airflow_type") or "front_to_rear")
+    attrs["airflow_type"] = airflow if airflow in ("front_to_rear", "custom") else "front_to_rear"
+    if attrs.get("airflow_custom") is None:
+        attrs["airflow_custom"] = ""
+    board = str(attrs.get("iface_board_type") or "10ge")
+    attrs["iface_board_type"] = board if board in ("10ge", "25ge", "40ge", "100ge", "400ge") else "10ge"
+    attrs["iface_board_port_count"] = _clamp_int(attrs.get("iface_board_port_count"), 48, 1, 128)
+    attrs["console_ports"] = _clamp_int(attrs.get("console_ports"), 1, 0, 8)
+    eth_src = attrs.get("eth_mgmt_ports")
+    if eth_src is None:
+        eth_src = attrs.get("mgmt_ports")
+    attrs["eth_mgmt_ports"] = _clamp_int(eth_src, 1, 0, 8)
+    attrs["usb_ports"] = _clamp_int(attrs.get("usb_ports"), 1, 0, 8)
+    attrs["stack_cluster_ports"] = _clamp_int(attrs.get("stack_cluster_ports"), 2 if core else 0, 0, 16)
+    mgmt_src = attrs.get("mgmt_ports")
+    if mgmt_src is None:
+        mgmt_src = attrs.get("eth_mgmt_ports")
+    attrs["mgmt_ports"] = _clamp_int(mgmt_src, 1, 0, 8)
 
     try:
         attrs["fan_count"] = max(0, min(16, int(attrs.get("fan_count") or 0)))
@@ -221,6 +371,7 @@ def _normalize_switch_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
             "front": {"cols": 38, "rows": 16, "items": []},
             "rear": {"cols": 38, "rows": 16, "items": []},
         }
+    _normalize_system_ports(attrs, core)
     return attrs
 
 
@@ -437,8 +588,8 @@ def _network_defaults(subtype: str) -> dict[str, Any]:
                         "index": 2,
                         "purpose": "UPLINK",
                         "card_type": "ten_gigabit",
-                        "port_count": 6,
-                        "port_start": 49,
+                        "port_count": 8,
+                        "port_start": 0,
                     },
                 ],
                 "downlink_type": "1g",
@@ -446,9 +597,28 @@ def _network_defaults(subtype: str) -> dict[str, Any]:
                 "optical_card_count": 1,
                 "optical_ports_per_card": 48,
                 "uplink_type": "10g",
-                "uplink_count": 6,
+                "uplink_count": 8,
                 "uplink_position": "right",
+                "downlink_media": "copper",
                 "mgmt_ports": 1,
+                "console_ports": 1,
+                "eth_mgmt_ports": 1,
+                "usb_ports": 1,
+                "stack_cluster_ports": 0,
+                "fabric_slot_count": 0,
+                "airflow_type": "front_to_rear",
+                "airflow_custom": "",
+                "chassis_dim_a": 442,
+                "chassis_dim_b": 420,
+                "chassis_dim_c": 44,
+                "max_power_watt": 150,
+                "modular_expansion_slots": 2,
+                "service_board_count": 0,
+                "iface_board_type": "10ge",
+                "iface_board_port_count": 48,
+                "iface_board_port_custom": False,
+                "panel_style_image": None,
+                "panel_style_mode": "generated",
                 "line_cards": [
                     {"id": "slot1", "card_type": "gigabit", "port_count": 48},
                     {"id": "slot2", "card_type": "ten_gigabit", "port_count": 6},
@@ -670,8 +840,32 @@ def attribute_schema(category: str) -> CategoryAttributeSchema:
             AttributeFieldDef(
                 key="uplink_position", label="上联位置", type="select", options=UPLINK_POS_OPTIONS
             ),
-            AttributeFieldDef(key="fan_count", label="风扇个数", type="int", min=0, max=16),
-            AttributeFieldDef(key="psu_count", label="电源数量", type="int", min=0, max=8),
+            AttributeFieldDef(key="fabric_slot_count", label="交换网板槽位", type="int", min=0, max=16),
+            AttributeFieldDef(
+                key="airflow_type",
+                label="风道类型",
+                type="select",
+                options=AIRFLOW_OPTIONS,
+            ),
+            AttributeFieldDef(key="chassis_dim_a", label="尺寸宽(mm)", type="int", min=1),
+            AttributeFieldDef(key="chassis_dim_b", label="尺寸深(mm)", type="int", min=1),
+            AttributeFieldDef(key="chassis_dim_c", label="尺寸高(mm)", type="int", min=1),
+            AttributeFieldDef(key="chassis_height_u", label="整机高度(U)", type="int", min=1, max=48),
+            AttributeFieldDef(key="max_power_watt", label="最大供电能力(W)", type="int", min=0),
+            AttributeFieldDef(key="console_ports", label="Console口", type="int", min=0, max=8),
+            AttributeFieldDef(key="eth_mgmt_ports", label="ETH管理口", type="int", min=0, max=8),
+            AttributeFieldDef(key="usb_ports", label="USB接口", type="int", min=0, max=8),
+            AttributeFieldDef(key="stack_cluster_ports", label="堆叠/集群接口", type="int", min=0, max=16),
+            AttributeFieldDef(key="modular_expansion_slots", label="模块化扩展插槽", type="int", min=1, max=48),
+            AttributeFieldDef(key="service_board_count", label="业务接口板数", type="int", min=0, max=16),
+            AttributeFieldDef(key="blank_panel_rows", label="空白面板位置", type="list"),
+            AttributeFieldDef(
+                key="iface_board_type",
+                label="接口板",
+                type="select",
+                options=IFACE_BOARD_OPTIONS,
+            ),
+            AttributeFieldDef(key="iface_board_port_count", label="接口板接口数", type="int", min=1, max=128),
             AttributeFieldDef(key="wan_type", label="WAN 类型(路由)", type="select", options=PORT_SPEED_OPTIONS),
             AttributeFieldDef(key="wan_count", label="WAN 数量", type="int", min=0),
             AttributeFieldDef(key="lan_type", label="LAN 类型(路由)", type="select", options=PORT_SPEED_OPTIONS),

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import {
   NODE_KIND_LABELS,
   PORT_TYPE_LABELS,
@@ -13,7 +14,11 @@ import {
 } from '@/api/network'
 import { FABRIC_ROLE_OPTIONS, type FabricRole } from '@/utils/wiringTypes'
 import { resolveNodeFabricRole } from '@/utils/fabricRole'
-import { nodeGroupList } from '@/utils/deviceGroups'
+import {
+  MULTI_PARENT_GROUP_HINT,
+  nodeParentGroups,
+  uniqueParentGroupNames,
+} from '@/utils/deviceGroups'
 
 const props = defineProps<{
   node: NetworkNode
@@ -51,7 +56,7 @@ watch(
   () => props.node.id,
   () => {
     roleDraft.value = (props.node.network_role as FabricRole) || resolveNodeFabricRole(props.node)
-    groupDraft.value = [...nodeGroupList(props.node)]
+    groupDraft.value = [...nodeParentGroups(props.node)]
   },
   { immediate: true },
 )
@@ -133,11 +138,21 @@ function commitRole() {
 }
 
 function commitGroup() {
-  const list = (Array.isArray(groupDraft.value) ? groupDraft.value : [])
+  const list = (Array.isArray(groupDraft.value) ? groupDraft.value : [groupDraft.value])
     .map((g) => String(g || '').trim())
     .filter(Boolean)
-  groupDraft.value = list
-  emit('updateMeta', { device_groups: list })
+  const parents = uniqueParentGroupNames(list)
+  if (parents.length > 1) {
+    ElMessage.warning(MULTI_PARENT_GROUP_HINT)
+    const keep = nodeParentGroups(props.node)
+    const revert = keep.length ? keep : parents.slice(0, 1)
+    void nextTick(() => {
+      groupDraft.value = [...revert]
+    })
+    return
+  }
+  groupDraft.value = parents
+  emit('updateMeta', { device_groups: parents })
 }
 
 function peerTitle(row: (typeof portRows.value)[0]) {
@@ -196,7 +211,7 @@ function peerTitle(row: (typeof portRows.value)[0]) {
           collapse-tags
           collapse-tags-tooltip
           popper-class="inspector-select-dropdown"
-          placeholder="可多选"
+          placeholder="仅可加入一个组"
           style="width: 160px"
           @change="commitGroup"
         >
@@ -204,7 +219,7 @@ function peerTitle(row: (typeof portRows.value)[0]) {
         </el-select>
         <el-button type="primary" link size="small" @click="emit('manageGroups')">管理</el-button>
       </div>
-      <span v-else>{{ nodeGroupList(node).join('、') || '-' }}</span>
+      <span v-else>{{ nodeParentGroups(node).join('、') || '-' }}</span>
     </div>
     <p>
       <span class="label">状态</span>

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import TopologyGroupIcon from '@/components/TopologyGroupIcon.vue'
 import type { NetworkLink, NetworkNode } from '@/api/network'
 import type { DeviceGroupMeta } from '@/components/DeviceGroupManageDialog.vue'
 import { FABRIC_ROLE_OPTIONS } from '@/utils/wiringTypes'
 import { listGroupMembers } from '@/utils/deviceGroups'
 import { migrateSlotsFromLegacy, summarizeSlots, totalSlotCount } from '@/utils/deviceGroupSlots'
+import { DEVICE_GROUP_KIND_LABELS, resolveDeviceGroupKind } from '@/utils/deviceGroupVisual'
 
 const props = defineProps<{
   modelValue: boolean
@@ -79,6 +81,14 @@ const roleLabel = computed(() => {
   return FABRIC_ROLE_OPTIONS.find((o) => o.value === role)?.label || role
 })
 
+const visualKind = computed(() =>
+  resolveDeviceGroupKind({
+    role: meta.value?.role,
+    slotRoles: slots.value.map((s) => s.role),
+    members: members.value,
+  }),
+)
+
 const portPoolRows = computed(() => {
   const pool = meta.value?.port_pool
   if (!pool?.length) return []
@@ -114,6 +124,13 @@ const wiringPatternHint = computed(() => {
     append-to-body
   >
     <template v-if="meta">
+      <div class="detail-head">
+        <TopologyGroupIcon :kind="visualKind" :size="48" :count="members.length || null" />
+        <div>
+          <div class="detail-kind">{{ DEVICE_GROUP_KIND_LABELS[visualKind] }}</div>
+          <div class="detail-role">{{ roleLabel }}</div>
+        </div>
+      </div>
       <el-descriptions :column="2" size="small" border class="meta-block">
         <el-descriptions-item label="组图标角色">{{ roleLabel }}</el-descriptions-item>
         <el-descriptions-item label="规格合计">{{ planned || '—' }}</el-descriptions-item>
@@ -195,6 +212,22 @@ const wiringPatternHint = computed(() => {
 <style scoped>
 .meta-block {
   margin-bottom: 8px;
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.detail-kind {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+.detail-role {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 2px;
 }
 .section-title {
   margin: 16px 0 8px;

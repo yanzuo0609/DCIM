@@ -53,6 +53,8 @@ export interface SlotInterfaceGroup {
   layout_order?: number | null
   role?: InterfaceGroupRole | null
   grid_cols?: number | null
+  /** 稳定端口 ID 前缀，生成 `{id_ns}-p{index}` */
+  id_ns?: string | null
   /** @deprecated 布局由引擎自动计算，仅保留兼容 */
   layout_x?: number | null
   layout_y?: number | null
@@ -123,6 +125,8 @@ export interface FramePort {
   port_type: PortType
   slot_index: number | null
   group_id: string | null
+  /** 设备内唯一接口编号（布线用） */
+  code?: string | null
   peer_node_id: string | null
   peer_port: string | null
   peer_label: string | null
@@ -232,6 +236,8 @@ export interface NetworkLink {
   module?: string | null
   cable_length_m?: number | null
   wiring_rule_id?: string | null
+  /** 画布连线样式：直角 / 直线 / 曲线 / 虚线 */
+  line_style?: string | null
 }
 
 export interface NetworkTopology {
@@ -299,6 +305,7 @@ export interface CanvasLinkInput {
   module?: string | null
   cable_length_m?: number | null
   wiring_rule_id?: string | null
+  line_style?: string | null
 }
 
 export function defaultSlots(): SlotConfig[] {
@@ -633,8 +640,8 @@ export const SWITCH_SUBTYPE_DEFAULTS: Record<
   SwitchSubtype,
   { mainPortCount: number; uplinkPortCount: number; mainType: PortType; uplinkType: PortType }
 > = {
-  gigabit: { mainPortCount: 48, uplinkPortCount: 4, mainType: '1g', uplinkType: '10g' },
-  ten_gigabit: { mainPortCount: 48, uplinkPortCount: 4, mainType: '10g', uplinkType: '40_100g' },
+  gigabit: { mainPortCount: 48, uplinkPortCount: 8, mainType: '1g', uplinkType: '10g' },
+  ten_gigabit: { mainPortCount: 48, uplinkPortCount: 6, mainType: '10g', uplinkType: '40_100g' },
   aggregation: { mainPortCount: 48, uplinkPortCount: 8, mainType: '10g', uplinkType: '40_100g' },
   core: { mainPortCount: 48, uplinkPortCount: 0, mainType: '10g', uplinkType: '40_100g' },
 }

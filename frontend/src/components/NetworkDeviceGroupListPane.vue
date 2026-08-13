@@ -6,7 +6,7 @@ import type { DeviceGroupMeta } from '@/components/DeviceGroupManageDialog.vue'
 import { FABRIC_ROLE_OPTIONS } from '@/utils/wiringTypes'
 import { nodeInGroup } from '@/utils/deviceGroups'
 import { migrateSlotsFromLegacy, summarizeSlots, totalSlotCount } from '@/utils/deviceGroupSlots'
-import { groupKindFromRole, groupKindLabel } from '@/utils/deviceGroupVisual'
+import { DEVICE_GROUP_KIND_LABELS, resolveDeviceGroupKind } from '@/utils/deviceGroupVisual'
 import { setDeviceGroupDragData } from '@/utils/topologyDnd'
 
 const props = defineProps<{
@@ -33,10 +33,15 @@ const rows = computed(() =>
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
     .map((g) => {
       const slots = migrateSlotsFromLegacy(g)
-      const onTopo = props.nodes.filter((n) => nodeInGroup(n, g.name)).length
+      const members = props.nodes.filter((n) => nodeInGroup(n, g.name))
+      const onTopo = members.length
       const planned = totalSlotCount(slots)
-      const kind = groupKindFromRole(g.role || slots[0]?.role)
-      const kindLabel = groupKindLabel(g.role || slots[0]?.role)
+      const kind = resolveDeviceGroupKind({
+        role: g.role,
+        slotRoles: slots.map((s) => s.role),
+        members,
+      })
+      const kindLabel = DEVICE_GROUP_KIND_LABELS[kind]
       const roleLabel =
         FABRIC_ROLE_OPTIONS.find((o) => o.value === (g.role || slots[0]?.role))?.label ||
         g.role ||
@@ -88,8 +93,9 @@ function onDragStart(event: DragEvent, name: string) {
         class="group-card"
         :class="{ active: selectedGroup === row.name, disabled }"
         :draggable="!disabled"
-        :title="disabled ? row.summary : `拖到画布放置「${row.name}」`"
+        :title="disabled ? row.summary : `拖到画布放置「${row.name}」；右键查看组内详情`"
         @click="emit('select', row.name)"
+        @contextmenu.prevent="emit('detail', row.name)"
         @dragstart="onDragStart($event, row.name)"
       >
         <TopologyGroupIcon :kind="row.kind" :size="40" :selected="selectedGroup === row.name" />

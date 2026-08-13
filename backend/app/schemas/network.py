@@ -195,6 +195,7 @@ class NetworkLinkResponse(BaseModel):
     module: str | None = None
     cable_length_m: float | None = None
     wiring_rule_id: uuid.UUID | None = None
+    line_style: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -464,6 +465,7 @@ class CanvasLinkInput(BaseModel):
     module: str | None = Field(default=None, max_length=80)
     cable_length_m: float | None = None
     wiring_rule_id: uuid.UUID | None = None
+    line_style: str | None = Field(default=None, max_length=40)
 
 
 class CanvasSaveRequest(BaseModel):

@@ -715,6 +715,10 @@ async def _ensure_sqlite_network_link_columns(connection) -> None:
         await connection.exec_driver_sql(
             "ALTER TABLE network_link ADD COLUMN wiring_rule_id CHAR(36)"
         )
+    if "line_style" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_link ADD COLUMN line_style VARCHAR(40)"
+        )
 
 
 async def _ensure_sqlite_network_wiring_rule_project(connection) -> None:

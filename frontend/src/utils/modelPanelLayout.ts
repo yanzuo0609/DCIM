@@ -88,7 +88,10 @@ const SLOT_LABEL: Record<string, string> = {
 const CARD_TYPE_SHORT: Record<string, string> = {
   gigabit: '1G',
   ten_gigabit: '10G',
+  '25g': '25G',
+  '40g': '40G',
   '100g': '100G',
+  '400g': '400G',
   blank: '空白',
 }
 
@@ -924,7 +927,12 @@ function syncSideItems(
     if (!p && it.id === 'port-uplink') {
       p = sidePal.find((x) => x.kind === 'port_uplink' && !used.has(x.id))
     }
-    if (!p || used.has(p.id)) continue
+    if (!p || used.has(p.id)) {
+      if (!p && it.kind === 'line_card' && !it.blank) {
+        out.push({ ...it, side })
+      }
+      continue
+    }
     used.add(p.id)
     out.push({
       ...it,

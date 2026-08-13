@@ -32,8 +32,13 @@ import {
   effectivePortCount,
   portTypeForSlot,
   readSwitchSlots,
+  readSwitchSystemPorts,
+  resolveSlotPort,
+  slotsToLineCards,
   syncSwitchDerivedCounts,
+  SWITCH_SYSTEM_PORT_NS,
   type SwitchSlotAttr,
+  type SwitchSystemPortAttr,
 } from '@/utils/switchModelAttrs'
 import {
   normalizeServerFormFactor,
@@ -173,7 +178,10 @@ export function normalizeDesignLineCards(raw: unknown): CoreLineCard[] {
     for (const item of raw) {
       if (!item || typeof item !== 'object') continue
       const src = item as Record<string, unknown>
-      let cardType = String(src.card_type || 'ten_gigabit') as CoreCardType
+      let cardTypeRaw = String(src.card_type || 'ten_gigabit')
+      if (cardTypeRaw === '25g') cardTypeRaw = 'ten_gigabit'
+      else if (cardTypeRaw === '40g' || cardTypeRaw === '400g') cardTypeRaw = '100g'
+      let cardType = cardTypeRaw as CoreCardType
       if (!['gigabit', 'ten_gigabit', '100g', 'blank'].includes(cardType)) {
         cardType = 'ten_gigabit'
       }
@@ -268,13 +276,8 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
       layout.switch_subtype = role
       layout.uplink_position = attrs.uplink_position === 'middle' ? 'middle' : 'right'
       layout.line_cards =
-        role === 'core' || role === 'aggregation'
-          ? switchSlots.map((s) => ({
-              id: `slot${s.index}`,
-              card_type: (s.card_type === 'blank' ? 'blank' : s.card_type) as CoreCardType,
-              port_count: effectivePortCount(s),
-            }))
-          : null
+        role === 'core' || role === 'aggregation' ? slotsToLineCards(switchSlots) : null
+      const isCoreAgg = role === 'core' || role === 'aggregation'
       const defs: LayoutSlotDef[] = []
       for (const s of switchSlots) {
         const count = effectivePortCount(s)
@@ -288,32 +291,79 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
           continue
         }
         const pt = portTypeForSlot(s)
-        // UPLINK / DOWNLINK_UPLINK / 40·100G 板卡 → 上联池；其余为板卡光口
         const groupRole =
           s.purpose === 'UPLINK' ||
           s.purpose === 'DOWNLINK_UPLINK' ||
-          s.card_type === '100g'
+          s.card_type === '100g' ||
+          s.card_type === '40g'
             ? 'uplink'
-            : 'card'
+            : isCoreAgg
+              ? 'card'
+              : 'main'
+        const group = newInterfaceGroup(pt, count, {
+          role: groupRole,
+          grid_cols: pt === '40_100g' ? Math.min(2, count) : Math.min(24, count),
+        })
+        group.id = `slot${s.index}`
+        group.id_ns = `slot${s.index}`
         defs.push({
-          groups: [
-            newInterfaceGroup(pt, count, {
-              role: groupRole,
-              grid_cols: pt === '40_100g' ? Math.min(2, count) : Math.min(24, count),
-            }),
-          ],
+          groups: [group],
           layout_x: defs.length === 0 ? 0 : null,
           layout_y: 0,
           zone_label: `Slot${s.index} ${s.purpose}`,
         })
       }
-      const mgmt = Math.max(0, asInt(attrs.mgmt_ports, 1))
-      if (mgmt > 0) {
+      const ethMgmt = Math.max(
+        0,
+        asInt(isCoreAgg ? (attrs.eth_mgmt_ports ?? attrs.mgmt_ports) : attrs.mgmt_ports, 1),
+      )
+      if (ethMgmt > 0) {
+        const g = newInterfaceGroup('1g', ethMgmt, { role: 'mgmt', grid_cols: ethMgmt })
+        g.id = 'eth-mgmt'
+        g.id_ns = 'eth-mgmt'
         defs.push({
-          groups: [newInterfaceGroup('1g', mgmt, { role: 'mgmt', grid_cols: mgmt })],
+          groups: [g],
           layout_x: null,
           layout_y: 0,
-          zone_label: 'MGMT',
+          zone_label: isCoreAgg ? 'ETH管理口' : 'MGMT',
+        })
+      }
+      if (isCoreAgg) {
+        const consolePorts = Math.max(0, asInt(attrs.console_ports, 0))
+        if (consolePorts > 0) {
+          const g = newInterfaceGroup('other', consolePorts, { role: 'mgmt', grid_cols: consolePorts })
+          g.id = 'console'
+          g.id_ns = 'console'
+          defs.push({
+            groups: [g],
+            layout_x: null,
+            layout_y: 0,
+            zone_label: 'Console口',
+          })
+        }
+        const usbPorts = Math.max(0, asInt(attrs.usb_ports, 0))
+        if (usbPorts > 0) {
+          const g = newInterfaceGroup('other', usbPorts, { role: 'mgmt', grid_cols: Math.min(4, usbPorts) })
+          g.id = 'usb'
+          g.id_ns = 'usb'
+          defs.push({
+            groups: [g],
+            layout_x: null,
+            layout_y: 0,
+            zone_label: 'USB接口',
+          })
+        }
+      }
+      const stackPorts = Math.max(0, asInt(attrs.stack_cluster_ports, 0))
+      if (stackPorts > 0) {
+        const g = newInterfaceGroup('10g', stackPorts, { role: 'uplink', grid_cols: Math.min(4, stackPorts) })
+        g.id = 'stack'
+        g.id_ns = 'stack'
+        defs.push({
+          groups: [g],
+          layout_x: null,
+          layout_y: 0,
+          zone_label: '堆叠/集群接口',
         })
       }
       layout.slots_def = defs
@@ -336,6 +386,7 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
       }
       syncPortsFromSlotsDef(layout, false)
       applySwitchSlotPortLabels(layout, switchSlots)
+      applySwitchSystemPortIdentities(layout, readSwitchSystemPorts(attrs))
       layout.layout_locked = true
       return layout
     }
@@ -766,20 +817,33 @@ export function syncTopologyNodesFromDesignModels(
 }
 
 /** 按 switch_slots.port_start 写入端口标签（slotx 连续编号） */
+function moduleToMediaKind(module: string): FramePort['media_kind'] {
+  const m = String(module || '')
+  if (m === 'RJ45' || m === 'SFP' || m === 'SFP+' || m === 'SFP28' || m === 'QSFP+' || m === 'QSFP28') return m
+  if (m === 'USB') return 'OTHER'
+  return 'FIBER'
+}
+
 function applySwitchSlotPortLabels(layout: PortLayout, switchSlots: SwitchSlotAttr[]) {
   if (!layout.ports?.length) return
-  const bySlot = new Map<number, typeof layout.ports>()
-  for (const p of layout.ports) {
-    if (p.slot_index == null || p.slot_index <= 0) continue
-    const list = bySlot.get(p.slot_index) || []
-    list.push(p)
-    bySlot.set(p.slot_index, list)
-  }
   for (const s of switchSlots) {
-    const ports = (bySlot.get(s.index) || []).slice().sort((a, b) => a.id.localeCompare(b.id))
+    const prefix = `slot${s.index}-p`
+    const ports = layout.ports
+      .filter((p) => p.id.startsWith(prefix))
+      .slice()
+      .sort((a, b) => {
+        const na = Number(/-p(\d+)$/.exec(a.id)?.[1] ?? 0)
+        const nb = Number(/-p(\d+)$/.exec(b.id)?.[1] ?? 0)
+        return na - nb
+      })
     ports.forEach((p, i) => {
-      const num = s.port_start + i
-      p.label = String(num)
+      const spec = resolveSlotPort(s, i)
+      p.id = spec.id
+      p.code = spec.code
+      p.label = spec.code
+      p.slot_index = s.index
+      p.media = spec.iface_type === 'copper' ? 'COPPER' : 'FIBER'
+      p.media_kind = moduleToMediaKind(spec.module)
       if (s.purpose === 'BLANK') p.purpose = 'OTHER'
       else if (
         s.purpose === 'UPLINK' ||
@@ -791,6 +855,36 @@ function applySwitchSlotPortLabels(layout: PortLayout, switchSlots: SwitchSlotAt
         p.purpose = 'DOWNLINK'
       }
     })
+  }
+}
+
+function applySwitchSystemPortIdentities(layout: PortLayout, systemPorts: SwitchSystemPortAttr[]) {
+  if (!layout.ports?.length || !systemPorts.length) return
+  const byNs = new Map<string, typeof layout.ports>()
+  for (const p of layout.ports) {
+    if (p.id.startsWith('slot')) continue
+    const ns = p.id.replace(/-p\d+$/, '')
+    const list = byNs.get(ns) || []
+    list.push(p)
+    byNs.set(ns, list)
+  }
+  const kindNs: Record<string, string> = { ...SWITCH_SYSTEM_PORT_NS }
+  for (const spec of systemPorts) {
+    const ns = kindNs[spec.kind]
+    const list = (byNs.get(ns) || []).slice().sort((a, b) => {
+      const na = Number(/-p(\d+)$/.exec(a.id)?.[1] ?? 0)
+      const nb = Number(/-p(\d+)$/.exec(b.id)?.[1] ?? 0)
+      return na - nb
+    })
+    const p = list[spec.index]
+    if (!p) continue
+    p.id = spec.id
+    p.code = spec.code
+    p.label = spec.code
+    p.media = spec.iface_type === 'copper' ? 'COPPER' : 'FIBER'
+    p.media_kind = moduleToMediaKind(spec.module)
+    p.purpose = spec.kind === 'stack' ? 'PEER' : spec.kind === 'usb' ? 'OTHER' : 'MGMT'
+    p.port_group = spec.kind.toUpperCase()
   }
 }
 

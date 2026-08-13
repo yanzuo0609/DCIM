@@ -59,6 +59,16 @@ function measureTwoRowBlockWidth(ports: FramePort[]): number {
 }
 
 /**
+ * 业务接口板双排口标签：与交换机前面板相同，列向填充（先上后下再下一列）。
+ * 从 start（默认 0）起编：上排偶数 0,2,4… / 下排奇数 1,3,5…
+ */
+export function ifaceBoardTwoRowLabels(count: number, start = 0): string[] {
+  const n = Math.max(0, Math.min(128, Math.trunc(count) || 0))
+  const s = Math.max(0, Math.trunc(start) || 0)
+  return Array.from({ length: n }, (_, i) => String(s + i))
+}
+
+/**
  * 1U 交换机双排：列向编号（上奇下偶）
  * 例：上 1 3 5 … / 下 2 4 6 …
  */

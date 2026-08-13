@@ -142,6 +142,7 @@ class NetworkLink(BaseModel):
     module: Mapped[str | None] = mapped_column(String(80), nullable=True)
     cable_length_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     wiring_rule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    line_style: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     topology: Mapped["NetworkTopology"] = relationship("NetworkTopology", back_populates="links")
 

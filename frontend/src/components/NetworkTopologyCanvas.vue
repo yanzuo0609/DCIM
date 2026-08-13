@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import TopologyGroupIcon from '@/components/TopologyGroupIcon.vue'
 import {
   TOPOLOGY_DND_MIME,
   TOPOLOGY_GROUP_DND_MIME,
   readDeviceGroupDragData,
 } from '@/utils/topologyDnd'
 import type { NetworkLink, NetworkNode, SwitchSubtype } from '@/api/network'
-import { nodeGroupList } from '@/utils/deviceGroups'
+import { nodeParentGroups } from '@/utils/deviceGroups'
 import {
   buildGroupEdges,
   buildGroupGlyphs,
@@ -14,6 +15,14 @@ import {
   type CanvasGroupGlyph,
 } from '@/utils/topologyGroupView'
 import type { FabricRole } from '@/utils/wiringTypes'
+import { DEVICE_GROUP_KIND_LABELS } from '@/utils/deviceGroupVisual'
+import {
+  normalizeLineStyle,
+  strokeDasharrayOf,
+  topologyLinkLabelPos,
+  topologyLinkPath,
+  type TopologyLineStyle,
+} from '@/utils/topologyLinkStyle'
 
 const props = defineProps<{
   nodes: NetworkNode[]
@@ -29,14 +38,19 @@ const props = defineProps<{
   viewMode?: 'devices' | 'groups'
   /** 组名 → 角色（图标） */
   groupRoles?: Record<string, FabricRole | null>
+  /** 组视图中独立拖动后的图标位置；未记录则用成员质心 */
+  groupPositions?: Record<string, { x: number; y: number }>
+  /** 未单独指定样式的连线使用的默认风格 */
+  lineStyle?: TopologyLineStyle
 }>()
 
 const emit = defineEmits<{
   selectNode: [id: string | null]
   selectLink: [id: string | null]
   selectGroup: [name: string | null]
+  inspectGroup: [name: string]
   moveNode: [id: string, x: number, y: number]
-  moveGroup: [name: string, dx: number, dy: number]
+  moveGroup: [name: string, x: number, y: number]
   placeNode: [id: string, x: number, y: number]
   placeDeviceGroup: [name: string, x: number, y: number]
   canvasClick: [x: number, y: number]
@@ -52,7 +66,8 @@ const MIN_CANVAS_W = 1800
 const MIN_CANVAS_H = 1200
 
 const dragging = ref<{ id: string; offsetX: number; offsetY: number } | null>(null)
-const draggingGroup = ref<{ name: string; lastX: number; lastY: number } | null>(null)
+const draggingGroup = ref<{ name: string; offsetX: number; offsetY: number } | null>(null)
+let groupDragMoved = false
 const svgRef = ref<SVGSVGElement | null>(null)
 const wrapRef = ref<HTMLElement | null>(null)
 const dropActive = ref(false)
@@ -72,7 +87,9 @@ const roleMap = computed(() => {
 })
 
 const groupGlyphs = computed(() =>
-  isGroupView.value ? buildGroupGlyphs(props.nodes, props.links, roleMap.value) : [],
+  isGroupView.value
+    ? buildGroupGlyphs(props.nodes, props.links, roleMap.value, props.groupPositions)
+    : [],
 )
 const groupEdges = computed(() => (isGroupView.value ? buildGroupEdges(props.nodes, props.links) : []))
 const loneNodes = computed(() =>
@@ -154,7 +171,7 @@ function groupCenter(g: CanvasGroupGlyph) {
   return { x: g.pos_x + GROUP_ICON / 2, y: g.pos_y + GROUP_ICON / 2 }
 }
 
-function groupEdgePath(edge: { sourceGroup: string; targetGroup: string }) {
+function groupEdgeEnds(edge: { sourceGroup: string; targetGroup: string }) {
   const src =
     groupGlyphs.value.find((g) => g.id === edge.sourceGroup) ||
     (edge.sourceGroup.startsWith('node:')
@@ -165,7 +182,7 @@ function groupEdgePath(edge: { sourceGroup: string; targetGroup: string }) {
     (edge.targetGroup.startsWith('node:')
       ? displayNodes.value.find((n) => `node:${n.id}` === edge.targetGroup)
       : null)
-  if (!src || !tgt) return ''
+  if (!src || !tgt) return null
   const a =
     'pos_x' in src && 'count' in src
       ? groupCenter(src as CanvasGroupGlyph)
@@ -174,15 +191,23 @@ function groupEdgePath(edge: { sourceGroup: string; targetGroup: string }) {
     'pos_x' in tgt && 'count' in tgt
       ? groupCenter(tgt as CanvasGroupGlyph)
       : { x: (tgt as NetworkNode).pos_x + ICON / 2, y: (tgt as NetworkNode).pos_y + ICON / 2 }
-  return `M ${a.x} ${a.y} L ${b.x} ${b.y}`
+  return { a, b }
+}
+
+function resolvedLineStyle(link?: { line_style?: string | null }) {
+  return normalizeLineStyle(link?.line_style || props.lineStyle)
+}
+
+function groupEdgePath(edge: { sourceGroup: string; targetGroup: string }) {
+  const ends = groupEdgeEnds(edge)
+  if (!ends) return ''
+  return topologyLinkPath(ends.a.x, ends.a.y, ends.b.x, ends.b.y, resolvedLineStyle())
 }
 
 function groupEdgeLabelPos(edge: { sourceGroup: string; targetGroup: string }) {
-  const d = groupEdgePath(edge)
-  if (!d) return { x: 0, y: 0 }
-  const m = d.match(/M ([\d.]+) ([\d.]+) L ([\d.]+) ([\d.]+)/)
-  if (!m) return { x: 0, y: 0 }
-  return { x: (Number(m[1]) + Number(m[3])) / 2, y: (Number(m[2]) + Number(m[4])) / 2 - 6 }
+  const ends = groupEdgeEnds(edge)
+  if (!ends) return { x: 0, y: 0 }
+  return topologyLinkLabelPos(ends.a.x, ends.a.y, ends.b.x, ends.b.y, resolvedLineStyle())
 }
 
 function nodeCenter(node: NetworkNode) {
@@ -207,10 +232,9 @@ function iconSymbolId(node: NetworkNode): string {
 }
 
 function groupText(node: NetworkNode) {
-  const groups = nodeGroupList(node)
+  const groups = nodeParentGroups(node)
   if (!groups.length) return ''
-  if (groups.length <= 2) return groups.join(' · ')
-  return `${groups[0]} +${groups.length - 1}`
+  return groups[0]
 }
 
 function shouldShowNodeLabel(node: NetworkNode) {
@@ -276,13 +300,39 @@ function onNodeMouseDown(event: MouseEvent, node: NetworkNode) {
 
 function onGroupMouseDown(event: MouseEvent, g: CanvasGroupGlyph) {
   event.stopPropagation()
+  if (event.button !== 0) return
+  event.preventDefault()
   emit('selectNode', null)
   emit('selectLink', null)
   emit('selectGroup', g.name)
   if (props.linkMode || props.stampMode) return
   const cursor = svgPointFromEvent(event)
   if (!cursor) return
-  draggingGroup.value = { name: g.name, lastX: cursor.x, lastY: cursor.y }
+  groupDragMoved = false
+  draggingGroup.value = {
+    name: g.name,
+    offsetX: cursor.x - g.pos_x,
+    offsetY: cursor.y - g.pos_y,
+  }
+  window.addEventListener('mousemove', onWindowGroupMove)
+  window.addEventListener('mouseup', onWindowGroupUp)
+}
+
+function onWindowGroupMove(event: MouseEvent) {
+  if (!draggingGroup.value) return
+  event.preventDefault()
+  const cursor = svgPointFromEvent(event)
+  if (!cursor) return
+  const x = Math.max(0, cursor.x - draggingGroup.value.offsetX)
+  const y = Math.max(0, cursor.y - draggingGroup.value.offsetY)
+  groupDragMoved = true
+  emit('moveGroup', draggingGroup.value.name, x, y)
+}
+
+function onWindowGroupUp() {
+  window.removeEventListener('mousemove', onWindowGroupMove)
+  window.removeEventListener('mouseup', onWindowGroupUp)
+  onMouseUp()
 }
 
 function flushMove() {
@@ -294,16 +344,9 @@ function flushMove() {
 }
 
 function onMouseMove(event: MouseEvent) {
+  if (draggingGroup.value) return
   const cursor = svgPointFromEvent(event)
   if (!cursor) return
-  if (draggingGroup.value) {
-    const dx = cursor.x - draggingGroup.value.lastX
-    const dy = cursor.y - draggingGroup.value.lastY
-    draggingGroup.value.lastX = cursor.x
-    draggingGroup.value.lastY = cursor.y
-    if (dx || dy) emit('moveGroup', draggingGroup.value.name, dx, dy)
-    return
-  }
   if (!dragging.value) return
   pendingMove = {
     id: dragging.value.id,
@@ -317,6 +360,13 @@ function onMouseUp() {
   if (pendingMove) flushMove()
   dragging.value = null
   draggingGroup.value = null
+  window.removeEventListener('mousemove', onWindowGroupMove)
+  window.removeEventListener('mouseup', onWindowGroupUp)
+}
+
+function onWrapMouseLeave() {
+  if (draggingGroup.value) return
+  onMouseUp()
 }
 
 function onBackgroundClick(event: MouseEvent) {
@@ -350,9 +400,19 @@ function onNodeClick(event: MouseEvent, node: NetworkNode) {
 
 function onGroupClick(event: MouseEvent, g: CanvasGroupGlyph) {
   event.stopPropagation()
+  if (groupDragMoved) return
   emit('selectNode', null)
   emit('selectLink', null)
   emit('selectGroup', g.name)
+}
+
+function onGroupContextMenu(event: MouseEvent, g: CanvasGroupGlyph) {
+  event.preventDefault()
+  event.stopPropagation()
+  emit('selectNode', null)
+  emit('selectLink', null)
+  emit('selectGroup', g.name)
+  emit('inspectGroup', g.name)
 }
 
 function onLinkClick(event: MouseEvent, link: NetworkLink) {
@@ -410,9 +470,7 @@ function linkPath(link: NetworkLink) {
   if (!source || !target) return ''
   const s = nodeCenter(source)
   const t = nodeCenter(target)
-  const mx = (s.x + t.x) / 2
-  const my = (s.y + t.y) / 2
-  return `M ${s.x} ${s.y} Q ${mx} ${my} ${t.x} ${t.y}`
+  return topologyLinkPath(s.x, s.y, t.x, t.y, resolvedLineStyle(link))
 }
 
 function linkLabelPos(link: NetworkLink) {
@@ -421,7 +479,7 @@ function linkLabelPos(link: NetworkLink) {
   if (!source || !target) return { x: 0, y: 0 }
   const s = nodeCenter(source)
   const t = nodeCenter(target)
-  return { x: (s.x + t.x) / 2, y: (s.y + t.y) / 2 - 8 }
+  return topologyLinkLabelPos(s.x, s.y, t.x, t.y, resolvedLineStyle(link))
 }
 
 function resolveLinkSpeed(link: NetworkLink): string {
@@ -471,6 +529,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateViewport)
+  window.removeEventListener('mousemove', onWindowGroupMove)
+  window.removeEventListener('mouseup', onWindowGroupUp)
   if (moveRaf) cancelAnimationFrame(moveRaf)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
 })
@@ -488,10 +548,15 @@ watch(
   <div
     ref="wrapRef"
     class="canvas-wrap"
-    :class="{ 'drop-active': dropActive, 'link-mode': linkMode, 'stamp-mode': stampMode && !linkMode }"
+    :class="{
+      'drop-active': dropActive,
+      'link-mode': linkMode,
+      'stamp-mode': stampMode && !linkMode,
+      'group-dragging': !!draggingGroup,
+    }"
     @mousemove="onMouseMove"
     @mouseup="onMouseUp"
-    @mouseleave="onMouseUp"
+    @mouseleave="onWrapMouseLeave"
     @scroll.passive="onWrapScroll"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
@@ -603,6 +668,7 @@ watch(
               fill="none"
               stroke="#909399"
               :stroke-width="Math.min(6, 2 + edge.count * 0.4)"
+              :stroke-dasharray="strokeDasharrayOf(resolvedLineStyle())"
               marker-end="url(#topo-arrow)"
               pointer-events="none"
             />
@@ -639,6 +705,7 @@ watch(
               fill="none"
               :stroke="selectedLinkId === link.id ? '#f56c6c' : linkColor(link)"
               :stroke-width="selectedLinkId === link.id ? 3.2 : 2"
+              :stroke-dasharray="strokeDasharrayOf(resolvedLineStyle(link))"
               marker-end="url(#topo-arrow)"
               pointer-events="none"
             />
@@ -665,43 +732,41 @@ watch(
           :transform="`translate(${g.pos_x}, ${g.pos_y})`"
           @mousedown="onGroupMouseDown($event, g)"
           @click.stop="onGroupClick($event, g)"
+          @contextmenu.prevent="onGroupContextMenu($event, g)"
         >
           <rect
             v-if="selectedGroupName === g.name"
-            x="-4"
-            y="-4"
-            :width="GROUP_ICON + 8"
-            :height="GROUP_ICON + 8"
-            rx="12"
+            x="-5"
+            y="-5"
+            :width="GROUP_ICON + 10"
+            :height="GROUP_ICON + 10"
+            rx="14"
             fill="none"
             stroke="#409eff"
             stroke-width="2"
           />
           <rect
+            class="group-hit"
             :width="GROUP_ICON"
             :height="GROUP_ICON"
-            rx="14"
-            fill="#eef5ff"
-            stroke="#409eff"
-            stroke-width="1.5"
+            rx="12"
+            fill="transparent"
           />
-          <circle :cx="GROUP_ICON / 2" :cy="GROUP_ICON / 2 - 6" r="18" fill="#409eff" opacity="0.9" />
-          <text
-            :x="GROUP_ICON / 2"
-            :y="GROUP_ICON / 2"
-            text-anchor="middle"
-            fill="#fff"
-            font-size="14"
-            font-weight="700"
-            pointer-events="none"
-          >
-            {{ g.count }}
-          </text>
+          <foreignObject :width="GROUP_ICON" :height="GROUP_ICON" pointer-events="none">
+            <div class="group-ico-wrap" xmlns="http://www.w3.org/1999/xhtml">
+              <TopologyGroupIcon
+                :kind="g.kind"
+                :size="GROUP_ICON"
+                :selected="selectedGroupName === g.name"
+                :count="g.count"
+              />
+            </div>
+          </foreignObject>
           <text :x="GROUP_ICON / 2" :y="GROUP_ICON + 14" text-anchor="middle" class="node-name">
             {{ g.name }}
           </text>
           <text :x="GROUP_ICON / 2" :y="GROUP_ICON + 28" text-anchor="middle" class="node-group">
-            {{ g.count }} 台{{ g.intraLinkCount ? ` · 组内 ${g.intraLinkCount} 线` : '' }}
+            {{ DEVICE_GROUP_KIND_LABELS[g.kind] }}{{ g.intraLinkCount ? ` · 组内 ${g.intraLinkCount} 线` : '' }}
           </text>
         </g>
 
@@ -768,7 +833,7 @@ watch(
     </div>
     <div v-else-if="isGroupView" class="canvas-stats">
       组视图 · {{ groupGlyphs.length }} 组 · 未分组 {{ loneNodes.length }} 台 · 组间线
-      {{ groupEdges.length }}
+      {{ groupEdges.length }} · 拖动只移动当前组图标，右键查看详情
     </div>
     <div v-else-if="useCull" class="canvas-stats">
       可见 {{ visibleNodes.length }}/{{ canvasNodes.length }} 台 · 连线
@@ -815,7 +880,12 @@ watch(
 }
 
 .group-node {
-  cursor: pointer;
+  cursor: grab;
+}
+
+.canvas-wrap.group-dragging,
+.canvas-wrap.group-dragging .group-node {
+  cursor: grabbing;
 }
 
 .group-ico-wrap {

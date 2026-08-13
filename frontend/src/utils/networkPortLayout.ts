@@ -1200,7 +1200,9 @@ export function syncPortsFromSlotsDef(layout: PortLayout, preservePeers = true) 
       for (let p = 1; p <= group.count; p += 1) {
         if (group.role === 'main') mainSeq += 1
         const displayIndex = group.role === 'main' ? mainSeq : p
-        const id = `slot${slotIdx + 1}-g${group.id}-p${p}`
+        const id = group.id_ns
+          ? `${group.id_ns}-p${p - 1}`
+          : `slot${slotIdx + 1}-g${group.id}-p${p}`
         const legacyId = `slot${slotIdx + 1}-p${mainSeq || p}`
         const peer = peerMap.get(id) ?? peerMap.get(legacyId)
         // uplink/mgmt 直接打标；main/card 留给 annotatePortPurposes 按设备 kind 区分 DOWNLINK/SERVER

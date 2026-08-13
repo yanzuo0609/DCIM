@@ -1,0 +1,241 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import {
+  ACCESS_DEMO,
+  effectivePortCount,
+  resolveSlotPort,
+  type SwitchSlotAttr,
+} from '@/utils/switchModelAttrs'
+import type { UplinkPosition } from '@/api/network'
+
+const props = defineProps<{
+  downlink: SwitchSlotAttr | null
+  uplink: SwitchSlotAttr | null
+  uplinkPosition?: UplinkPosition
+  selectedPort?: { slotIndex: number; portIndex: number } | null
+}>()
+
+const emit = defineEmits<{
+  selectPort: [payload: { slotIndex: number; portIndex: number }]
+  inspectPort: [payload: { slotIndex: number; portIndex: number; x: number; y: number }]
+}>()
+
+const downCount = computed(() => (props.downlink ? effectivePortCount(props.downlink) : 0))
+const upCount = computed(() => (props.uplink ? effectivePortCount(props.uplink) : 0))
+const middle = computed(() => props.uplinkPosition === 'middle' && upCount.value > 0 && downCount.value > 0)
+const position = computed(() => (props.uplinkPosition === 'middle' ? 'middle' : 'right'))
+const downHalf = computed(() => Math.ceil(downCount.value / 2))
+
+const leftIndexes = computed(() => {
+  const n = middle.value ? downHalf.value : downCount.value
+  return Array.from({ length: n }, (_, i) => i)
+})
+const rightIndexes = computed(() => {
+  if (!middle.value) return []
+  return Array.from({ length: downCount.value - downHalf.value }, (_, i) => downHalf.value + i)
+})
+const upIndexes = computed(() => Array.from({ length: upCount.value }, (_, i) => i))
+
+function downGridStyle(count: number) {
+  const n = Math.max(1, count)
+  const rows = n <= 1 ? 1 : 2
+  const cols = Math.max(1, Math.ceil(n / rows))
+  return {
+    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+    gridAutoFlow: rows === 1 ? 'row' : 'column',
+  }
+}
+
+const upGridStyle = computed(() => {
+  const n = Math.max(1, upCount.value)
+  const rows = n <= 1 ? 1 : 2
+  const cols = Math.max(1, Math.ceil(n / rows))
+  return {
+    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+    gridAutoFlow: rows === 1 ? 'row' : 'column',
+  }
+})
+
+function isSelected(slotIndex: number, portIndex: number) {
+  const sel = props.selectedPort
+  return !!sel && sel.slotIndex === slotIndex && sel.portIndex === portIndex
+}
+
+function onClick(slot: SwitchSlotAttr, portIndex: number, ev: MouseEvent) {
+  ev.preventDefault()
+  ev.stopPropagation()
+  emit('selectPort', { slotIndex: slot.index, portIndex })
+}
+
+function onContext(slot: SwitchSlotAttr, portIndex: number, ev: MouseEvent) {
+  ev.preventDefault()
+  ev.stopPropagation()
+  emit('inspectPort', { slotIndex: slot.index, portIndex, x: ev.clientX, y: ev.clientY })
+}
+
+function portTitle(slot: SwitchSlotAttr, portIndex: number) {
+  const spec = resolveSlotPort(slot, portIndex)
+  return `${spec.code} · ${spec.id} · ${spec.speed} ${spec.module}`
+}
+
+function portLab(slot: SwitchSlotAttr, portIndex: number) {
+  if (slot.purpose === 'UPLINK') return String(portIndex)
+  return String(Math.max(0, Number(slot.port_start) || 0) + portIndex)
+}
+
+const frameStyle = computed(() => ({
+  height: `${ACCESS_DEMO.height}px`,
+}))
+</script>
+
+<template>
+  <div class="access-chassis" :style="frameStyle">
+    <div class="access-inner">
+      <div class="port-band">
+        <div v-if="downlink && leftIndexes.length" class="port-block">
+          <div class="port-grid" :style="downGridStyle(leftIndexes.length)">
+            <button
+              v-for="pi in leftIndexes"
+              :key="`d-${pi}`"
+              type="button"
+              class="sw-port"
+              :class="{ selected: isSelected(downlink.index, pi) }"
+              :title="portTitle(downlink, pi)"
+              @click.stop="onClick(downlink, pi, $event)"
+              @contextmenu.prevent="onContext(downlink, pi, $event)"
+            >
+              <span class="sw-port-lab">{{ portLab(downlink, pi) }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="uplink && upCount && (middle || position !== 'right')" class="port-block up">
+          <div class="port-grid" :style="upGridStyle">
+            <button
+              v-for="pi in upIndexes"
+              :key="`u-${pi}`"
+              type="button"
+              class="sw-port"
+              :class="{ selected: isSelected(uplink.index, pi) }"
+              :title="portTitle(uplink, pi)"
+              @click.stop="onClick(uplink, pi, $event)"
+              @contextmenu.prevent="onContext(uplink, pi, $event)"
+            >
+              <span class="sw-port-lab">{{ portLab(uplink, pi) }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="downlink && rightIndexes.length" class="port-block">
+          <div class="port-grid" :style="downGridStyle(rightIndexes.length)">
+            <button
+              v-for="pi in rightIndexes"
+              :key="`d-${pi}`"
+              type="button"
+              class="sw-port"
+              :class="{ selected: isSelected(downlink.index, pi) }"
+              :title="portTitle(downlink, pi)"
+              @click.stop="onClick(downlink, pi, $event)"
+              @contextmenu.prevent="onContext(downlink, pi, $event)"
+            >
+              <span class="sw-port-lab">{{ portLab(downlink, pi) }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="uplink && upCount && !middle && position === 'right'" class="port-block up">
+          <div class="port-grid" :style="upGridStyle">
+            <button
+              v-for="pi in upIndexes"
+              :key="`ur-${pi}`"
+              type="button"
+              class="sw-port"
+              :class="{ selected: isSelected(uplink.index, pi) }"
+              :title="portTitle(uplink, pi)"
+              @click.stop="onClick(uplink, pi, $event)"
+              @contextmenu.prevent="onContext(uplink, pi, $event)"
+            >
+              <span class="sw-port-lab">{{ portLab(uplink, pi) }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.access-chassis {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 4px;
+  background: #cfd4db;
+  border: 2px solid #2c3e50;
+  border-radius: 2px;
+}
+.access-inner {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  padding: 6px 8px;
+  background: #d8dde3;
+  border: 1px solid #8a9098;
+  box-sizing: border-box;
+}
+.port-band {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.port-block {
+  display: flex;
+  min-width: 0;
+  background: #eef1f4;
+  border: 1.5px solid #7ed321;
+  flex: 1 1 auto;
+}
+.port-block.up {
+  flex: 0 0 22%;
+  max-width: 120px;
+}
+.port-grid {
+  flex: 1 1 auto;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  padding: 3px;
+  gap: 0;
+}
+.sw-port {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 1px solid #303133;
+  background: #fff;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  cursor: pointer;
+}
+.sw-port:hover {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+.sw-port.selected {
+  background: #409eff;
+  border-color: #1d6ec7;
+}
+.sw-port.selected .sw-port-lab {
+  color: #fff;
+}
+.sw-port-lab {
+  font-size: 7px;
+  line-height: 1;
+  color: #303133;
+}
+</style>

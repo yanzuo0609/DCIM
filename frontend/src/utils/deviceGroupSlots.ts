@@ -6,7 +6,7 @@
 import type { NetworkNode } from '@/api/network'
 import type { NetworkDesignModel } from '@/api/networkModelDesign'
 import { stampDesignModelOntoCanvas } from '@/utils/designModelToNode'
-import { addNodeToGroup, listGroupMembers, nodeInGroup } from '@/utils/deviceGroups'
+import { addNodeToGroup, listGroupMembers, nodeInGroup, nodeParentGroups, setNodeGroups } from '@/utils/deviceGroups'
 import { groupKindFromRole, layoutGroupGrid } from '@/utils/deviceGroupVisual'
 import { deviceNamePrefix, nextDeviceName } from '@/utils/topologyClone'
 import type { FabricRole } from '@/utils/wiringTypes'
@@ -189,7 +189,17 @@ export function summarizeSlots(
         : null
       const kind = groupKindFromRole(s.role)
       const kindText =
-        kind === 'server' ? '服务器' : kind === 'security' ? '安全' : '交换机'
+        kind === 'server'
+          ? '服务器'
+          : kind === 'security'
+            ? '安全'
+            : kind === 'core'
+              ? '核心'
+              : kind === 'aggregation'
+                ? '汇聚'
+                : kind === 'access'
+                  ? '接入'
+                  : '混合'
       const title = modelName || s.label || roleLabel(s.role) || kindText
       return `${title}×${Math.max(0, s.count)}`
     })
@@ -257,7 +267,13 @@ export function materializeGroupSlots(opts: {
     const existing = listSlotInstances(working, groupName, slot)
     const need = Math.max(0, Math.floor(slot.count) - existing.length)
     for (const n of existing) {
-      addNodeToGroup(n, groupName)
+      if (!addNodeToGroup(n, groupName)) {
+        const other = nodeParentGroups(n).find((p) => p !== groupName)
+        warnings.push(
+          `设备「${n.name}」已属于组「${other || '其他组'}」，不可再加入「${groupName}」`,
+        )
+        continue
+      }
       addNodeToGroup(n, subRef)
       if (slot.role && !n.network_role) n.network_role = slot.role
       reused.push(n)
@@ -280,8 +296,7 @@ export function materializeGroupSlots(opts: {
       node.name = nextDeviceName(working, { ...node, name: base })
       node.contract_device_name = `dgslot:${slot.id}`
       if (slot.role) node.network_role = slot.role
-      addNodeToGroup(node, groupName)
-      addNodeToGroup(node, subRef)
+      setNodeGroups(node, [groupName, subRef])
       node.on_canvas = onCanvas
       working.push(node)
       created.push(node)

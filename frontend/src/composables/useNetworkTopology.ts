@@ -20,7 +20,7 @@ import {
   updateNetworkProject,
 } from '@/api/network'
 import { annotateNodesPortPurposes } from '@/utils/designModelToNode'
-import { ensureNodeGroupsShape } from '@/utils/deviceGroups'
+import { ensureNodeGroupsShape, nodeParentGroups } from '@/utils/deviceGroups'
 import { inferLinkType } from '@/utils/networkPortLayout'
 
 function clampPortLayoutForApi(layout: NetworkNode['port_layout']) {
@@ -130,6 +130,7 @@ function toCanvasLinks(links: NetworkLink[], nodes: NetworkNode[]): CanvasLinkIn
       module: l.module ?? null,
       cable_length_m: l.cable_length_m ?? null,
       wiring_rule_id: l.wiring_rule_id ?? null,
+      line_style: l.line_style ?? null,
     }
   })
 }
@@ -162,7 +163,18 @@ export function useNetworkTopology() {
       slots: n.slots || defaultSlots(),
       on_canvas: n.on_canvas !== false,
     }))
-    for (const n of nodes.value) ensureNodeGroupsShape(n)
+    const conflictNames: string[] = []
+    for (const n of nodes.value) {
+      if (nodeParentGroups(n).length > 1) conflictNames.push(n.name)
+      ensureNodeGroupsShape(n)
+    }
+    if (conflictNames.length) {
+      const sample = conflictNames.slice(0, 3).join('、')
+      const extra = conflictNames.length > 3 ? ` 等 ${conflictNames.length} 台` : ''
+      ElMessage.warning(
+        `同一拓扑中一台设备不能同时属于多个设备组：${sample}${extra}，已保留所在的第一个组`,
+      )
+    }
     // 旧拓扑补全端口 Purpose（按 group.role / 板卡光口 vs 上联）
     annotateNodesPortPurposes(nodes.value)
     links.value = detail.links
@@ -216,7 +228,10 @@ export function useNetworkTopology() {
       ...(pid ? { project_id: pid } : {}),
     })
     topologies.value = data.items || []
-    const queryId = preferId ?? (route.query.topology_id as string | undefined) ?? null
+    const queryId =
+      preferId === undefined
+        ? ((route.query.topology_id as string | undefined) ?? null)
+        : preferId
     const targetId =
       queryId && topologies.value.some((t) => t.id === queryId)
         ? queryId
@@ -431,15 +446,34 @@ export function useNetworkTopology() {
   }
 
   async function removeTopology() {
-    if (!currentId.value) return
-    await ElMessageBox.confirm('确定删除当前拓扑？', '提示', { type: 'warning' })
-    await deleteNetworkTopology(currentId.value)
-    currentId.value = null
-    nodes.value = []
-    links.value = []
-    setTopologyId(null)
-    await loadTopologies(null, currentProjectId.value)
-    ElMessage.success('已删除')
+    const deletingId = currentId.value
+    if (!deletingId) return
+    try {
+      await ElMessageBox.confirm('确定删除当前拓扑？', '提示', { type: 'warning' })
+    } catch {
+      return
+    }
+    const waitStart = Date.now()
+    while (saving.value && Date.now() - waitStart < 8000) {
+      await new Promise((r) => setTimeout(r, 80))
+    }
+    try {
+      await deleteNetworkTopology(deletingId)
+      if (currentId.value === deletingId) {
+        currentId.value = null
+        nodes.value = []
+        links.value = []
+      }
+      topologies.value = topologies.value.filter((t) => t.id !== deletingId)
+      const query = { ...route.query }
+      delete query.topology_id
+      await router.replace({ query })
+      await loadTopologies(null, currentProjectId.value)
+      ElMessage.success('已删除')
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      ElMessage.error(err.response?.data?.message || err.message || '删除拓扑失败')
+    }
   }
 
   /** @deprecated prefer loadProjects for device-define flow */

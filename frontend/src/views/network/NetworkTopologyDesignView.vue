@@ -16,12 +16,14 @@ import DeviceGroupDetailDialog from '@/components/DeviceGroupDetailDialog.vue'
 import { useNetworkTopology } from '@/composables/useNetworkTopology'
 import { stampDesignModelOntoCanvas, syncTopologyNodesFromDesignModels } from '@/utils/designModelToNode'
 import {
-  addNodeToGroup,
+  groupsExclusiveToParent,
+  MULTI_PARENT_GROUP_HINT,
   nodeGroupList,
   nodeInGroup,
   removeNodeFromGroup,
   renameNodeGroup,
   setNodeGroups,
+  uniqueParentGroupNames,
 } from '@/utils/deviceGroups'
 import {
   buildWiringGroupSelectOptions,
@@ -36,6 +38,11 @@ import {
 import {
   layoutGroupGrid,
 } from '@/utils/deviceGroupVisual'
+import {
+  LINE_STYLE_OPTIONS,
+  normalizeLineStyle,
+  type TopologyLineStyle,
+} from '@/utils/topologyLinkStyle'
 import { applyWiringRule, previewWiringPairs, previewWiringScenario, listFreePortOptions, type ProposedPair } from '@/utils/wiringRuleApply'
 import {
   ALLOCATION_MODE_OPTIONS,
@@ -575,6 +582,9 @@ const groupDetailVisible = ref(false)
 const groupDetailName = ref<string | null>(null)
 /** 画布显示：逐台设备 / 按组简化 */
 const canvasViewMode = ref<'devices' | 'groups'>('devices')
+/** 组视图图标独立坐标（不移动组内设备，避免 allacc 拖动带动小组） */
+const groupViewPositions = ref<Record<string, { x: number; y: number }>>({})
+const canvasLineStyle = ref<TopologyLineStyle>('orthogonal')
 /** 左侧手风琴：一次只展开一项 */
 const sideAccordion = ref<'models' | 'topology' | 'groups' | 'rules'>('models')
 
@@ -839,20 +849,81 @@ function onCanvasSelectGroup(name: string | null) {
   selectedGroupName.value = name
   selectedNodeId.value = null
   selectedLinkId.value = null
-  if (name) {
-    groupDetailName.value = name
-    groupDetailVisible.value = true
+}
+
+function groupViewPosKey() {
+  return currentId.value ? `dcim.groupViewPos.${currentId.value}` : null
+}
+
+function loadGroupViewPositions() {
+  const key = groupViewPosKey()
+  if (!key) {
+    groupViewPositions.value = {}
+    return
+  }
+  try {
+    const raw = localStorage.getItem(key)
+    const parsed = raw ? (JSON.parse(raw) as Record<string, { x: number; y: number }>) : null
+    groupViewPositions.value = parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    groupViewPositions.value = {}
   }
 }
 
-function moveGroupMembers(name: string, dx: number, dy: number) {
-  if (!dx && !dy) return
-  for (const n of nodes.value) {
-    if (n.on_canvas === false) continue
-    if (!nodeInGroup(n, name)) continue
-    n.pos_x = Math.max(0, n.pos_x + dx)
-    n.pos_y = Math.max(0, n.pos_y + dy)
+function persistGroupViewPositions() {
+  const key = groupViewPosKey()
+  if (!key) return
+  try {
+    localStorage.setItem(key, JSON.stringify(groupViewPositions.value))
+  } catch {
+    /* ignore quota */
   }
+}
+
+function lineStyleKey() {
+  return currentId.value ? `dcim.lineStyle.${currentId.value}` : null
+}
+
+function loadCanvasLineStyle() {
+  const key = lineStyleKey()
+  if (!key) {
+    canvasLineStyle.value = 'orthogonal'
+    return
+  }
+  try {
+    canvasLineStyle.value = normalizeLineStyle(localStorage.getItem(key))
+  } catch {
+    canvasLineStyle.value = 'orthogonal'
+  }
+}
+
+function persistCanvasLineStyle() {
+  const key = lineStyleKey()
+  if (!key) return
+  try {
+    localStorage.setItem(key, canvasLineStyle.value)
+  } catch {
+    /* ignore */
+  }
+}
+
+function applyLineStyleToAll() {
+  const style = canvasLineStyle.value
+  for (const link of links.value) link.line_style = style
+  ElMessage.success('已将当前连线样式应用到全部连线，请保存布局')
+}
+
+function setSelectedLineStyle(style: TopologyLineStyle | '') {
+  if (!selectedLink.value) return
+  selectedLink.value.line_style = style || null
+}
+
+function moveGroupGlyph(name: string, x: number, y: number) {
+  groupViewPositions.value = {
+    ...groupViewPositions.value,
+    [name]: { x: Math.max(0, x), y: Math.max(0, y) },
+  }
+  persistGroupViewPositions()
 }
 
 function onDeviceGroupCreated(name: string) {
@@ -866,7 +937,7 @@ function onDeviceGroupCreated(name: string) {
   selectedGroupName.value = name
 }
 
-/** 检视器改组：支持多选 */
+/** 检视器改组：同一拓扑一台设备只能属于一个父组 */
 async function onUpdateNodeMeta(patch: {
   network_role?: string | null
   device_group?: string | null
@@ -877,12 +948,23 @@ async function onUpdateNodeMeta(patch: {
   if ('network_role' in patch) node.network_role = patch.network_role ?? null
   let groupsChanged = false
   if ('device_groups' in patch) {
-    setNodeGroups(node, patch.device_groups || [])
+    const requested = patch.device_groups || []
+    const parents = uniqueParentGroupNames(requested)
+    if (parents.length > 1) {
+      ElMessage.warning(MULTI_PARENT_GROUP_HINT)
+      return
+    }
+    const parent = parents[0] || null
+    setNodeGroups(
+      node,
+      parent ? groupsExclusiveToParent([...nodeGroupList(node), ...requested], parent) : [],
+    )
     for (const g of nodeGroupList(node)) ensureGroupInCatalog(g, null)
     groupsChanged = true
   } else if ('device_group' in patch) {
     const g = (patch.device_group || '').trim()
-    setNodeGroups(node, g ? [g] : [])
+    const parent = uniqueParentGroupNames(g ? [g] : [])[0] || null
+    setNodeGroups(node, parent ? groupsExclusiveToParent([g], parent) : [])
     if (g) ensureGroupInCatalog(g, null)
     groupsChanged = true
   }
@@ -925,6 +1007,11 @@ async function onRenameDeviceGroup(payload: { from: string; to: string }) {
     ])
   }
   if (selectedGroupName.value === payload.from) selectedGroupName.value = payload.to
+  if (groupViewPositions.value[payload.from]) {
+    const { [payload.from]: pos, ...rest } = groupViewPositions.value
+    groupViewPositions.value = { ...rest, [payload.to]: pos }
+    persistGroupViewPositions()
+  }
   await persistGroupMembership()
 }
 
@@ -938,6 +1025,12 @@ async function onDeleteDeviceGroup(name: string) {
   removeGroupFromConfig(name)
   persistDeviceGroupCatalog(deviceGroupCatalog.value.filter((g) => g.name !== name))
   if (selectedGroupName.value === name) selectedGroupName.value = null
+  if (groupViewPositions.value[name]) {
+    const next = { ...groupViewPositions.value }
+    delete next[name]
+    groupViewPositions.value = next
+    persistGroupViewPositions()
+  }
   // 空组或空拓扑：只删目录，不触发画布保存（避免 Topology must contain at least one node）
   if (touched && nodes.value.length) {
     await persistGroupMembership()
@@ -947,6 +1040,8 @@ async function onDeleteDeviceGroup(name: string) {
 watch(currentId, (id) => {
   // 同项目内切换拓扑：模型库与设备组目录保持项目级共享，仅刷新端口池/实验室
   loadDeviceGroupCatalog()
+  loadGroupViewPositions()
+  loadCanvasLineStyle()
   if (!designModels.value.length && groupScopeId()) {
     void loadDesignModelsForProject()
   }
@@ -1378,6 +1473,7 @@ function onLinkConfirm(payload: LinkConfirmPayload) {
     cable_type: payload.cable_type,
     interface_class: payload.interface_class,
     link_role: payload.link_role,
+    line_style: payload.line_style || canvasLineStyle.value,
   })
   bindPeerPorts(
     payload.source_node_id,
@@ -2146,6 +2242,8 @@ onMounted(async () => {
   await loadFolderTree()
   await loadDesignModelsForProject()
   loadDeviceGroupCatalog()
+  loadGroupViewPositions()
+  loadCanvasLineStyle()
   void loadWiringRules()
   void loadLabInfo()
 })
@@ -2344,6 +2442,25 @@ function nodeNameById(id: string) {
               <el-radio-button value="devices">逐台</el-radio-button>
               <el-radio-button value="groups">按组简化</el-radio-button>
             </el-radio-group>
+            <span v-if="canvasViewMode === 'groups'" class="hint">拖动只移动当前组图标，右键查看组内详情</span>
+            <el-select
+              v-model="canvasLineStyle"
+              size="small"
+              style="width: 118px"
+              :disabled="!currentId"
+              title="连线样式"
+              @change="persistCanvasLineStyle"
+            >
+              <el-option v-for="o in LINE_STYLE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
+            <el-button
+              v-if="canEdit"
+              size="small"
+              :disabled="!currentId || !links.length"
+              @click="applyLineStyleToAll"
+            >
+              应用到全部
+            </el-button>
             <el-button
               v-if="canEdit"
               :type="linkMode ? 'warning' : 'default'"
@@ -2434,12 +2551,15 @@ function nodeNameById(id: string) {
             :stamp-mode="stampMode"
             :view-mode="canvasViewMode"
             :group-roles="groupRolesMap"
+            :group-positions="groupViewPositions"
+            :line-style="canvasLineStyle"
             :node-lab-status="labSession?.node_status || null"
             @select-node="onSelectNode"
             @select-link="onSelectLink"
             @select-group="onCanvasSelectGroup"
+            @inspect-group="openGroupDetail"
             @move-node="moveNode"
-            @move-group="moveGroupMembers"
+            @move-group="moveGroupGlyph"
             @place-node="placeNode"
             @place-device-group="placeDeviceGroup"
             @canvas-click="onCanvasClick"
@@ -2484,6 +2604,18 @@ function nodeNameById(id: string) {
             <p>
               <span class="label">类型</span>{{ selectedLink.link_type }}
             </p>
+            <p>
+              <span class="label">样式</span>
+            </p>
+            <el-select
+              size="small"
+              style="width: 100%"
+              :model-value="selectedLink.line_style || canvasLineStyle"
+              :disabled="!canEdit"
+              @change="setSelectedLineStyle($event as TopologyLineStyle)"
+            >
+              <el-option v-for="o in LINE_STYLE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
             <p v-if="selectedLink.wiring_rule_id">
               <span class="label">来源</span>布线规则生成
             </p>

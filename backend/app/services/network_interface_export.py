@@ -341,6 +341,7 @@ class NetworkInterfaceExportService:
                     module=getattr(l, "module", None),
                     cable_length_m=getattr(l, "cable_length_m", None),
                     wiring_rule_id=getattr(l, "wiring_rule_id", None),
+                    line_style=getattr(l, "line_style", None),
                 )
             )
         return result

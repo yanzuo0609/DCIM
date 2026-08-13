@@ -22,6 +22,14 @@ import {
   type DesignSlotAttr,
   type DesignSlotInterface,
 } from '@/utils/designModelToNode'
+import {
+  IFACE_BOARD_KIND_SHORT,
+  SWITCH_IFACE_BOARD_OPTIONS,
+  SWITCH_IFACE_BOARD_PORT_PRESETS,
+  ifaceKindToPortType,
+  portTypeToIfaceKind,
+  type SwitchIfaceBoardKind,
+} from '@/utils/switchModelAttrs'
 
 const BASE_CELL_W = 16
 const BASE_CELL_H = 8
@@ -34,11 +42,15 @@ const props = defineProps<{
   editable?: boolean
   palette: PanelPaletteItem[]
   slots?: DesignSlotAttr[]
+  /** 不显示组件库：框选空白网格创建业务接口板，右键设置类型/口数 */
+  freeBoard?: boolean
+  maxBoards?: number
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: PanelLayoutConfig]
   'edit-slot': [payload: { side: PanelSide; item: PanelLayoutItem }]
+  'board-change': [payload: { items: PanelLayoutItem[] }]
 }>()
 
 const selectedPaletteId = ref<string | null>(null)
@@ -51,6 +63,15 @@ const suppressGridClickUntil = ref(0)
 const sidesRef = ref<HTMLElement | null>(null)
 const sidesWidth = ref(0)
 const dragOrigin = ref<{ side: PanelSide; row: number; col: number } | null>(null)
+const boardMenu = ref<{
+  side: PanelSide
+  id: string
+  x: number
+  y: number
+  kind: SwitchIfaceBoardKind
+  portCount: number
+  portPreset: string
+} | null>(null)
 let sidesObserver: ResizeObserver | null = null
 
 const layout = computed(() => normalizePanelLayoutConfig(props.modelValue))
@@ -102,19 +123,22 @@ onMounted(() => {
   const el = sidesRef.value
   if (!el || typeof ResizeObserver === 'undefined') {
     sidesWidth.value = el?.clientWidth || window.innerWidth
-    return
+  } else {
+    sidesObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width
+      sidesWidth.value = typeof w === 'number' ? w : el.clientWidth
+    })
+    sidesObserver.observe(el)
+    sidesWidth.value = el.clientWidth
   }
-  sidesObserver = new ResizeObserver((entries) => {
-    const w = entries[0]?.contentRect?.width
-    sidesWidth.value = typeof w === 'number' ? w : el.clientWidth
-  })
-  sidesObserver.observe(el)
-  sidesWidth.value = el.clientWidth
+  window.addEventListener('click', closeBoardMenu)
 })
 
 onBeforeUnmount(() => {
   sidesObserver?.disconnect()
   sidesObserver = null
+  window.removeEventListener('mouseup', onWindowMouseUp)
+  window.removeEventListener('click', closeBoardMenu)
 })
 
 const paletteExpanded = reactive<Record<PanelSide, boolean>>({ front: false, rear: false })
@@ -190,7 +214,13 @@ function kindClass(kind: PanelItemKind) {
 }
 
 function emitFull(next: PanelLayoutConfig) {
-  emit('update:modelValue', normalizePanelLayoutConfig(next))
+  const normalized = normalizePanelLayoutConfig(next)
+  emit('update:modelValue', normalized)
+  if (props.freeBoard) {
+    emit('board-change', {
+      items: [...normalized.front.items, ...normalized.rear.items],
+    })
+  }
 }
 
 function setSize(nextCols: number, nextRows: number) {
@@ -218,10 +248,13 @@ function rectFrom(r1: number, c1: number, r2: number, c2: number) {
 }
 
 const previewRect = computed(() => {
-  if (!selectedPaletteId.value || !anchor.value || !hoverCell.value) return null
+  if (!anchor.value || !hoverCell.value) return null
   if (anchor.value.side !== hoverCell.value.side) return null
-  const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
-  if (!pal || pal.side !== anchor.value.side) return null
+  if (!props.freeBoard) {
+    if (!selectedPaletteId.value) return null
+    const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
+    if (!pal || pal.side !== anchor.value.side) return null
+  }
   const rect = rectFrom(anchor.value.row, anchor.value.col, hoverCell.value.row, hoverCell.value.col)
   return { side: anchor.value.side, ...rect }
 })
@@ -281,6 +314,167 @@ function placeItem(side: PanelSide, row: number, col: number, w: number, h: numb
   cancelAnchor()
   selectedPaletteId.value = null
   selectedPlaced.value = { side, id: pal.id }
+}
+
+function boardItems(cfg?: PanelLayoutConfig): PanelLayoutItem[] {
+  const cur = cfg || normalizePanelLayoutConfig(props.modelValue)
+  return [...cur.front.items, ...cur.rear.items].filter((i) => i.kind === 'line_card' && !i.blank)
+}
+
+function nextBoardSlotIndex(): number | null {
+  const cap = Math.max(1, props.maxBoards || 48)
+  const used = new Set(boardItems().map((i) => Number(i.slot_index) || 0))
+  for (let i = 1; i <= cap; i++) {
+    if (!used.has(i)) return i
+  }
+  return null
+}
+
+function boardLabel(slot: number, kind: SwitchIfaceBoardKind, count: number) {
+  return `Slot${slot} ${IFACE_BOARD_KIND_SHORT[kind]}×${count}`
+}
+
+function placeFreeBoard(side: PanelSide, row: number, col: number, w: number, h: number) {
+  if (col + w > cols.value || row + h > rows.value) {
+    ElMessage.warning('超出自定义面板网格范围')
+    cancelAnchor()
+    return
+  }
+  if (rangeConflicts(side, row, col, w, h)) {
+    ElMessage.warning('目标区域与其它属性重叠，请重新框选')
+    cancelAnchor()
+    return
+  }
+  const slot = nextBoardSlotIndex()
+  if (slot == null) {
+    ElMessage.warning('模块化扩展插槽已满，无法再添加接口板')
+    cancelAnchor()
+    return
+  }
+  const kind: SwitchIfaceBoardKind = '10ge'
+  const portCount = 48
+  const id = `slot-card-${slot}`
+  const cur = normalizePanelLayoutConfig(props.modelValue)
+  const sideData = {
+    cols: cur.cols,
+    rows: cur.rows,
+    items: cur[side].items.filter((i) => i.id !== id),
+  }
+  sideData.items.push({
+    id,
+    kind: 'line_card',
+    label: boardLabel(slot, kind, portCount),
+    side,
+    slot_index: slot,
+    row,
+    col,
+    w,
+    h,
+    port_count: portCount,
+    port_type: ifaceKindToPortType(kind),
+  })
+  emitFull({ ...cur, [side]: sideData })
+  cancelAnchor()
+  selectedPlaced.value = { side, id }
+}
+
+function patchBoardItem(
+  side: PanelSide,
+  id: string,
+  patch: { kind?: SwitchIfaceBoardKind; port_count?: number },
+) {
+  const cur = normalizePanelLayoutConfig(props.modelValue)
+  const items = cur[side].items.map((item) => {
+    if (item.id !== id) return item
+    const kind = patch.kind || portTypeToIfaceKind(item.port_type)
+    const portCount = patch.port_count ?? item.port_count ?? 48
+    const slot = item.slot_index || 1
+    return {
+      ...item,
+      kind: 'line_card' as const,
+      port_type: ifaceKindToPortType(kind),
+      port_count: portCount,
+      blank: false,
+      label: boardLabel(slot, kind, portCount),
+    }
+  })
+  emitFull({ ...cur, [side]: { cols: cur.cols, rows: cur.rows, items } })
+}
+
+function closeBoardMenu(ev?: Event) {
+  if (!boardMenu.value) return
+  const t = ev?.target
+  if (t instanceof Node) {
+    const menu = document.querySelector('.board-ctx')
+    if (menu?.contains(t)) return
+    const popper = (t as HTMLElement).closest?.('.el-select-dropdown, .el-popper')
+    if (popper) return
+  }
+  boardMenu.value = null
+}
+
+function onBoardContext(side: PanelSide, item: PanelLayoutItem, ev: MouseEvent) {
+  if (!props.editable || !props.freeBoard) return
+  ev.preventDefault()
+  ev.stopPropagation()
+  selectPlacedItem(side, item)
+  const kind = portTypeToIfaceKind(item.port_type)
+  const portCount = Math.max(1, Number(item.port_count) || 48)
+  const preset = SWITCH_IFACE_BOARD_PORT_PRESETS.includes(
+    portCount as (typeof SWITCH_IFACE_BOARD_PORT_PRESETS)[number],
+  )
+    ? String(portCount)
+    : 'other'
+  boardMenu.value = {
+    side,
+    id: item.id,
+    x: ev.clientX,
+    y: ev.clientY,
+    kind,
+    portCount,
+    portPreset: preset,
+  }
+}
+
+function onBoardMenuKind(kind: SwitchIfaceBoardKind) {
+  const menu = boardMenu.value
+  if (!menu) return
+  menu.kind = kind
+  patchBoardItem(menu.side, menu.id, { kind, port_count: menu.portCount })
+}
+
+function onBoardMenuPreset(v: string) {
+  const menu = boardMenu.value
+  if (!menu) return
+  menu.portPreset = v
+  if (v === 'other') {
+    const cur = SWITCH_IFACE_BOARD_PORT_PRESETS.includes(
+      menu.portCount as (typeof SWITCH_IFACE_BOARD_PORT_PRESETS)[number],
+    )
+      ? 36
+      : menu.portCount
+    menu.portCount = cur
+    patchBoardItem(menu.side, menu.id, { kind: menu.kind, port_count: cur })
+    return
+  }
+  const n = Math.max(1, Number(v) || 48)
+  menu.portCount = n
+  patchBoardItem(menu.side, menu.id, { kind: menu.kind, port_count: n })
+}
+
+function onBoardMenuCustomCount(v: number | undefined) {
+  const menu = boardMenu.value
+  if (!menu) return
+  const n = Math.max(1, Math.min(128, v ?? 36))
+  menu.portCount = n
+  patchBoardItem(menu.side, menu.id, { kind: menu.kind, port_count: n })
+}
+
+function removeBoardFromMenu() {
+  const menu = boardMenu.value
+  if (!menu) return
+  removeItemOnSide(menu.side, menu.id)
+  closeBoardMenu()
 }
 
 function isPlacedSelected(side: PanelSide, id: string) {
@@ -351,8 +545,7 @@ function onCellClick(side: PanelSide, row: number, col: number) {
   const occ = side === 'front' ? frontOcc.value : rearOcc.value
   const occupied = occ.get(`${row}:${col}`)
 
-  // 未选组件库：点已放置块 → 选中（Slot 双击仍可编辑，见 onSlotAreaClick）
-  if (!selectedPaletteId.value) {
+  if (props.freeBoard || !selectedPaletteId.value) {
     if (occupied) selectPlacedItem(side, occupied)
     else selectedPlaced.value = null
     return
@@ -361,7 +554,6 @@ function onCellClick(side: PanelSide, row: number, col: number) {
   const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
   if (!pal || pal.side !== side) return
 
-  // 再次点击同组件已占区：移除
   if (occupied && occupied.id === pal.id) {
     removeItemOnSide(side, pal.id)
     cancelAnchor()
@@ -369,36 +561,20 @@ function onCellClick(side: PanelSide, row: number, col: number) {
 }
 
 function onCellEnter(side: PanelSide, row: number, col: number) {
-  if (!props.editable || !selectedPaletteId.value) return
-  const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
-  if (!pal || pal.side !== side) return
+  if (!props.editable) return
+  if (!props.freeBoard && !selectedPaletteId.value) return
+  if (!props.freeBoard) {
+    const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
+    if (!pal || pal.side !== side) return
+  }
   hoverCell.value = { side, row, col }
   if (dragOrigin.value && dragOrigin.value.side === side) {
     anchor.value = dragOrigin.value
   }
 }
 
-function onCellMouseDown(side: PanelSide, row: number, col: number, ev: MouseEvent) {
-  if (!props.editable || !selectedPaletteId.value) return
-  const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
-  if (!pal || pal.side !== side) return
-  ev.preventDefault()
-  dragOrigin.value = { side, row, col }
-  anchor.value = { side, row, col }
-  hoverCell.value = { side, row, col }
-}
-
-function onCellMouseUp(side: PanelSide, row: number, col: number) {
-  if (!props.editable || !selectedPaletteId.value) {
-    cancelAnchor()
-    return
-  }
+function finishBoxSelect(side: PanelSide, row: number, col: number) {
   if (!dragOrigin.value || dragOrigin.value.side !== side) {
-    cancelAnchor()
-    return
-  }
-  const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
-  if (!pal || pal.side !== side) {
     cancelAnchor()
     return
   }
@@ -407,7 +583,54 @@ function onCellMouseUp(side: PanelSide, row: number, col: number) {
     cancelAnchor()
     return
   }
+  if (props.freeBoard) {
+    placeFreeBoard(side, r, c, w, h)
+    return
+  }
+  const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
+  if (!pal || pal.side !== side) {
+    cancelAnchor()
+    return
+  }
   placeItem(side, r, c, w, h)
+}
+
+function onWindowMouseUp() {
+  if (!dragOrigin.value) return
+  const end = hoverCell.value
+  if (!end || end.side !== dragOrigin.value.side) {
+    cancelAnchor()
+    return
+  }
+  finishBoxSelect(end.side, end.row, end.col)
+}
+
+function onCellMouseDown(side: PanelSide, row: number, col: number, ev: MouseEvent) {
+  if (!props.editable || ev.button !== 0) return
+  if (!props.freeBoard) {
+    if (!selectedPaletteId.value) return
+    const pal = props.palette.find((p) => p.id === selectedPaletteId.value)
+    if (!pal || pal.side !== side) return
+  } else {
+    const occ = side === 'front' ? frontOcc.value : rearOcc.value
+    if (occ.get(`${row}:${col}`)) return
+  }
+  ev.preventDefault()
+  closeBoardMenu()
+  dragOrigin.value = { side, row, col }
+  anchor.value = { side, row, col }
+  hoverCell.value = { side, row, col }
+  window.addEventListener('mouseup', onWindowMouseUp, { once: true })
+}
+
+function onCellMouseUp(side: PanelSide, row: number, col: number) {
+  if (!props.editable) {
+    cancelAnchor()
+    return
+  }
+  if (!dragOrigin.value) return
+  window.removeEventListener('mouseup', onWindowMouseUp)
+  finishBoxSelect(side, row, col)
 }
 
 function selectPalette(id: string, side: PanelSide) {
@@ -432,7 +655,7 @@ function allCells() {
 }
 
 const cells = computed(() => allCells())
-const placing = computed(() => !!selectedPaletteId.value)
+const placing = computed(() => (props.freeBoard ? !!dragOrigin.value : !!selectedPaletteId.value))
 
 function findSlot(slotIndex?: number): DesignSlotAttr | undefined {
   if (slotIndex == null) return undefined
@@ -712,6 +935,13 @@ function onPlacedItemClick(side: PanelSide, item: PanelLayoutItem) {
   onSlotAreaClick(side, item)
 }
 
+function onPlacedItemContext(side: PanelSide, item: PanelLayoutItem, ev: MouseEvent) {
+  if (props.freeBoard && (item.kind === 'line_card' || item.kind === 'port_main' || item.kind === 'slot')) {
+    onBoardContext(side, item, ev)
+    return
+  }
+}
+
 function onPortClick(side: PanelSide, item: PanelLayoutItem, _iface: DesignSlotInterface) {
   onSlotAreaClick(side, item)
 }
@@ -749,7 +979,9 @@ function portTypeShort(t: string) {
   <div class="panel-schematic">
     <div class="size-bar">
       <strong>面板网格</strong>
-      <span class="dim">前后面板共用画布</span>
+      <span class="dim">{{
+        freeBoard ? '拖拽框选空白网格创建业务接口板；右键板卡设置类型和口数' : '前后面板共用画布'
+      }}</span>
       <label class="size-field">
         宽
         <el-input-number
@@ -789,7 +1021,7 @@ function portTypeShort(t: string) {
         class="side-wrap"
         :class="{ active: activeSide === side }"
       >
-        <div v-if="editable" class="palette-box">
+        <div v-if="editable && !freeBoard" class="palette-box">
           <div class="palette-box-head">设备配置及组件</div>
           <div class="palette-row" :class="{ expanded: paletteExpanded[side] }">
             <div class="palette" :ref="(el) => setPaletteRef(side, el)">
@@ -902,6 +1134,7 @@ function portTypeShort(t: string) {
               }"
               :title="itemTypeText(item)"
               @click.stop="onPlacedItemClick(side, item)"
+              @contextmenu.prevent="onPlacedItemContext(side, item, $event)"
             >
               <template v-if="isPortBlock(item)">
                 <div v-if="!usesSwitchPortLayout(item)" class="slot-title">{{ itemTypeText(item) }}</div>
@@ -985,6 +1218,63 @@ function portTypeShort(t: string) {
       </section>
       <div class="sides-divider" aria-hidden="true" />
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="boardMenu"
+        class="board-ctx"
+        :style="{ left: `${boardMenu.x}px`, top: `${boardMenu.y}px` }"
+        @click.stop
+        @contextmenu.prevent
+      >
+        <div class="board-ctx-title">业务接口板</div>
+        <label class="board-ctx-row">
+          <span>接口类型</span>
+          <el-select
+            :model-value="boardMenu.kind"
+            size="small"
+            teleported
+            @change="(v: string) => onBoardMenuKind(v as SwitchIfaceBoardKind)"
+          >
+            <el-option
+              v-for="opt in SWITCH_IFACE_BOARD_OPTIONS"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </label>
+        <label class="board-ctx-row">
+          <span>接口个数</span>
+          <el-select
+            :model-value="boardMenu.portPreset"
+            size="small"
+            teleported
+            @change="onBoardMenuPreset"
+          >
+            <el-option
+              v-for="n in SWITCH_IFACE_BOARD_PORT_PRESETS"
+              :key="n"
+              :label="String(n)"
+              :value="String(n)"
+            />
+            <el-option label="其他" value="other" />
+          </el-select>
+        </label>
+        <label v-if="boardMenu.portPreset === 'other'" class="board-ctx-row">
+          <span>自定义</span>
+          <el-input-number
+            :model-value="boardMenu.portCount"
+            :min="1"
+            :max="128"
+            :controls="false"
+            size="small"
+            @change="onBoardMenuCustomCount"
+          />
+        </label>
+        <el-button type="danger" link size="small" @click="removeBoardFromMenu">删除接口板</el-button>
+      </div>
+    </Teleport>
 
   </div>
 </template>
@@ -1581,5 +1871,34 @@ function portTypeShort(t: string) {
   .size-badge {
     margin-left: 0;
   }
+}
+.board-ctx {
+  position: fixed;
+  z-index: 4000;
+  min-width: 240px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.board-ctx-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.board-ctx-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+.board-ctx-row :deep(.el-select),
+.board-ctx-row :deep(.el-input-number) {
+  width: 150px;
 }
 </style>
