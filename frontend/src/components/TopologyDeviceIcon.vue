@@ -70,27 +70,25 @@ const variantKey = computed(() => {
       <rect x="37" y="18" width="3" height="12" rx="0.8" fill="#fff" opacity="0.25" />
     </g>
 
-    <!-- 汇聚：宽机箱 + 中分 -->
+    <!-- 汇聚：与其它交换机同宽机箱 + 分区端口 -->
     <g v-else-if="variantKey === 'switch:aggregation'" :key="variantKey">
-      <rect x="4" y="15" width="40" height="20" rx="3" :fill="FILL" />
-      <rect x="8" y="19" width="18" height="12" rx="1.5" fill="#fff" opacity="0.28" />
-      <rect x="28" y="19" width="12" height="12" rx="1.5" fill="#fff" opacity="0.45" />
-      <circle cx="12" cy="25" r="1.2" fill="#fff" />
-      <circle cx="17" cy="25" r="1.2" fill="#fff" />
-      <circle cx="22" cy="25" r="1.2" fill="#fff" opacity="0.6" />
-      <circle cx="32" cy="25" r="1.5" fill="#fff" />
-      <circle cx="36" cy="25" r="1.5" fill="#fff" />
+      <rect x="5" y="14" width="38" height="22" rx="3" :fill="FILL" />
+      <rect x="9" y="18" width="16" height="12" rx="1.5" fill="#fff" opacity="0.28" />
+      <rect x="27" y="18" width="12" height="12" rx="1.5" fill="#fff" opacity="0.45" />
+      <circle cx="12" cy="24" r="1.2" fill="#fff" />
+      <circle cx="17" cy="24" r="1.2" fill="#fff" />
+      <circle cx="22" cy="24" r="1.2" fill="#fff" opacity="0.6" />
+      <circle cx="31" cy="24" r="1.5" fill="#fff" />
+      <circle cx="35" cy="24" r="1.5" fill="#fff" />
     </g>
 
-    <!-- 核心：立式机柜 -->
+    <!-- 核心：同宽横向机框 + 线卡槽暗示（不再用窄立柜） -->
     <g v-else-if="variantKey.startsWith('switch:')" :key="variantKey">
-      <rect x="14" y="6" width="20" height="36" rx="2.5" :fill="FILL" />
-      <rect x="17" y="10" width="14" height="3" rx="0.8" fill="#fff" opacity="0.4" />
-      <rect x="17" y="16" width="14" height="3" rx="0.8" fill="#fff" opacity="0.28" />
-      <rect x="17" y="22" width="14" height="3" rx="0.8" fill="#fff" opacity="0.28" />
-      <rect x="17" y="28" width="14" height="3" rx="0.8" fill="#fff" opacity="0.28" />
-      <rect x="17" y="34" width="14" height="3" rx="0.8" fill="#fff" opacity="0.28" />
-      <circle cx="29" cy="11.5" r="1.1" fill="#fff" />
+      <rect x="5" y="14" width="38" height="22" rx="3" :fill="FILL" />
+      <rect x="9" y="17" width="30" height="3.2" rx="0.8" fill="#fff" opacity="0.4" />
+      <rect x="9" y="22" width="30" height="3.2" rx="0.8" fill="#fff" opacity="0.28" />
+      <rect x="9" y="27" width="30" height="3.2" rx="0.8" fill="#fff" opacity="0.28" />
+      <circle cx="36" cy="18.6" r="1.1" fill="#fff" />
     </g>
 
     <!-- 1U 服务器：扁条机架 -->

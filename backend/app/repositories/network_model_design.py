@@ -68,3 +68,24 @@ class NetworkWiringRuleRepository(BaseRepository[NetworkWiringRule]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_by_project(self, project_id: uuid.UUID) -> list[NetworkWiringRule]:
+        stmt = (
+            select(NetworkWiringRule)
+            .where(
+                NetworkWiringRule.project_id == project_id,
+                NetworkWiringRule.deleted_at.is_(None),
+            )
+            .order_by(NetworkWiringRule.updated_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_all(self) -> list[NetworkWiringRule]:
+        stmt = (
+            select(NetworkWiringRule)
+            .where(NetworkWiringRule.deleted_at.is_(None))
+            .order_by(NetworkWiringRule.updated_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

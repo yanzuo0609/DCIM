@@ -84,14 +84,21 @@ class NetworkDesignModel(BaseModel):
 
 
 class NetworkWiringRule(BaseModel):
-    """拓扑自动/半自动布线规则。"""
+    """全局布线规则（所有项目通用；project_id/topology_id 仅作创建溯源）。"""
 
     __tablename__ = "network_wiring_rule"
 
-    topology_id: Mapped[uuid.UUID] = mapped_column(
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("network_project.id"),
+        nullable=True,
+        index=True,
+    )
+    # 创建时所属拓扑（可选，仅作溯源）
+    topology_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("network_topology.id"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)

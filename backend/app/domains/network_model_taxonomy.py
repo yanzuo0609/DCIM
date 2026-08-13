@@ -108,6 +108,14 @@ SWITCH_ROLE_OPTIONS = [
     TaxonomyOption(value="gigabit", label="千兆交换机"),
     TaxonomyOption(value="ten_gigabit", label="万兆交换机"),
     TaxonomyOption(value="core", label="核心交换机"),
+    TaxonomyOption(value="aggregation", label="汇聚交换机"),
+]
+
+PORT_SPEED_OPTIONS = [
+    TaxonomyOption(value="1g", label="1G"),
+    TaxonomyOption(value="10g", label="10G"),
+    TaxonomyOption(value="25g", label="25G"),
+    TaxonomyOption(value="40_100g", label="40/100G"),
 ]
 
 CORE_CARD_TYPE_OPTIONS = [
@@ -217,77 +225,116 @@ def _normalize_switch_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
-    """slot_count 驱动 slots[]，每槽可选千兆/万兆/RAID/磁盘插槽。"""
-    raw_slots = attrs.get("slots")
-    slots: list[dict[str, Any]] = []
-    if isinstance(raw_slots, list):
-        for item in raw_slots:
+    """slot_count 驱动 server_slots / slots[]；磁盘槽位按高度封顶。"""
+    try:
+        form_u = int(attrs.get("form_factor_u") or 1)
+    except (TypeError, ValueError):
+        form_u = 1
+    if form_u >= 4:
+        form_u = 4
+        front_max = 48
+    elif form_u >= 2:
+        form_u = 2
+        front_max = 24
+    else:
+        form_u = 1
+        front_max = 4
+    attrs["form_factor_u"] = form_u
+    attrs["disk_front_max"] = front_max
+    attrs["disk_rear_max"] = 6
+    try:
+        attrs["disk_front_count"] = max(0, min(front_max, int(attrs.get("disk_front_count") or 0)))
+    except (TypeError, ValueError):
+        attrs["disk_front_count"] = min(4, front_max)
+    try:
+        attrs["disk_rear_count"] = max(0, min(6, int(attrs.get("disk_rear_count") or 0)))
+    except (TypeError, ValueError):
+        attrs["disk_rear_count"] = 0
+
+    raw_server = attrs.get("server_slots")
+    server_slots: list[dict[str, Any]] = []
+    if isinstance(raw_server, list):
+        for item in raw_server:
             if isinstance(item, dict):
-                slots.append(dict(item))
+                server_slots.append(dict(item))
+
+    # 若无 server_slots，从旧 slots 迁移
+    if not server_slots:
+        raw_slots = attrs.get("slots")
+        if isinstance(raw_slots, list):
+            for item in raw_slots:
+                if not isinstance(item, dict):
+                    continue
+                stype = str(item.get("type") or "nic_10g")
+                pc = max(0, min(16, int(item.get("port_count") or 2)))
+                entry = {
+                    "index": int(item.get("index") or len(server_slots) + 1),
+                    "ipmi_count": 0,
+                    "hdmi_count": 0,
+                    "usb_count": 0,
+                    "ports_10g": pc if stype == "nic_10g" else 0,
+                    "ports_1g": pc if stype == "nic_1g" else 0,
+                    "port_start": 1,
+                }
+                if stype not in ("nic_10g", "nic_1g"):
+                    entry["ports_10g"] = 0
+                    entry["ports_1g"] = 0
+                server_slots.append(entry)
 
     count = attrs.get("slot_count")
     if count is None:
-        count = len(slots) if slots else 2
-    count = max(0, min(16, int(count or 0)))
+        count = len(server_slots) if server_slots else 3
+    count = max(1, min(16, int(count or 3)))
     attrs["slot_count"] = count
 
-    allowed = {"nic_1g", "nic_10g", "raid", "disk_bay", "blank"}
-    while len(slots) < count:
-        idx = len(slots) + 1
-        slots.append({"index": idx, "type": "nic_10g", "port_count": 2})
-    slots = slots[:count]
-    normalized: list[dict[str, Any]] = []
-    for i, slot in enumerate(slots):
-        stype = str(slot.get("type") or "nic_10g")
-        if stype not in allowed:
-            # 兼容旧值
-            if stype in ("nic_25g", "hba"):
-                stype = "nic_10g" if stype == "nic_25g" else "raid"
-            elif stype in ("empty",):
-                stype = "blank"
-            else:
-                stype = "nic_10g"
-        entry: dict[str, Any] = {"index": i + 1, "type": stype}
-        if stype in ("nic_1g", "nic_10g"):
-            entry["port_count"] = max(1, min(8, int(slot.get("port_count") or 2)))
-        elif stype == "raid":
-            level = str(slot.get("raid_level") or "raid1")
-            entry["raid_level"] = level
-            entry["port_count"] = 0
-        elif stype == "blank":
-            entry["port_count"] = 0
-        else:  # disk_bay
-            entry["port_count"] = max(1, min(8, int(slot.get("port_count") or 1)))
-        # 可选面板定位
-        if slot.get("panel_row") is not None:
-            entry["panel_row"] = int(slot["panel_row"])
-        if slot.get("panel_col") is not None:
-            entry["panel_col"] = int(slot["panel_col"])
-        # Slot 内接口本端/对端设计信息
-        raw_ifs = slot.get("interfaces")
-        if stype in ("nic_1g", "nic_10g", "disk_bay") and isinstance(raw_ifs, list):
-            def_type = "1g" if stype == "nic_1g" else "10g" if stype == "nic_10g" else "disk"
-            count = int(entry.get("port_count") or 0)
-            ifs: list[dict[str, Any]] = []
-            for j in range(count):
-                src = raw_ifs[j] if j < len(raw_ifs) and isinstance(raw_ifs[j], dict) else {}
-                ifs.append(
-                    {
-                        "index": j + 1,
-                        "port_type": def_type if stype in ("nic_1g", "nic_10g") else str(src.get("port_type") or def_type),
-                        "local_label": str(src.get("local_label") or f"口{j + 1}"),
-                        "local_info": str(src.get("local_info") or ""),
-                        "peer_label": str(src.get("peer_label") or ""),
-                        "peer_info": str(src.get("peer_info") or ""),
-                    }
-                )
-            entry["interfaces"] = ifs
+    while len(server_slots) < count:
+        idx = len(server_slots) + 1
+        server_slots.append(
+            {
+                "index": idx,
+                "ipmi_count": 1 if idx == 1 else 0,
+                "hdmi_count": 1 if idx == 1 else 0,
+                "usb_count": 2 if idx == 1 else 0,
+                "ports_10g": 2,
+                "ports_1g": 2,
+                "port_start": 1,
+            }
+        )
+    server_slots = server_slots[:count]
+    normalized_server: list[dict[str, Any]] = []
+    design_slots: list[dict[str, Any]] = []
+    for i, slot in enumerate(server_slots):
+        entry = {
+            "index": i + 1,
+            "ipmi_count": max(0, min(4, int(slot.get("ipmi_count") or 0))),
+            "hdmi_count": max(0, min(4, int(slot.get("hdmi_count") or 0))),
+            "usb_count": max(0, min(8, int(slot.get("usb_count") or 0))),
+            "ports_10g": max(0, min(16, int(slot.get("ports_10g") or 0))),
+            "ports_1g": max(0, min(16, int(slot.get("ports_1g") or 0))),
+            "port_start": 1,
+        }
+        normalized_server.append(entry)
+        n10 = int(entry["ports_10g"])
+        n1 = int(entry["ports_1g"])
+        if n10 <= 0 and n1 <= 0:
+            design_slots.append({"index": i + 1, "type": "blank", "port_count": 0, "interfaces": []})
+        elif n10 > 0:
+            design_slots.append({"index": i + 1, "type": "nic_10g", "port_count": n10})
         else:
-            entry["interfaces"] = []
-        normalized.append(entry)
-    attrs["slots"] = normalized
+            design_slots.append({"index": i + 1, "type": "nic_1g", "port_count": max(1, n1)})
 
-    # 面板网格与定位（前/后面板）
+    attrs["server_slots"] = normalized_server
+    attrs["slots"] = design_slots
+
+    try:
+        attrs["fan_count"] = max(0, min(16, int(attrs.get("fan_count") or 0)))
+    except (TypeError, ValueError):
+        attrs["fan_count"] = 4
+    try:
+        attrs["psu_count"] = max(0, min(8, int(attrs.get("psu_count") or 0)))
+    except (TypeError, ValueError):
+        attrs["psu_count"] = 2
+
     panel = attrs.get("panel_layout")
     if not isinstance(panel, dict) or "front" not in panel:
         panel = {
@@ -306,27 +353,60 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _server_defaults(subtype: str) -> dict[str, Any]:
+    form_u = 2 if subtype == "storage" else 1
+    front_max = 24 if form_u == 2 else 4
     base = {
-        "form_factor_u": 1 if subtype != "storage" else 2,
+        "form_factor_u": form_u,
         "cpu_sockets": 2,
         "cpu_cores_per_socket": 16 if subtype != "hpc" else 32,
         "memory_gb": 256 if subtype == "hpc" else 128,
         "memory_modules": 8,
         "memory_module_gb": 16 if subtype != "hpc" else 32,
-        "slot_count": 2 if subtype != "hpc" else 3,
+        "slot_count": 3,
+        "server_slots": [
+            {
+                "index": 1,
+                "ipmi_count": 1,
+                "hdmi_count": 1,
+                "usb_count": 2,
+                "ports_10g": 2,
+                "ports_1g": 2,
+                "port_start": 1,
+            },
+            {
+                "index": 2,
+                "ipmi_count": 0,
+                "hdmi_count": 0,
+                "usb_count": 0,
+                "ports_10g": 2,
+                "ports_1g": 2,
+                "port_start": 1,
+            },
+            {
+                "index": 3,
+                "ipmi_count": 0,
+                "hdmi_count": 0,
+                "usb_count": 0,
+                "ports_10g": 2,
+                "ports_1g": 2,
+                "port_start": 1,
+            },
+        ],
         "slots": [
             {"index": 1, "type": "nic_10g", "port_count": 2},
-            {"index": 2, "type": "raid", "raid_level": "raid1", "port_count": 0},
+            {"index": 2, "type": "nic_10g", "port_count": 2},
+            {"index": 3, "type": "nic_10g", "port_count": 2},
         ],
         "psu_count": 2,
         "psu_watt": 800,
         "psu_redundant": True,
-        "fan_count": 4,
+        "fan_count": 4 if form_u == 1 else 6,
         "bmc_ports": 1,
         "usb_ports": 2,
-        "disk_front_count": 8 if subtype == "storage" else 4,
+        "disk_front_count": min(4, front_max) if subtype != "storage" else min(8, front_max),
         "disk_rear_count": 2,
-        "disk_rear_max": 4,
+        "disk_front_max": front_max,
+        "disk_rear_max": 6,
         "panel_layout": {
             "cols": 38,
             "rows": 16,
@@ -336,8 +416,6 @@ def _server_defaults(subtype: str) -> dict[str, Any]:
         },
         "custom_attributes": [],
     }
-    if subtype == "hpc":
-        base["slots"].append({"index": 3, "type": "nic_1g", "port_count": 4})
     return _normalize_server_slots(base)
 
 
@@ -346,14 +424,35 @@ def _network_defaults(subtype: str) -> dict[str, Any]:
         return _normalize_switch_attrs(
             {
                 "switch_role": "gigabit",
+                "card_slot_count": 2,
+                "switch_slots": [
+                    {
+                        "index": 1,
+                        "purpose": "DOWNLINK",
+                        "card_type": "gigabit",
+                        "port_count": 48,
+                        "port_start": 1,
+                    },
+                    {
+                        "index": 2,
+                        "purpose": "UPLINK",
+                        "card_type": "ten_gigabit",
+                        "port_count": 6,
+                        "port_start": 49,
+                    },
+                ],
                 "downlink_type": "1g",
                 "downlink_count": 48,
                 "optical_card_count": 1,
                 "optical_ports_per_card": 48,
                 "uplink_type": "10g",
-                "uplink_count": 4,
+                "uplink_count": 6,
                 "uplink_position": "right",
-                "line_cards": [{"id": "card1", "card_type": "ten_gigabit", "port_count": 48}],
+                "mgmt_ports": 1,
+                "line_cards": [
+                    {"id": "slot1", "card_type": "gigabit", "port_count": 48},
+                    {"id": "slot2", "card_type": "ten_gigabit", "port_count": 6},
+                ],
                 "chassis_height_u": 1,
                 "fan_count": 2,
                 "psu_count": 2,
@@ -396,16 +495,68 @@ def _network_defaults(subtype: str) -> dict[str, Any]:
 
 def _security_defaults(subtype: str) -> dict[str, Any]:
     return {
+        "chassis_height_u": 1,
+        "form_factor_u": 1,
+        "slot_count": 4,
+        "security_slots": [
+            {
+                "index": 1,
+                "control_count": 1,
+                "ha_count": 2,
+                "mgmt_count": 1,
+                "usb_count": 2,
+                "ports_10g": 4,
+                "ports_1g": 2,
+            },
+            {
+                "index": 2,
+                "control_count": 0,
+                "ha_count": 0,
+                "mgmt_count": 0,
+                "usb_count": 0,
+                "ports_10g": 4,
+                "ports_1g": 2,
+            },
+            {
+                "index": 3,
+                "control_count": 0,
+                "ha_count": 0,
+                "mgmt_count": 0,
+                "usb_count": 0,
+                "ports_10g": 4,
+                "ports_1g": 2,
+            },
+            {
+                "index": 4,
+                "control_count": 0,
+                "ha_count": 0,
+                "mgmt_count": 0,
+                "usb_count": 0,
+                "ports_10g": 4,
+                "ports_1g": 2,
+            },
+        ],
         "data_port_type": "10g" if subtype in ("firewall", "ddos", "ips") else "1g",
-        "data_port_count": 8 if subtype != "crypto" else 4,
+        "data_port_count": 16 if subtype != "crypto" else 8,
         "control_ports": 1,
         "ha_ports": 2 if subtype in ("firewall", "vpn", "ddos") else 0,
         "mgmt_ports": 1,
+        "usb_ports": 2,
+        "fan_count": 2,
+        "psu_count": 2,
         "cpu_cores": 8,
         "memory_gb": 32,
         "disk_gb": 480,
         "disk_count": 2,
         "throughput_gbps": None,
+        "panel_layout": {
+            "cols": 38,
+            "rows": 16,
+            "grid_scale": 4,
+            "front": {"cols": 38, "rows": 16, "items": []},
+            "rear": {"cols": 38, "rows": 16, "items": []},
+        },
+        "custom_attributes": [],
     }
 
 
@@ -583,8 +734,8 @@ def merge_defaults(category: str, subtype: str, attributes: dict[str, Any] | Non
     # 后面板硬盘硬上限
     if category == "server":
         rear = int(merged.get("disk_rear_count") or 0)
-        merged["disk_rear_count"] = max(0, min(4, rear))
-        merged["disk_rear_max"] = 4
+        merged["disk_rear_count"] = max(0, min(6, rear))
+        merged["disk_rear_max"] = 6
         merged = _normalize_server_slots(merged)
     if category == "network" and subtype == "switch":
         merged = _normalize_switch_attrs(merged)

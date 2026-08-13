@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import uuid
@@ -121,6 +122,9 @@ def _normalize_kind(kind: str | NetworkNodeKind) -> str:
 
 DEFAULT_PROJECT_CODE = "DEFAULT"
 DEFAULT_PROJECT_NAME = "默认项目"
+
+# SQLite 单写：串行化大画布保存，避免 database is locked
+_canvas_save_lock = asyncio.Lock()
 
 
 class NetworkDesignService:
@@ -432,6 +436,16 @@ class NetworkDesignService:
         payload: CanvasSaveRequest,
         user_id: uuid.UUID | None = None,
     ) -> NetworkTopologyDetailResponse:
+        """串行化大画布写入，配合 SQLite WAL/busy_timeout 降低 database is locked。"""
+        async with _canvas_save_lock:
+            return await self._save_canvas_impl(topology_id, payload, user_id)
+
+    async def _save_canvas_impl(
+        self,
+        topology_id: uuid.UUID,
+        payload: CanvasSaveRequest,
+        user_id: uuid.UUID | None = None,
+    ) -> NetworkTopologyDetailResponse:
         entity = await self.topology_repo.get_with_canvas(topology_id)
         if not entity:
             raise NotFoundError("Network topology not found")
@@ -464,6 +478,7 @@ class NetworkDesignService:
                 node.contract_device_name = item.contract_device_name
                 node.network_role = item.network_role
                 node.device_group = item.device_group
+                node.device_groups = list(item.device_groups) if item.device_groups else None
                 node.pos_x = item.pos_x
                 node.pos_y = item.pos_y
                 node.switch_port_count = item.switch_port_count
@@ -488,6 +503,7 @@ class NetworkDesignService:
                     contract_device_name=item.contract_device_name,
                     network_role=item.network_role,
                     device_group=item.device_group,
+                    device_groups=list(item.device_groups) if item.device_groups else None,
                     pos_x=item.pos_x,
                     pos_y=item.pos_y,
                     switch_port_count=item.switch_port_count,
@@ -511,10 +527,10 @@ class NetworkDesignService:
                 node.deleted_at = now
                 node.deleted_by = user_id
 
-        for link in entity.links:
-            if link.deleted_at is None:
-                link.deleted_at = now
-                link.deleted_by = user_id
+        # 含已软删链路：同 id 再次保存时恢复，避免主键冲突（与节点 upsert 一致）
+        links_by_id = {link.id: link for link in entity.links}
+        existing_links = {lid: l for lid, l in links_by_id.items() if l.deleted_at is None}
+        incoming_link_ids: set[uuid.UUID] = set()
 
         node_lookup = {
             node.id: node
@@ -530,11 +546,38 @@ class NetworkDesignService:
             if not source_node or not target_node:
                 raise ValidationError("Link references missing node")
             self._validate_link_ports(link_input, source_node, target_node)
-            entity.links.append(
-                NetworkLink(
+            link_type = self._infer_link_type(source_node, target_node, link_input.link_type)
+
+            if link_input.id and link_input.id in links_by_id:
+                link = links_by_id[link_input.id]
+                link.link_type = link_type.value
+                link.source_node_id = source_id
+                link.source_port = link_input.source_port
+                link.target_node_id = target_id
+                link.target_port = link_input.target_port
+                link.label = link_input.label
+                link.source_label = link_input.source_label
+                link.target_label = link_input.target_label
+                link.cable_type = link_input.cable_type
+                link.interface_class = link_input.interface_class
+                link.link_role = link_input.link_role
+                link.connection_type = link_input.connection_type
+                link.speed = link_input.speed
+                link.lag_group = link_input.lag_group
+                link.redundancy_path = link_input.redundancy_path
+                link.media = link_input.media
+                link.module = link_input.module
+                link.cable_length_m = link_input.cable_length_m
+                link.wiring_rule_id = link_input.wiring_rule_id
+                link.deleted_at = None
+                link.deleted_by = None
+                link.updated_by = user_id
+                incoming_link_ids.add(link.id)
+            else:
+                link = NetworkLink(
                     id=link_input.id or uuid.uuid4(),
                     topology_id=topology_id,
-                    link_type=link_input.link_type.value,
+                    link_type=link_type.value,
                     source_node_id=source_id,
                     source_port=link_input.source_port,
                     target_node_id=target_id,
@@ -556,15 +599,24 @@ class NetworkDesignService:
                     created_by=user_id,
                     updated_by=user_id,
                 )
-            )
+                entity.links.append(link)
+                incoming_link_ids.add(link.id)
+
+        for link_id, link in existing_links.items():
+            if link_id not in incoming_link_ids:
+                link.deleted_at = now
+                link.deleted_by = user_id
 
         entity.updated_by = user_id
         await self.session.flush()
         return await self.get_detail(topology_id)
 
     def _validate_canvas(self, payload: CanvasSaveRequest) -> None:
+        # 允许空拓扑（尚无设备时也可维护设备组/规则）；有连线则必须有节点
         if not payload.nodes:
-            raise ValidationError("Topology must contain at least one node")
+            if payload.links:
+                raise ValidationError("Link references unknown node")
+            return
 
         temp_nodes: dict[uuid.UUID, CanvasNodeInput] = {}
         for idx, node in enumerate(payload.nodes):
@@ -587,19 +639,28 @@ class NetworkDesignService:
             if not device:
                 raise ValidationError(f"Associated device not found: {node.name}")
 
+    def _infer_link_type(
+        self,
+        source: CanvasNodeInput | NetworkNode,
+        target: CanvasNodeInput | NetworkNode,
+        fallback: NetworkLinkType | None = None,
+    ) -> NetworkLinkType:
+        kinds = {_normalize_kind(source.kind), _normalize_kind(target.kind)}
+        if kinds == {NetworkNodeKind.SWITCH.value, NetworkNodeKind.SERVER.value}:
+            return NetworkLinkType.SWITCH_SERVER
+        if kinds == {NetworkNodeKind.SWITCH.value, NetworkNodeKind.SECURITY.value}:
+            return NetworkLinkType.SWITCH_SECURITY
+        if kinds == {NetworkNodeKind.SWITCH.value}:
+            return NetworkLinkType.SWITCH_SWITCH
+        return fallback or NetworkLinkType.SWITCH_SWITCH
+
     def _validate_link_kind(
         self, link: CanvasLinkInput, source: CanvasNodeInput, target: CanvasNodeInput
     ) -> None:
-        kinds = {_normalize_kind(source.kind), _normalize_kind(target.kind)}
-        if link.link_type == NetworkLinkType.SWITCH_SERVER:
-            if kinds != {NetworkNodeKind.SWITCH.value, NetworkNodeKind.SERVER.value}:
-                raise ValidationError("switch_server link requires one switch and one server")
-        elif link.link_type == NetworkLinkType.SWITCH_SWITCH:
-            if kinds != {NetworkNodeKind.SWITCH.value}:
-                raise ValidationError("switch_switch link requires two switches")
-        elif link.link_type == NetworkLinkType.SWITCH_SECURITY:
-            if kinds != {NetworkNodeKind.SWITCH.value, NetworkNodeKind.SECURITY.value}:
-                raise ValidationError("switch_security link requires one switch and one security device")
+        # 按端点 kind 自动纠正 link_type，避免布线残留 switch_switch 接服务器导致保存失败
+        expected = self._infer_link_type(source, target, link.link_type)
+        if link.link_type != expected:
+            link.link_type = expected
 
     def _validate_link_ports(
         self,
@@ -670,6 +731,18 @@ class NetworkDesignService:
         port_layout = None
         if node.port_layout:
             port_layout = PortLayout.model_validate(node.port_layout)
+        raw_groups = getattr(node, "device_groups", None)
+        groups: list[str] | None = None
+        if isinstance(raw_groups, list) and raw_groups:
+            seen: set[str] = set()
+            groups = []
+            for item in raw_groups:
+                s = str(item or "").strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    groups.append(s)
+        elif getattr(node, "device_group", None):
+            groups = [str(node.device_group).strip()]
         return NetworkNodeResponse(
             id=node.id,
             topology_id=node.topology_id,
@@ -677,7 +750,11 @@ class NetworkDesignService:
             name=node.name,
             device_id=node.device_id,
             device_model_id=getattr(node, "device_model_id", None),
+            design_model_id=getattr(node, "design_model_id", None),
             contract_device_name=getattr(node, "contract_device_name", None),
+            network_role=getattr(node, "network_role", None),
+            device_group=(groups[0] if groups else getattr(node, "device_group", None)),
+            device_groups=groups,
             pos_x=node.pos_x,
             pos_y=node.pos_y,
             switch_port_count=node.switch_port_count,

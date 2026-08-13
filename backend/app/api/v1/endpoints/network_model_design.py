@@ -167,9 +167,10 @@ async def delete_model(
 async def list_wiring_rules(
     service: Annotated[NetworkModelDesignService, Depends(get_network_model_design_service)],
     _: Annotated[User, Depends(require_permissions("network:view"))],
-    topology_id: uuid.UUID = Query(...),
+    project_id: uuid.UUID | None = Query(None),
+    topology_id: uuid.UUID | None = Query(None),
 ) -> ApiResponse[list[NetworkWiringRuleResponse]]:
-    data = await service.list_wiring_rules(topology_id)
+    data = await service.list_wiring_rules(project_id=project_id, topology_id=topology_id)
     return ApiResponse(data=data, timestamp=datetime.now())
 
 

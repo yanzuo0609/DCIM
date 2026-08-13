@@ -19,6 +19,9 @@ import {
   saveNetworkCanvas,
   updateNetworkProject,
 } from '@/api/network'
+import { annotateNodesPortPurposes } from '@/utils/designModelToNode'
+import { ensureNodeGroupsShape } from '@/utils/deviceGroups'
+import { inferLinkType } from '@/utils/networkPortLayout'
 
 function clampPortLayoutForApi(layout: NetworkNode['port_layout']) {
   if (!layout) return null
@@ -82,6 +85,11 @@ function toCanvasNodes(nodes: NetworkNode[]): CanvasNodeInput[] {
       contract_device_name: n.contract_device_name ?? null,
       network_role: n.network_role ?? null,
       device_group: n.device_group ?? null,
+      device_groups: Array.isArray(n.device_groups)
+        ? n.device_groups
+        : n.device_group
+          ? [n.device_group]
+          : null,
       pos_x: n.pos_x,
       pos_y: n.pos_y,
       switch_port_count: Math.max(1, Math.min(128, n.switch_port_count || 48)),
@@ -92,29 +100,38 @@ function toCanvasNodes(nodes: NetworkNode[]): CanvasNodeInput[] {
   })
 }
 
-function toCanvasLinks(links: NetworkLink[]): CanvasLinkInput[] {
-  return links.map((l) => ({
-    id: l.id,
-    link_type: l.link_type,
-    source_node_id: l.source_node_id,
-    source_port: l.source_port,
-    target_node_id: l.target_node_id,
-    target_port: l.target_port,
-    label: l.label,
-    source_label: l.source_label ?? null,
-    target_label: l.target_label ?? null,
-    cable_type: l.cable_type ?? null,
-    interface_class: l.interface_class ?? null,
-    link_role: l.link_role ?? null,
-    connection_type: l.connection_type ?? null,
-    speed: l.speed ?? null,
-    lag_group: l.lag_group ?? null,
-    redundancy_path: l.redundancy_path ?? null,
-    media: l.media ?? null,
-    module: l.module ?? null,
-    cable_length_m: l.cable_length_m ?? null,
-    wiring_rule_id: l.wiring_rule_id ?? null,
-  }))
+function toCanvasLinks(links: NetworkLink[], nodes: NetworkNode[]): CanvasLinkInput[] {
+  const map = new Map(nodes.map((n) => [n.id, n]))
+  return links.map((l) => {
+    const source = map.get(l.source_node_id)
+    const target = map.get(l.target_node_id)
+    const link_type =
+      source && target ? inferLinkType(source, target) : l.link_type
+    // 同步纠正内存中的错误类型，避免下次再带错
+    if (link_type !== l.link_type) l.link_type = link_type
+    return {
+      id: l.id,
+      link_type,
+      source_node_id: l.source_node_id,
+      source_port: l.source_port,
+      target_node_id: l.target_node_id,
+      target_port: l.target_port,
+      label: l.label,
+      source_label: l.source_label ?? null,
+      target_label: l.target_label ?? null,
+      cable_type: l.cable_type ?? null,
+      interface_class: l.interface_class ?? null,
+      link_role: l.link_role ?? null,
+      connection_type: l.connection_type ?? null,
+      speed: l.speed ?? null,
+      lag_group: l.lag_group ?? null,
+      redundancy_path: l.redundancy_path ?? null,
+      media: l.media ?? null,
+      module: l.module ?? null,
+      cable_length_m: l.cable_length_m ?? null,
+      wiring_rule_id: l.wiring_rule_id ?? null,
+    }
+  })
 }
 
 export function useNetworkTopology() {
@@ -145,6 +162,9 @@ export function useNetworkTopology() {
       slots: n.slots || defaultSlots(),
       on_canvas: n.on_canvas !== false,
     }))
+    for (const n of nodes.value) ensureNodeGroupsShape(n)
+    // 旧拓扑补全端口 Purpose（按 group.role / 板卡光口 vs 上联）
+    annotateNodesPortPurposes(nodes.value)
     links.value = detail.links
   }
 
@@ -281,32 +301,57 @@ export function useNetworkTopology() {
     await selectTopology(currentId.value, false)
   }
 
-  async function saveCanvas() {
+  async function saveCanvas(opts?: { silent?: boolean }) {
     if (!currentId.value) return false
+    // 串行化：避免静默保存与手动保存并发触发 SQLite database is locked
+    while (saving.value) {
+      await new Promise((r) => setTimeout(r, 80))
+      if (!currentId.value) return false
+    }
     saving.value = true
+    const maxAttempts = 4
     try {
-      const detail = await saveNetworkCanvas(currentId.value, {
-        nodes: toCanvasNodes(nodes.value),
-        links: toCanvasLinks(links.value),
-      })
-      applyDetail(detail)
-      ElMessage.success('保存成功')
-      return true
-    } catch (err: unknown) {
-      const data = (
-        err as {
-          response?: {
-            data?: {
-              message?: string
-              details?: { errors?: Array<{ loc?: unknown[]; msg?: string }> }
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const detail = await saveNetworkCanvas(currentId.value, {
+            nodes: toCanvasNodes(nodes.value),
+            links: toCanvasLinks(links.value, nodes.value),
+          })
+          applyDetail(detail)
+          if (!opts?.silent) ElMessage.success('保存成功')
+          return true
+        } catch (err: unknown) {
+          const data = (
+            err as {
+              response?: {
+                data?: {
+                  message?: string
+                  details?: {
+                    detail?: string
+                    errors?: Array<{ loc?: unknown[]; msg?: string }>
+                  }
+                }
+              }
             }
+          )?.response?.data
+          const serverDetail =
+            typeof data?.details?.detail === 'string' ? data.details.detail : ''
+          const locked =
+            /database is locked/i.test(serverDetail) ||
+            /database is locked/i.test(String(data?.message || ''))
+          if (locked && attempt < maxAttempts - 1) {
+            await new Promise((r) => setTimeout(r, 300 * (attempt + 1)))
+            continue
           }
+          const first = data?.details?.errors?.[0]
+          const loc = Array.isArray(first?.loc)
+            ? first.loc.filter((x) => x !== 'body').join('.')
+            : ''
+          const validation = first?.msg ? `${loc ? `${loc}: ` : ''}${first.msg}` : ''
+          ElMessage.error(validation || serverDetail || data?.message || '保存失败')
+          return false
         }
-      )?.response?.data
-      const first = data?.details?.errors?.[0]
-      const loc = Array.isArray(first?.loc) ? first.loc.filter((x) => x !== 'body').join('.') : ''
-      const detail = first?.msg ? `${loc ? `${loc}: ` : ''}${first.msg}` : ''
-      ElMessage.error(detail || data?.message || '保存失败')
+      }
       return false
     } finally {
       saving.value = false

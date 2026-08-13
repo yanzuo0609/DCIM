@@ -1,6 +1,7 @@
 import type {
   CoreCardType,
   CoreLineCard,
+  FramePort,
   LayoutSlotDef,
   NetworkNode,
   NetworkNodeKind,
@@ -16,11 +17,39 @@ import {
   applySwitchLayoutConfig,
   defaultPortLayout,
   generatePortsFromSlotsDef,
+  newInterfaceGroup,
+  syncPortsFromSlotsDef,
 } from '@/utils/networkPortLayout'
 import { applyServerFormFactor, defaultServerSlotsDef, newServerSlotDef } from '@/utils/serverRearPanel'
 import type { SecurityZoneInput } from '@/utils/securityFrontPanel'
 import { nextDeviceName } from '@/utils/topologyClone'
 import { inferDeviceGroupFromDesignModel, inferFabricRoleFromDesignModel } from '@/utils/fabricRole'
+import {
+  annotatePortMediaAndInterface,
+  isBmcSwitchFromDesignModel,
+} from '@/utils/wiringDeviceType'
+import {
+  effectivePortCount,
+  portTypeForSlot,
+  readSwitchSlots,
+  syncSwitchDerivedCounts,
+  type SwitchSlotAttr,
+} from '@/utils/switchModelAttrs'
+import {
+  normalizeServerFormFactor,
+  readServerIfaceSlots,
+  serverPortLocalLabel,
+  serverSlotNamePrefix,
+  syncServerDerivedAttrs,
+  type ServerIfaceSlotAttr,
+} from '@/utils/serverModelAttrs'
+import {
+  normalizeSecurityFormFactor,
+  readSecurityIfaceSlots,
+  securitySlotsToZones,
+  syncSecurityDerivedAttrs,
+  type SecurityIfaceSlotAttr,
+} from '@/utils/securityModelAttrs'
 
 export type DesignSlotType = 'nic_1g' | 'nic_10g' | 'raid' | 'disk_bay' | 'blank'
 
@@ -121,7 +150,8 @@ function asInt(v: unknown, fallback: number): number {
 
 function mapSpeed(v: unknown): PortType {
   const s = String(v || '1g')
-  if (s === '10g' || s === '25g') return '10g'
+  if (s === '25g') return '25g'
+  if (s === '10g') return '10g'
   if (s === '40_100g' || s === '100g') return '40_100g'
   return '1g'
 }
@@ -178,7 +208,7 @@ export function syncCoreLineCardsByHeight(
 function mapSlotKind(type: string): ServerSlotKind {
   if (type === 'nic_1g' || type === 'nic_10g' || type === 'raid') return type
   if (type === 'disk_bay' || type === 'blank') return 'blank'
-  if (type === 'nic_25g') return 'nic_10g'
+  if (type === 'nic_25g') return 'nic_10g' // ServerSlotKind 无 25g 槽位枚举；口类型由 ports 保留 25g
   if (type === 'hba') return 'raid'
   return 'blank'
 }
@@ -232,6 +262,83 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
   if (kind === 'switch') {
     const layout = defaultPortLayout('switch', undefined, 1)
     const role = resolveDesignSwitchRole(attrs)
+    syncSwitchDerivedCounts(attrs)
+    const switchSlots = readSwitchSlots(attrs)
+    if (Array.isArray(attrs.switch_slots) && switchSlots.length) {
+      layout.switch_subtype = role
+      layout.uplink_position = attrs.uplink_position === 'middle' ? 'middle' : 'right'
+      layout.line_cards =
+        role === 'core' || role === 'aggregation'
+          ? switchSlots.map((s) => ({
+              id: `slot${s.index}`,
+              card_type: (s.card_type === 'blank' ? 'blank' : s.card_type) as CoreCardType,
+              port_count: effectivePortCount(s),
+            }))
+          : null
+      const defs: LayoutSlotDef[] = []
+      for (const s of switchSlots) {
+        const count = effectivePortCount(s)
+        if (s.card_type === 'blank' || count <= 0) {
+          defs.push({
+            groups: [],
+            layout_x: null,
+            layout_y: 0,
+            zone_label: `Slot${s.index} 空白`,
+          })
+          continue
+        }
+        const pt = portTypeForSlot(s)
+        // UPLINK / DOWNLINK_UPLINK / 40·100G 板卡 → 上联池；其余为板卡光口
+        const groupRole =
+          s.purpose === 'UPLINK' ||
+          s.purpose === 'DOWNLINK_UPLINK' ||
+          s.card_type === '100g'
+            ? 'uplink'
+            : 'card'
+        defs.push({
+          groups: [
+            newInterfaceGroup(pt, count, {
+              role: groupRole,
+              grid_cols: pt === '40_100g' ? Math.min(2, count) : Math.min(24, count),
+            }),
+          ],
+          layout_x: defs.length === 0 ? 0 : null,
+          layout_y: 0,
+          zone_label: `Slot${s.index} ${s.purpose}`,
+        })
+      }
+      const mgmt = Math.max(0, asInt(attrs.mgmt_ports, 1))
+      if (mgmt > 0) {
+        defs.push({
+          groups: [newInterfaceGroup('1g', mgmt, { role: 'mgmt', grid_cols: mgmt })],
+          layout_x: null,
+          layout_y: 0,
+          zone_label: 'MGMT',
+        })
+      }
+      layout.slots_def = defs
+      layout.slot_count = defs.length
+      layout.main_port_count = asInt(attrs.downlink_count, 0)
+      // 上联口数：含 UPLINK 槽与 40/100G 板卡口
+      const uplinkPorts = switchSlots.reduce((sum, s) => {
+        if (s.card_type === 'blank') return sum
+        if (s.purpose === 'UPLINK' || s.purpose === 'DOWNLINK_UPLINK' || s.card_type === '100g') {
+          return sum + effectivePortCount(s)
+        }
+        return sum
+      }, 0)
+      layout.uplink_port_count = Math.max(asInt(attrs.uplink_count, 0), uplinkPorts)
+      if (role === 'core' || role === 'aggregation') {
+        layout.height_u = Math.max(
+          1,
+          asInt(attrs.chassis_height_u ?? model.height_u, switchSlots.length),
+        )
+      }
+      syncPortsFromSlotsDef(layout, false)
+      applySwitchSlotPortLabels(layout, switchSlots)
+      layout.layout_locked = true
+      return layout
+    }
     if (role === 'core') {
       const heightU = Math.max(1, asInt(attrs.chassis_height_u ?? model.height_u, model.height_u || 1))
       const cards = syncCoreLineCardsByHeight(attrs, heightU)
@@ -249,99 +356,217 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
         1,
         asInt(attrs.downlink_count ?? attrs.lan_count ?? attrs.service_port_count, defaults.mainPortCount),
       )
-      if (role === 'gigabit' || role === 'ten_gigabit' || role === 'aggregation') {
-        const cards = Math.max(1, Math.min(16, asInt(attrs.optical_card_count, 1)))
-        let ppc = asInt(attrs.optical_ports_per_card, 0)
-        if (ppc <= 0) ppc = Math.max(1, Math.floor(downlink / cards))
-        ppc = Math.max(1, Math.min(128, ppc))
-        downlink = Math.max(1, Math.min(256, cards * ppc))
-      }
-      const uplink = Math.max(
-        0,
-        asInt(attrs.uplink_count ?? attrs.wan_count, defaults.uplinkPortCount),
-      )
+      const cards = Math.max(1, Math.min(16, asInt(attrs.optical_card_count, 1)))
+      let ppc = asInt(attrs.optical_ports_per_card, 0)
+      if (ppc <= 0) ppc = Math.max(1, Math.floor(downlink / cards))
+      ppc = Math.max(1, Math.min(128, ppc))
+      downlink = Math.max(1, Math.min(256, cards * ppc))
+      const uplink = Math.max(0, asInt(attrs.uplink_count ?? attrs.wan_count, defaults.uplinkPortCount))
       applySwitchLayoutConfig(layout, {
         subtype: role,
         mainPortCount: downlink,
         uplinkPortCount: uplink,
         uplinkPosition: attrs.uplink_position === 'middle' ? 'middle' : 'right',
       })
+      // 兼容旧属性：板卡口数由 optical_* 推导后写入 layout 主口
+      layout.main_port_count = downlink
+      layout.uplink_port_count = uplink
     }
     layout.layout_locked = true
     return layout
   }
 
   if (kind === 'security') {
-    const layout = defaultPortLayout('security', undefined, heightU)
-    const dataCount = asInt(attrs.data_port_count, 8)
-    const dataType = mapSpeed(attrs.data_port_type)
-    const ha = asInt(attrs.ha_ports, 0)
-    const mgmt = asInt(attrs.mgmt_ports, 1)
-    const control = asInt(attrs.control_ports, 1)
-    const zones: SecurityZoneInput[] = [
-      { label: 'DATA', port_type: dataType, count: dataCount, zone_layout: 'two_row' },
-    ]
-    if (control > 0) {
-      zones.push({ label: 'CONTROL', port_type: '1g', count: control, zone_layout: 'single_row' })
+    const heightSec = normalizeSecurityFormFactor(attrs.chassis_height_u ?? attrs.form_factor_u ?? heightU)
+    const layout = defaultPortLayout('security', undefined, heightSec)
+    syncSecurityDerivedAttrs(attrs)
+    const ifaceSlots = readSecurityIfaceSlots(attrs)
+    let zones: SecurityZoneInput[]
+    if (Array.isArray(attrs.security_slots) && ifaceSlots.length) {
+      zones = securitySlotsToZones(ifaceSlots)
+    } else {
+      const dataCount = asInt(attrs.data_port_count, 8)
+      const dataType = mapSpeed(attrs.data_port_type)
+      const ha = asInt(attrs.ha_ports, 0)
+      const mgmt = asInt(attrs.mgmt_ports, 1)
+      const control = asInt(attrs.control_ports, 1)
+      zones = [{ label: 'DATA', port_type: dataType, count: dataCount, zone_layout: 'two_row' }]
+      if (control > 0) {
+        zones.push({ label: 'CONTROL', port_type: '1g', count: control, zone_layout: 'single_row' })
+      }
+      if (ha > 0) {
+        zones.push({ label: 'HA', port_type: '10g', count: ha, zone_layout: 'single_row' })
+      }
+      if (mgmt > 0) {
+        zones.push({ label: 'MGMT', port_type: '1g', count: mgmt, zone_layout: 'single_row' })
+      }
     }
-    if (ha > 0) {
-      zones.push({ label: 'HA', port_type: '10g', count: ha, zone_layout: 'single_row' })
-    }
-    if (mgmt > 0) {
-      zones.push({ label: 'MGMT', port_type: '1g', count: mgmt, zone_layout: 'single_row' })
-    }
-    applySecurityLayoutConfig(layout, { heightU, zones, preservePeers: false })
+    applySecurityLayoutConfig(layout, { heightU: heightSec, zones, preservePeers: false })
+    applySecurityIfacePortLabels(layout, ifaceSlots)
     layout.layout_locked = true
     return layout
   }
 
-  const formFactor = (heightU === 2 || heightU === 4 ? heightU : 1) as 1 | 2 | 4
+  const formFactor = normalizeServerFormFactor(attrs.form_factor_u ?? heightU)
   const layout = defaultPortLayout('server', undefined, formFactor)
   applyServerFormFactor(layout, formFactor)
-  const slots = normalizeDesignSlots(attrs)
-  if (slots.length) {
-    const defs: LayoutSlotDef[] = slots.map((slot) => {
-      const kindSlot = mapSlotKind(String(slot.type))
-      if (slot.type === 'blank') {
-        return {
-          ...newServerSlotDef('blank', 0, 'horizontal'),
-          zone_label: '空白',
-        }
-      }
-      if (slot.type === 'disk_bay') {
-        const bay = Math.max(1, asInt(slot.port_count, 1))
-        return {
-          ...newServerSlotDef('blank', 0, 'horizontal'),
-          zone_label: `磁盘×${bay}`,
-        }
-      }
-      if (slot.type === 'raid') {
-        return {
-          ...newServerSlotDef('raid', 0, 'horizontal'),
-          zone_label: String(slot.raid_level || 'raid1').toUpperCase(),
-        }
-      }
-      const portCount = asInt(slot.port_count, kindSlot.startsWith('nic') ? 2 : 0)
-      return newServerSlotDef(kindSlot, portCount, 'horizontal')
-    })
+  syncServerDerivedAttrs(attrs)
+  const ifaceSlots = readServerIfaceSlots(attrs)
+  if (ifaceSlots.length && (Array.isArray(attrs.server_slots) || Array.isArray(attrs.slots))) {
+    const defs: LayoutSlotDef[] = ifaceSlots.map((s) => buildServerIfaceSlotDef(s))
     layout.slots_def = defs
     layout.slot_count = defs.length
     generatePortsFromSlotsDef(layout, false)
+    applyServerIfaceSlotPortLabels(layout, ifaceSlots)
   } else {
-    layout.slots_def = defaultServerSlotsDef(formFactor)
-    layout.slot_count = layout.slots_def.length
-    generatePortsFromSlotsDef(layout, false)
+    const slots = normalizeDesignSlots(attrs)
+    if (slots.length) {
+      const defs: LayoutSlotDef[] = slots.map((slot) => {
+        const kindSlot = mapSlotKind(String(slot.type))
+        if (slot.type === 'blank') {
+          return {
+            ...newServerSlotDef('blank', 0, 'horizontal'),
+            zone_label: '空白',
+          }
+        }
+        if (slot.type === 'disk_bay') {
+          const bay = Math.max(1, asInt(slot.port_count, 1))
+          return {
+            ...newServerSlotDef('blank', 0, 'horizontal'),
+            zone_label: `磁盘×${bay}`,
+          }
+        }
+        if (slot.type === 'raid') {
+          return {
+            ...newServerSlotDef('raid', 0, 'horizontal'),
+            zone_label: String(slot.raid_level || 'raid1').toUpperCase(),
+          }
+        }
+        const portCount = asInt(slot.port_count, kindSlot.startsWith('nic') ? 2 : 0)
+        return newServerSlotDef(kindSlot, portCount, 'horizontal')
+      })
+      layout.slots_def = defs
+      layout.slot_count = defs.length
+      generatePortsFromSlotsDef(layout, false)
+    } else {
+      layout.slots_def = defaultServerSlotsDef(formFactor)
+      layout.slot_count = layout.slots_def.length
+      generatePortsFromSlotsDef(layout, false)
+    }
   }
   // 前后硬盘数量写入 layout 元数据，供简图展示
   layout.height_u = formFactor
   ;(layout as PortLayout & { disk_front_count?: number; disk_rear_count?: number }).disk_front_count =
     asInt(attrs.disk_front_count, 0)
   ;(layout as PortLayout & { disk_rear_count?: number }).disk_rear_count = Math.min(
-    4,
+    6,
     asInt(attrs.disk_rear_count, 0),
   )
   layout.layout_locked = true
   return layout
+}
+
+function buildServerIfaceSlotDef(slot: ServerIfaceSlotAttr): LayoutSlotDef {
+  const groups = []
+  if (slot.ports_10g > 0) {
+    groups.push(newInterfaceGroup('10g', slot.ports_10g, { role: 'card', grid_cols: Math.min(4, slot.ports_10g) }))
+  }
+  if (slot.ports_1g > 0) {
+    groups.push(newInterfaceGroup('1g', slot.ports_1g, { role: 'card', grid_cols: Math.min(4, slot.ports_1g) }))
+  }
+  if (slot.ipmi_count > 0) {
+    groups.push(newInterfaceGroup('bmc', slot.ipmi_count, { role: 'mgmt', grid_cols: slot.ipmi_count }))
+  }
+  if (slot.hdmi_count > 0) {
+    groups.push(newInterfaceGroup('other', slot.hdmi_count, { role: 'mgmt', grid_cols: slot.hdmi_count }))
+  }
+  if (slot.usb_count > 0) {
+    groups.push(newInterfaceGroup('other', slot.usb_count, { role: 'mgmt', grid_cols: Math.min(4, slot.usb_count) }))
+  }
+  const kind: ServerSlotKind =
+    slot.ports_10g > 0 ? 'nic_10g' : slot.ports_1g > 0 ? 'nic_1g' : groups.length ? 'nic_1g' : 'blank'
+  return {
+    server_slot_kind: kind,
+    orientation: 'horizontal',
+    groups,
+    layout_x: null,
+    layout_y: null,
+    layout_w: null,
+    layout_h: null,
+    zone_label: serverSlotNamePrefix(slot),
+  }
+}
+
+function applyServerIfaceSlotPortLabels(layout: PortLayout, slots: ServerIfaceSlotAttr[]) {
+  if (!layout.ports?.length) return
+  const bySlot = new Map<number, NonNullable<PortLayout['ports']>>()
+  for (const p of layout.ports) {
+    if (p.slot_index == null || p.slot_index <= 0) continue
+    const list = bySlot.get(p.slot_index) || []
+    list.push(p)
+    bySlot.set(p.slot_index, list)
+  }
+  for (const s of slots) {
+    const ports = (bySlot.get(s.index) || []).slice().sort((a, b) => a.id.localeCompare(b.id))
+    const g10 = ports.filter((p) => p.port_type === '10g')
+    const g1 = ports.filter((p) => p.port_type === '1g')
+    const gIpmi = ports.filter((p) => p.port_type === 'bmc')
+    const others = ports.filter((p) => p.port_type === 'other')
+    const vgaN = Math.max(0, Number(s.hdmi_count) || 0)
+    const gVga = others.slice(0, vgaN)
+    const gUsb = others.slice(vgaN)
+    const batches: { tag: string; list: typeof ports }[] = [
+      { tag: '10G', list: g10 },
+      { tag: '1G', list: g1 },
+      { tag: 'IPMI', list: gIpmi },
+      { tag: 'VGA', list: gVga },
+      { tag: 'USB', list: gUsb },
+    ]
+    const seen = new Set<string>()
+    for (const b of batches) {
+      b.list.forEach((p, i) => {
+        seen.add(p.id)
+        p.label = serverPortLocalLabel(s, b.tag, i + 1)
+        if (p.port_type === 'bmc') p.purpose = 'MGMT'
+        else if (!p.purpose) p.purpose = 'DOWNLINK'
+      })
+    }
+    let extra = 0
+    for (const p of ports) {
+      if (seen.has(p.id)) continue
+      extra += 1
+      p.label = serverPortLocalLabel(s, '口', extra)
+      if (!p.purpose) p.purpose = 'DOWNLINK'
+    }
+  }
+}
+
+/** 安全设备：按 zone_label 写入 slotx-10G-(n) / slotx-1G-(n) */
+function applySecurityIfacePortLabels(layout: PortLayout, _slots: SecurityIfaceSlotAttr[]) {
+  if (!layout.ports?.length || !layout.slots_def?.length) return
+  for (let zi = 0; zi < layout.slots_def.length; zi++) {
+    const def = layout.slots_def[zi]
+    const zoneLabel = String(def.zone_label || '')
+    const m = /^Slot(\d+)\s+(10G|1G|CONTROL|HA|MGMT|USB)$/i.exec(zoneLabel)
+    if (!m) continue
+    const slotIdx = Number(m[1])
+    const kind = m[2].toUpperCase()
+    const list = layout.ports
+      .filter((p) => p.slot_index === zi + 1)
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id))
+    list.forEach((p, i) => {
+      const n = i + 1
+      if (kind === '10G') p.label = `slot${slotIdx}-10G-${n}`
+      else if (kind === '1G') p.label = `slot${slotIdx}-1G-${n}`
+      else if (kind === 'CONTROL') p.label = `slot${slotIdx}-CTL-${n}`
+      else if (kind === 'HA') p.label = `slot${slotIdx}-HA-${n}`
+      else if (kind === 'MGMT') {
+        p.label = `slot${slotIdx}-MGMT-${n}`
+        p.purpose = 'MGMT'
+      } else if (kind === 'USB') p.label = `slot${slotIdx}-USB-${n}`
+    })
+  }
 }
 
 /** 将设计模型实例化为拓扑画布节点 */
@@ -354,7 +579,8 @@ export function stampDesignModelOntoCanvas(
 ): NetworkNode {
   const kind = designCategoryToNodeKind(model.category)
   const layout = buildPortLayoutFromDesignModel(model)
-  annotatePortPurposes(layout)
+  annotatePortPurposes(layout, kind)
+  annotatePortMediaAndInterface(layout?.ports, (model.attributes || {}) as Record<string, unknown>)
   const template: NetworkNode = {
     id: crypto.randomUUID(),
     topology_id: topologyId,
@@ -366,6 +592,7 @@ export function stampDesignModelOntoCanvas(
     contract_device_name: model.contract_device_name,
     network_role: inferFabricRoleFromDesignModel(model),
     device_group: inferDeviceGroupFromDesignModel(model),
+    is_bmc_switch: kind === 'switch' ? isBmcSwitchFromDesignModel(model) : false,
     switch_port_count: 0,
     slots: null,
     pos_x: 0,
@@ -384,12 +611,70 @@ export function stampDesignModelOntoCanvas(
   }
 }
 
-/** 按 slot zone / group 为端口补全 purpose（已有 purpose 不覆盖） */
-export function annotatePortPurposes(layout: PortLayout | null | undefined) {
+/** 按 group.role / zone 为端口补全 purpose（已有 purpose 不覆盖） */
+export function annotatePortPurposes(
+  layout: PortLayout | null | undefined,
+  kind?: NetworkNode['kind'] | null,
+) {
   if (!layout?.ports?.length) return
+  const isServer = kind === 'server'
   for (const p of layout.ports) {
+    // 优先：slots_def 中 group.role（有明确 role 时纠正旧错误打标）
+    let groupRole: string | null = null
+    if (p.group_id && layout.slots_def?.length) {
+      for (const slot of layout.slots_def) {
+        const g = slot.groups?.find((x) => x.id === p.group_id)
+        if (g?.role) {
+          groupRole = g.role
+          break
+        }
+      }
+    }
+    const pt = String(p.port_type || '').toLowerCase()
+    // 服务器业务 NIC：强制 SERVER，覆盖历史误标 UPLINK（A3 空池根因）
+    if (
+      isServer &&
+      (pt === '1g' || pt === '10g' || pt === '25g') &&
+      groupRole !== 'mgmt' &&
+      groupRole !== 'uplink'
+    ) {
+      const lab = String(p.label || '').toUpperCase()
+      if (!lab.includes('IPMI') && !lab.includes('BMC') && pt !== 'bmc') {
+        p.purpose = 'SERVER'
+        continue
+      }
+    }
+    if (groupRole === 'uplink') {
+      p.purpose = 'UPLINK'
+      continue
+    }
+    if (groupRole === 'mgmt') {
+      p.purpose = 'MGMT'
+      continue
+    }
+    if (groupRole === 'main' || groupRole === 'card') {
+      // 40/100G 板卡口默认归上联用途（与端口池一致）；zone 明示下联时保留 DOWNLINK
+      if (p.port_type === '40_100g') {
+        const slotIdx =
+          p.slot_index != null && p.slot_index > 0 ? p.slot_index - 1 : p.slot_index
+        const slot =
+          slotIdx != null && slotIdx >= 0 ? layout.slots_def?.[slotIdx] : null
+        const hay = `${slot?.zone_label || ''}`.toUpperCase()
+        if (hay.includes('DOWNLINK') && !hay.includes('UPLINK')) {
+          p.purpose = isServer ? 'SERVER' : 'DOWNLINK'
+        } else {
+          p.purpose = 'UPLINK'
+        }
+      } else {
+        p.purpose = isServer ? 'SERVER' : 'DOWNLINK'
+      }
+      continue
+    }
     if (p.purpose) continue
-    const slot = p.slot_index != null ? layout.slots_def?.[p.slot_index] : null
+    const slotIdx =
+      p.slot_index != null && p.slot_index > 0 ? p.slot_index - 1 : p.slot_index
+    const slot =
+      slotIdx != null && slotIdx >= 0 ? layout.slots_def?.[slotIdx] : null
     const hay = `${p.group_id || ''} ${slot?.zone_label || ''} ${slot?.server_slot_kind || ''}`.toUpperCase()
     if (hay.includes('PEER')) p.purpose = 'PEER'
     else if (hay.includes('UPLINK') || hay.includes('上联')) p.purpose = 'UPLINK'
@@ -400,14 +685,112 @@ export function annotatePortPurposes(layout: PortLayout | null | undefined) {
       hay.includes('业务') ||
       hay.includes('DOWN')
     ) {
-      p.purpose = 'SERVER'
-    } else if (layout.switch_subtype === 'core' || layout.switch_subtype === 'aggregation') {
-      // 核心/汇聚：高速率口倾向 UPLINK，其余 DOWNLINK
-      p.purpose = p.port_type === '40_100g' ? 'UPLINK' : 'DOWNLINK'
-    } else if (layout.switch_subtype === 'gigabit' || layout.switch_subtype === 'ten_gigabit') {
-      p.purpose = p.port_type === '40_100g' || (layout.uplink_port_count && p.slot_index != null)
-        ? 'UPLINK'
-        : 'SERVER'
+      p.purpose = isServer ? 'SERVER' : 'DOWNLINK'
+    } else if (/^U\d+/i.test(String(p.label || '')) || p.port_type === '40_100g') {
+      p.purpose = 'UPLINK'
+    } else if (p.port_type === '1g' || p.port_type === '10g' || p.port_type === '25g') {
+      p.purpose = isServer ? 'SERVER' : 'DOWNLINK'
     }
   }
 }
+
+/** 批量为拓扑节点补全端口 purpose（加载旧拓扑时用） */
+export function annotateNodesPortPurposes(nodes: NetworkNode[]) {
+  for (const n of nodes) {
+    annotatePortPurposes(n.port_layout, n.kind)
+    annotatePortMediaAndInterface(n.port_layout?.ports)
+  }
+}
+
+/**
+ * 用最新设备模型重建节点 port_layout（保留已有对端连线）。
+ * 确保拓扑接口数量/类型与模型设计一致。
+ */
+export function refreshNodePortLayoutFromDesignModel(
+  node: NetworkNode,
+  model: NetworkDesignModel,
+): boolean {
+  if (!node.design_model_id || node.design_model_id !== model.id) return false
+  const next = buildPortLayoutFromDesignModel(model)
+  if (!next) return false
+  annotatePortPurposes(next, node.kind)
+  annotatePortMediaAndInterface(next.ports, model.attributes as Record<string, unknown>)
+  if (node.kind === 'switch') {
+    node.is_bmc_switch = isBmcSwitchFromDesignModel(model)
+  }
+
+  const oldPorts = node.port_layout?.ports || []
+  const peerByLabel = new Map<string, FramePort>()
+  for (const p of oldPorts) {
+    if (!p.peer_node_id) continue
+    const key = `${p.port_type}|${String(p.label || '').trim()}`
+    if (key !== '|') peerByLabel.set(key, p)
+  }
+  for (const p of next.ports || []) {
+    const key = `${p.port_type}|${String(p.label || '').trim()}`
+    const old = peerByLabel.get(key)
+    if (!old) continue
+    p.peer_node_id = old.peer_node_id
+    p.peer_port = old.peer_port
+    p.peer_label = old.peer_label
+    p.peer_device_id = old.peer_device_id ?? null
+    p.peer_device_name = old.peer_device_name ?? null
+  }
+
+  node.port_layout = next
+  if (!node.network_role) {
+    node.network_role = inferFabricRoleFromDesignModel(model)
+  }
+  if (!node.device_group) {
+    node.device_group = inferDeviceGroupFromDesignModel(model)
+  }
+  return true
+}
+
+/** 按 design_model_id 批量同步拓扑节点接口布局 */
+export function syncTopologyNodesFromDesignModels(
+  nodes: NetworkNode[],
+  models: NetworkDesignModel[],
+): number {
+  const byId = new Map(models.map((m) => [m.id, m]))
+  let updated = 0
+  for (const node of nodes) {
+    if (!node.design_model_id) continue
+    const model = byId.get(node.design_model_id)
+    if (!model) continue
+    if (refreshNodePortLayoutFromDesignModel(node, model)) updated += 1
+  }
+  if (!updated) annotateNodesPortPurposes(nodes)
+  else annotateNodesPortPurposes(nodes)
+  return updated
+}
+
+/** 按 switch_slots.port_start 写入端口标签（slotx 连续编号） */
+function applySwitchSlotPortLabels(layout: PortLayout, switchSlots: SwitchSlotAttr[]) {
+  if (!layout.ports?.length) return
+  const bySlot = new Map<number, typeof layout.ports>()
+  for (const p of layout.ports) {
+    if (p.slot_index == null || p.slot_index <= 0) continue
+    const list = bySlot.get(p.slot_index) || []
+    list.push(p)
+    bySlot.set(p.slot_index, list)
+  }
+  for (const s of switchSlots) {
+    const ports = (bySlot.get(s.index) || []).slice().sort((a, b) => a.id.localeCompare(b.id))
+    ports.forEach((p, i) => {
+      const num = s.port_start + i
+      p.label = String(num)
+      if (s.purpose === 'BLANK') p.purpose = 'OTHER'
+      else if (
+        s.purpose === 'UPLINK' ||
+        s.purpose === 'DOWNLINK_UPLINK' ||
+        s.card_type === '100g'
+      ) {
+        p.purpose = 'UPLINK'
+      } else {
+        p.purpose = 'DOWNLINK'
+      }
+    })
+  }
+}
+

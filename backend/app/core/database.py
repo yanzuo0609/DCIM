@@ -1,6 +1,8 @@
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.core.seed import seed_defaults
@@ -48,8 +50,31 @@ from app.models.base import Base
 
 settings = get_settings()
 
-engine = create_async_engine(settings.database_url, echo=settings.debug)
+_IS_SQLITE = str(settings.database_url).startswith("sqlite")
+
+_engine_kwargs: dict = {"echo": settings.debug}
+if _IS_SQLITE:
+    # WAL + busy_timeout：降低 “database is locked”（大画布保存 / 并发请求）
+    _engine_kwargs["connect_args"] = {
+        "timeout": 60.0,
+        "check_same_thread": False,
+    }
+    _engine_kwargs["poolclass"] = NullPool
+
+engine = create_async_engine(settings.database_url, **_engine_kwargs)
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+if _IS_SQLITE:
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_on_connect(dbapi_connection, _connection_record) -> None:  # type: ignore[no-untyped-def]
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=60000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -553,6 +578,10 @@ async def _ensure_sqlite_network_node_columns(connection) -> None:
         await connection.exec_driver_sql(
             "ALTER TABLE network_node ADD COLUMN device_group VARCHAR(80)"
         )
+    if "device_groups" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_node ADD COLUMN device_groups JSON"
+        )
 
 
 async def _ensure_sqlite_uuid_hyphen_normalize(connection) -> None:
@@ -593,6 +622,7 @@ async def _ensure_sqlite_uuid_hyphen_normalize(connection) -> None:
     await _normalize("network_design_model", "folder_id")
     await _normalize("network_wiring_rule", "id")
     await _normalize("network_wiring_rule", "topology_id")
+    await _normalize("network_wiring_rule", "project_id")
 
 
 async def _ensure_sqlite_network_project_model_folder(connection) -> None:
@@ -687,6 +717,82 @@ async def _ensure_sqlite_network_link_columns(connection) -> None:
         )
 
 
+async def _ensure_sqlite_network_wiring_rule_project(connection) -> None:
+    """Ensure network_wiring_rule.project_id exists; allow null topology_id for global rules."""
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    tables = await connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='network_wiring_rule'"
+    )
+    if not tables.fetchall():
+        return
+    result = await connection.exec_driver_sql("PRAGMA table_info(network_wiring_rule)")
+    rows = result.fetchall()
+    columns = {row[1]: row for row in rows}
+    if "project_id" not in columns:
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_wiring_rule ADD COLUMN project_id CHAR(36)"
+        )
+    await connection.exec_driver_sql(
+        """
+        UPDATE network_wiring_rule
+        SET project_id = (
+          SELECT network_topology.project_id
+          FROM network_topology
+          WHERE network_topology.id = network_wiring_rule.topology_id
+        )
+        WHERE project_id IS NULL
+          AND topology_id IS NOT NULL
+        """
+    )
+    # topology_id 原先 NOT NULL；全局规则需允许为空 → 重建表
+    topo_col = columns.get("topology_id")
+    if topo_col is not None and int(topo_col[3] or 0) == 1:  # notnull flag
+        await connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS network_wiring_rule__global (
+              id CHAR(36) NOT NULL PRIMARY KEY,
+              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              created_by CHAR(36),
+              updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_by CHAR(36),
+              deleted_at DATETIME,
+              deleted_by CHAR(36),
+              version INTEGER NOT NULL DEFAULT 1,
+              project_id CHAR(36),
+              topology_id CHAR(36),
+              name VARCHAR(200) NOT NULL,
+              enabled BOOLEAN NOT NULL DEFAULT 1,
+              mode VARCHAR(20) NOT NULL DEFAULT 'sequential',
+              config JSON,
+              description TEXT
+            )
+            """
+        )
+        await connection.exec_driver_sql(
+            """
+            INSERT INTO network_wiring_rule__global (
+              id, created_at, created_by, updated_at, updated_by, deleted_at, deleted_by, version,
+              project_id, topology_id, name, enabled, mode, config, description
+            )
+            SELECT
+              id, created_at, created_by, updated_at, updated_by, deleted_at, deleted_by, version,
+              project_id, topology_id, name, enabled, mode, config, description
+            FROM network_wiring_rule
+            """
+        )
+        await connection.exec_driver_sql("DROP TABLE network_wiring_rule")
+        await connection.exec_driver_sql(
+            "ALTER TABLE network_wiring_rule__global RENAME TO network_wiring_rule"
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_network_wiring_rule_project_id ON network_wiring_rule (project_id)"
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_network_wiring_rule_topology_id ON network_wiring_rule (topology_id)"
+        )
+
+
 async def _ensure_sqlite_network_project(connection) -> None:
     """Create network_project / topology.project_id for existing SQLite DBs without alembic."""
     if not str(settings.database_url).startswith("sqlite"):
@@ -769,6 +875,7 @@ async def init_db() -> None:
         await _ensure_sqlite_network_project(conn)
         await _ensure_sqlite_network_project_model_folder(conn)
         await _ensure_sqlite_network_lab_session(conn)
+        await _ensure_sqlite_network_wiring_rule_project(conn)
         await _ensure_sqlite_uuid_hyphen_normalize(conn)
         await _ensure_sqlite_device_model_panel_columns(conn)
 

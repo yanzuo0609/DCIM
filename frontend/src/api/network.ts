@@ -44,7 +44,7 @@ export interface NetworkDeviceBrief {
   height_u?: number | null
 }
 
-export type PortType = '1g' | '10g' | '40_100g' | 'bmc' | 'other'
+export type PortType = '1g' | '10g' | '25g' | '40_100g' | 'bmc' | 'other'
 
 export interface SlotInterfaceGroup {
   id: string
@@ -80,6 +80,39 @@ export interface LayoutSlotDef {
   port_types?: PortType[]
 }
 
+/** 端口物理介质粗分（布线匹配 FIBER|COPPER） */
+export type PortMedia = 'FIBER' | 'COPPER'
+/** V2 细粒度介质 */
+export type PortMediaKind =
+  | 'RJ45'
+  | 'SFP'
+  | 'SFP+'
+  | 'SFP28'
+  | 'QSFP+'
+  | 'QSFP28'
+  | 'DAC'
+  | 'AOC'
+  | 'FIBER'
+  | 'OTHER'
+export type PortDuplex = 'FULL' | 'HALF'
+export type PortRuntimeStatus =
+  | 'AVAILABLE'
+  | 'OCCUPIED'
+  | 'RESERVED'
+  | 'DISABLED'
+  | 'FAULT'
+  | 'NOT_SUPPORTED'
+/** 规则文档 interface_type 派生值 */
+export type PortInterfaceType =
+  | '10G_FIBER'
+  | '10G_COPPER'
+  | '25G_FIBER'
+  | '40G_FIBER'
+  | '100G_FIBER'
+  | '1G_COPPER'
+  | 'GE_RJ45'
+  | 'OTHER'
+
 export interface FramePort {
   id: string
   label: string
@@ -102,6 +135,16 @@ export interface FramePort {
   purpose?: string | null
   reserved?: boolean | null
   port_group?: string | null
+  /** 物理介质粗分；缺省由 port_type 推导 */
+  media?: PortMedia | null
+  /** V2 细粒度介质；缺省由 port_type / 模型 attrs 推导 */
+  media_kind?: PortMediaKind | null
+  duplex?: PortDuplex | null
+  /** 运行时状态；缺省由 peer/reserved 推导 */
+  status?: PortRuntimeStatus | null
+  reserved_for?: string | null
+  /** 规则引擎接口类型；缺省由 port_type 推导 */
+  interface_type?: PortInterfaceType | string | null
 }
 
 export interface CoreLineCard {
@@ -149,8 +192,14 @@ export interface NetworkNode {
   contract_device_name?: string | null
   /** 网络角色 CORE/AGG/ACCESS/SERVER/FIREWALL（可覆盖模型继承） */
   network_role?: string | null
-  /** 设备组，如 CORE-G01 / ACCESS-A */
+  /**
+   * @deprecated 单组遗留字段；与 device_groups[0] 同步，读写请优先 device_groups
+   */
   device_group?: string | null
+  /** 设备可同时归属多个组 */
+  device_groups?: string[] | null
+  /** 千兆交换机用作 BMC 管理交换机（对齐 18-rules BMC_SWITCH） */
+  is_bmc_switch?: boolean | null
   pos_x: number
   pos_y: number
   switch_port_count: number
@@ -220,6 +269,7 @@ export interface CanvasNodeInput {
   contract_device_name?: string | null
   network_role?: string | null
   device_group?: string | null
+  device_groups?: string[] | null
   pos_x: number
   pos_y: number
   switch_port_count?: number
@@ -274,23 +324,52 @@ export function formatNodeLocation(node: Pick<NetworkNode, 'name' | 'device' | '
   return parts.join(' · ')
 }
 
+/** 从接口 id / 编号中取出用于排序的数字（取最后一段数字，如 slot1-p10 → 10）。 */
+export function extractPortNumber(text: string): number {
+  const nums = [...String(text || '').matchAll(/(\d+)/g)]
+  if (!nums.length) return Number.POSITIVE_INFINITY
+  return Number(nums[nums.length - 1][1])
+}
+
+/** Slot 编号：优先用 slot_index，否则从 id（slot2-p0）解析。 */
+export function extractSlotNumber(slotIndex: number | null | undefined, id = ''): number {
+  if (slotIndex != null && Number.isFinite(slotIndex)) return slotIndex
+  const m = String(id || '').match(/slot\s*(\d+)/i)
+  if (m) return Number(m[1])
+  return Number.POSITIVE_INFINITY
+}
+
+export function compareNodePortOptions(a: NodePortOption, b: NodePortOption): number {
+  const sa = extractSlotNumber(a.slot_index, a.id)
+  const sb = extractSlotNumber(b.slot_index, b.id)
+  if (sa !== sb) return sa - sb
+  const na = extractPortNumber(a.id)
+  const nb = extractPortNumber(b.id)
+  if (na !== nb) return na - nb
+  return a.id.localeCompare(b.id, 'en', { numeric: true, sensitivity: 'base' })
+}
+
 export function listNodePortOptions(
   node: Pick<NetworkNode, 'kind' | 'switch_port_count' | 'slots' | 'port_layout'>,
 ): NodePortOption[] {
   if (node.port_layout?.ports?.length) {
-    return node.port_layout.ports.map((p) => ({
-      id: p.id,
-      label: `${p.label} · ${PORT_TYPE_LABELS[p.port_type || '1g']}${p.slot_index ? ` · Slot ${p.slot_index}` : ''}`,
-      port_type: p.port_type || '1g',
-      slot_index: p.slot_index,
-    }))
+    return node.port_layout.ports
+      .map((p) => ({
+        id: p.id,
+        label: `${p.label} · ${PORT_TYPE_LABELS[p.port_type || '1g']}${p.slot_index ? ` · Slot ${p.slot_index}` : ''}`,
+        port_type: p.port_type || '1g',
+        slot_index: p.slot_index,
+      }))
+      .sort(compareNodePortOptions)
   }
-  return listNodePorts(node).map((id) => ({
-    id,
-    label: id,
-    port_type: '1g' as PortType,
-    slot_index: null,
-  }))
+  return listNodePorts(node)
+    .map((id) => ({
+      id,
+      label: id,
+      port_type: '1g' as PortType,
+      slot_index: null,
+    }))
+    .sort(compareNodePortOptions)
 }
 
 export function listNodePorts(
@@ -500,6 +579,7 @@ export async function getTopologyLabConsole(topologyId: string, nodeId: string) 
 export const PORT_TYPE_LABELS: Record<PortType, string> = {
   '1g': '千兆',
   '10g': '万兆',
+  '25g': '25G',
   '40_100g': '40/100G',
   bmc: 'BMC',
   other: '其他',
@@ -508,6 +588,7 @@ export const PORT_TYPE_LABELS: Record<PortType, string> = {
 export const PORT_TYPE_COLORS: Record<PortType, { fill: string; stroke: string }> = {
   '1g': { fill: '#d6eaff', stroke: '#2b7fd4' },
   '10g': { fill: '#ddf2d0', stroke: '#4e9b2e' },
+  '25g': { fill: '#d4edda', stroke: '#2f855a' },
   '40_100g': { fill: '#fce8c8', stroke: '#d48806' },
   bmc: { fill: '#e8e9eb', stroke: '#6b7280' },
   other: { fill: '#f3f4f6', stroke: '#9ca3af' },
@@ -516,6 +597,7 @@ export const PORT_TYPE_COLORS: Record<PortType, { fill: string; stroke: string }
 export const PORT_TYPE_SHORT: Record<PortType, string> = {
   '1g': '1G',
   '10g': '10G',
+  '25g': '25G',
   '40_100g': '40G',
   bmc: 'BMC',
   other: 'O',

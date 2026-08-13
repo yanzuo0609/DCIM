@@ -107,6 +107,7 @@ function normalizeGroupOrders(slot: LayoutSlotDef) {
 const PORT_TYPE_WEIGHT: Record<PortType, number> = {
   '1g': 1,
   '10g': 1.15,
+  '25g': 1.25,
   '40_100g': 1.75,
   bmc: 1.1,
   other: 1,
@@ -1202,6 +1203,9 @@ export function syncPortsFromSlotsDef(layout: PortLayout, preservePeers = true) 
         const id = `slot${slotIdx + 1}-g${group.id}-p${p}`
         const legacyId = `slot${slotIdx + 1}-p${mainSeq || p}`
         const peer = peerMap.get(id) ?? peerMap.get(legacyId)
+        // uplink/mgmt 直接打标；main/card 留给 annotatePortPurposes 按设备 kind 区分 DOWNLINK/SERVER
+        const purpose =
+          group.role === 'uplink' ? 'UPLINK' : group.role === 'mgmt' ? 'MGMT' : null
         ports.push({
           id,
           label: peer?.label || portLabel(group.port_type, slotIdx + 1, displayIndex, group.role),
@@ -1212,6 +1216,7 @@ export function syncPortsFromSlotsDef(layout: PortLayout, preservePeers = true) 
           port_type: group.port_type,
           slot_index: slotIdx + 1,
           group_id: group.id,
+          purpose,
           peer_node_id: peer?.peer_node_id ?? null,
           peer_port: peer?.peer_port ?? null,
           peer_label: peer?.peer_label ?? null,

@@ -105,7 +105,10 @@ class NetworkDesignModelResponse(BaseModel):
 
 
 class NetworkWiringRuleCreate(BaseModel):
-    topology_id: uuid.UUID
+    """创建布线规则：优先 project_id；也可只传 topology_id 由服务端解析项目。"""
+
+    project_id: uuid.UUID | None = None
+    topology_id: uuid.UUID | None = None
     name: str = Field(min_length=1, max_length=200)
     enabled: bool = True
     mode: Literal["sequential", "manual"] = "sequential"
@@ -125,7 +128,8 @@ class NetworkWiringRuleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    topology_id: uuid.UUID
+    project_id: uuid.UUID | None = None
+    topology_id: uuid.UUID | None = None
     name: str
     enabled: bool
     mode: str

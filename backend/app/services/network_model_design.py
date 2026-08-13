@@ -16,6 +16,7 @@ from app.models.network_model_design import (
     NetworkModelFolder,
     NetworkWiringRule,
 )
+from app.models.network import NetworkProject, NetworkTopology
 from app.repositories.network_model_design import (
     NetworkDesignModelRepository,
     NetworkModelFolderRepository,
@@ -273,16 +274,50 @@ class NetworkModelDesignService:
         await self.model_repo.soft_delete(entity, deleted_by=user_id)
         await self.session.commit()
 
-    # ── wiring rules ────────────────────────────────────────────────
+    # ── wiring rules（全局：所有项目通用）────────────────────────────
 
-    async def list_wiring_rules(self, topology_id: uuid.UUID) -> list[NetworkWiringRuleResponse]:
-        items = await self.rule_repo.list_by_topology(topology_id)
+    async def _optional_project_id(
+        self,
+        *,
+        project_id: uuid.UUID | None,
+        topology_id: uuid.UUID | None,
+    ) -> uuid.UUID | None:
+        """解析可选的项目溯源 ID，不强制。"""
+        if project_id:
+            project = await self.session.get(NetworkProject, project_id)
+            if not project or project.deleted_at is not None:
+                raise NotFoundError("项目不存在")
+            return project_id
+        if topology_id:
+            topo = await self.session.get(NetworkTopology, topology_id)
+            if not topo or topo.deleted_at is not None:
+                raise NotFoundError("拓扑不存在")
+            return topo.project_id
+        return None
+
+    async def list_wiring_rules(
+        self,
+        *,
+        project_id: uuid.UUID | None = None,
+        topology_id: uuid.UUID | None = None,
+    ) -> list[NetworkWiringRuleResponse]:
+        # 规则全局通用；保留 query 参数仅兼容旧前端，忽略过滤
+        _ = project_id, topology_id
+        items = await self.rule_repo.list_all()
         return [NetworkWiringRuleResponse.model_validate(i) for i in items]
 
     async def create_wiring_rule(
         self, payload: NetworkWiringRuleCreate, *, user_id: uuid.UUID | None
     ) -> NetworkWiringRuleResponse:
+        if not (payload.name or "").strip():
+            raise ValidationError("规则名称不能为空")
+        pid = await self._optional_project_id(
+            project_id=payload.project_id,
+            topology_id=payload.topology_id,
+        )
         data = payload.model_dump()
+        data["project_id"] = pid
+        data["topology_id"] = payload.topology_id
         data["config"] = normalize_wiring_config(data.get("config"))
         entity = NetworkWiringRule(**data, created_by=user_id, updated_by=user_id)
         await self.rule_repo.create(entity)

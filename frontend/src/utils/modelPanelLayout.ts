@@ -1,11 +1,20 @@
 import type { DesignSlotAttr } from '@/utils/designModelToNode'
 import { resolveDesignSwitchRole } from '@/utils/designModelToNode'
+import { readServerIfaceSlots, serverSlotNicPaletteLabel } from '@/utils/serverModelAttrs'
+import { readSecurityIfaceSlots } from '@/utils/securityModelAttrs'
+import {
+  effectivePortCount,
+  portTypeForSlot,
+  readSwitchSlots,
+  type SwitchSlotAttr,
+} from '@/utils/switchModelAttrs'
 
 export type PanelItemKind =
   | 'slot'
   | 'psu'
   | 'bmc'
   | 'usb'
+  | 'hdmi'
   | 'disk_front'
   | 'disk_rear'
   | 'fan'
@@ -28,6 +37,8 @@ export interface PanelLayoutItem {
   port_count?: number
   /** 块内接口类型：1g / 10g / 40_100g 等 */
   port_type?: string
+  /** 接口编号起点（万兆下联跨 Slot 连续） */
+  port_start?: number
   /** 空板卡：无接口 */
   blank?: boolean
 }
@@ -61,6 +72,8 @@ export interface PanelPaletteItem {
   slot_index?: number
   port_count?: number
   port_type?: string
+  /** 接口编号起点（与 switch_slots.port_start 对齐） */
+  port_start?: number
   blank?: boolean
 }
 
@@ -77,6 +90,51 @@ const CARD_TYPE_SHORT: Record<string, string> = {
   ten_gigabit: '10G',
   '100g': '100G',
   blank: '空白',
+}
+
+function switchSlotPurposeLabel(purpose: string): string {
+  if (purpose === 'UPLINK') return '上联'
+  if (purpose === 'DOWNLINK_UPLINK') return '下/上联'
+  if (purpose === 'BLANK') return '空白'
+  return '下联'
+}
+
+function paletteFromSwitchSlots(slots: SwitchSlotAttr[]): PanelPaletteItem[] {
+  const palette: PanelPaletteItem[] = []
+  for (const s of slots) {
+    if (s.card_type === 'blank' || s.purpose === 'BLANK') {
+      palette.push({
+        id: `slot-card-${s.index}`,
+        kind: 'line_card',
+        label: `Slot${s.index}:空白`,
+        side: 'front',
+        slot_index: s.index,
+        port_count: 0,
+        port_start: 0,
+        blank: true,
+      })
+      continue
+    }
+    const pc = effectivePortCount(s)
+    const pt = portTypeForSlot(s)
+    const short = CARD_TYPE_SHORT[s.card_type] || s.card_type
+    const start = Math.max(0, Number(s.port_start) || 0)
+    const end = start + Math.max(0, pc) - 1
+    const range = pc > 0 ? `${start}-${end}` : '—'
+    const purposeTag = switchSlotPurposeLabel(s.purpose)
+    palette.push({
+      id: `slot-card-${s.index}`,
+      kind: s.purpose === 'UPLINK' ? 'port_uplink' : 'line_card',
+      label: `Slot${s.index}:${purposeTag}${short}×${pc}(${range})`,
+      side: 'front',
+      slot_index: s.index,
+      port_count: pc,
+      port_type: pt,
+      port_start: start,
+      blank: false,
+    })
+  }
+  return palette
 }
 
 /** 默认自定义面板网格：列×行 */
@@ -138,6 +196,13 @@ export function buildSwitchPanelPalette(attrs: Record<string, unknown>): PanelPa
   const palette: PanelPaletteItem[] = []
   const role = String(attrs.switch_role || 'gigabit')
 
+  // 优先按 switch_slots 展开，保证万兆下联口与 Slot 配置连续编号一致
+  if (Array.isArray(attrs.switch_slots) && attrs.switch_slots.length) {
+    palette.push(...paletteFromSwitchSlots(readSwitchSlots(attrs)))
+    pushFanAndPsu(palette, attrs, 'rear')
+    return palette
+  }
+
   if (role === 'core') {
     const raw = Array.isArray(attrs.line_cards) ? attrs.line_cards : []
     const cards = raw.filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
@@ -158,6 +223,7 @@ export function buildSwitchPanelPalette(attrs: Record<string, unknown>): PanelPa
         slot_index: i + 1,
         port_count: pc,
         port_type: portType,
+        port_start: 0,
         blank: isBlank,
       })
     })
@@ -170,17 +236,24 @@ export function buildSwitchPanelPalette(attrs: Record<string, unknown>): PanelPa
     }
     const portType = role === 'gigabit' ? '1g' : '10g'
     const speedLabel = portType === '1g' ? '1G' : '10G'
+    // 无 switch_slots 时的回退：万兆下联按板卡连续编号
+    let downlinkCursor = 0
     for (let i = 1; i <= cards; i++) {
+      const start = role === 'ten_gigabit' ? downlinkCursor : 0
+      const end = start + ppc - 1
+      const range = role === 'ten_gigabit' ? `(${start}-${end})` : ''
       palette.push({
         id: `card-optic-${i}`,
         kind: 'line_card',
-        label: `板卡${i}:${speedLabel}×${ppc}`,
+        label: `板卡${i}:${speedLabel}×${ppc}${range}`,
         side: 'front',
         slot_index: i,
         port_count: ppc,
         port_type: portType,
+        port_start: start,
         blank: false,
       })
+      if (role === 'ten_gigabit') downlinkCursor += ppc
     }
     const up = asCount(attrs.uplink_count, 64)
     if (up > 0) {
@@ -194,6 +267,7 @@ export function buildSwitchPanelPalette(attrs: Record<string, unknown>): PanelPa
         side: 'front',
         port_count: up,
         port_type: upType,
+        port_start: 0,
       })
     }
   }
@@ -204,6 +278,17 @@ export function buildSwitchPanelPalette(attrs: Record<string, unknown>): PanelPa
 }
 
 export function buildPanelPalette(attrs: Record<string, unknown>, slots: DesignSlotAttr[]): PanelPaletteItem[] {
+  // 服务器：优先按 server_slots 展开千兆/万兆/IPMI/HDMI/USB
+  if (Array.isArray(attrs.server_slots) || Array.isArray(attrs.slots) || attrs.form_factor_u != null) {
+    const hasServerShape =
+      Array.isArray(attrs.server_slots) ||
+      (Array.isArray(attrs.slots) && attrs.cpu_sockets != null) ||
+      (attrs.form_factor_u != null && attrs.switch_role == null && attrs.data_port_count == null)
+    if (hasServerShape && attrs.switch_role == null) {
+      return buildServerPanelPalette(attrs)
+    }
+  }
+
   const rawRole = String(attrs.switch_role || '').trim()
   const looksLikeSwitch =
     rawRole === 'gigabit' ||
@@ -214,11 +299,12 @@ export function buildPanelPalette(attrs: Record<string, unknown>, slots: DesignS
     attrs.optical_card_count != null ||
     attrs.optical_ports_per_card != null ||
     attrs.uplink_count != null ||
-    Array.isArray(attrs.line_cards)
+    Array.isArray(attrs.line_cards) ||
+    Array.isArray(attrs.switch_slots)
 
   if (looksLikeSwitch) {
     const role = resolveDesignSwitchRole(attrs)
-    const normalized = { ...attrs, switch_role: role }
+    const normalized: Record<string, unknown> = { ...attrs, switch_role: role }
     // 千兆/万兆：补齐板卡字段，避免组件栏空白
     if (role === 'gigabit' || role === 'ten_gigabit' || role === 'aggregation') {
       const cards = Math.max(1, Math.min(16, asCount(normalized.optical_card_count, 16) || 1))
@@ -235,6 +321,11 @@ export function buildPanelPalette(attrs: Record<string, unknown>, slots: DesignS
     if (normalized.fan_count == null) normalized.fan_count = 2
     if (normalized.psu_count == null) normalized.psu_count = 2
     return buildSwitchPanelPalette(normalized)
+  }
+
+  // 安全设备：按 security_slots 展开
+  if (Array.isArray(attrs.security_slots)) {
+    return buildSecurityPanelPalette(attrs)
   }
 
   // 安全/路由等：按规格口数生成可放置块
@@ -288,6 +379,208 @@ export function buildPanelPalette(attrs: Record<string, unknown>, slots: DesignS
     return palette
   }
 
+  // 兼容旧服务器：仅有 design slots
+  return buildServerPanelPaletteFromDesignSlots(attrs, slots)
+}
+
+/** 服务器：按 server_slots 生成千兆/万兆/IPMI/HDMI/USB 组件 */
+function buildServerPanelPalette(attrs: Record<string, unknown>): PanelPaletteItem[] {
+  const palette: PanelPaletteItem[] = []
+  const frontDisks = asCount(attrs.disk_front_count, 48)
+  for (let i = 1; i <= frontDisks; i++) {
+    palette.push({
+      id: `disk-f-${i}`,
+      kind: 'disk_front',
+      label: `前盘${i}`,
+      side: 'front',
+    })
+  }
+
+  const ifaceSlots = readServerIfaceSlots(attrs)
+  for (const s of ifaceSlots) {
+    const n10 = Math.max(0, Number(s.ports_10g) || 0)
+    const n1 = Math.max(0, Number(s.ports_1g) || 0)
+    const onboard = s.kind === 'onboard' || s.index === 1
+    const prefix = onboard ? '板载' : `Slot${s.index}`
+
+    if (onboard) {
+      // 板载：10G / 1G 可并存，分组件；管理口仅板载
+      if (n10 > 0) {
+        palette.push({
+          id: `slot-${s.index}-10g`,
+          kind: 'slot',
+          label: `${prefix}:10G×${n10}`,
+          side: 'rear',
+          slot_index: s.index,
+          port_count: n10,
+          port_type: '10g',
+        })
+      }
+      if (n1 > 0) {
+        palette.push({
+          id: `slot-${s.index}-1g`,
+          kind: 'slot',
+          label: `${prefix}:1G×${n1}`,
+          side: 'rear',
+          slot_index: s.index,
+          port_count: n1,
+          port_type: '1g',
+        })
+      }
+      for (let i = 1; i <= s.ipmi_count; i++) {
+        palette.push({
+          id: `slot-${s.index}-ipmi-${i}`,
+          kind: 'bmc',
+          label: s.ipmi_count > 1 ? `${prefix}:IPMI-${i}` : `${prefix}:IPMI`,
+          side: 'rear',
+          slot_index: s.index,
+        })
+      }
+      for (let i = 1; i <= s.hdmi_count; i++) {
+        palette.push({
+          id: `slot-${s.index}-vga-${i}`,
+          kind: 'hdmi',
+          label: s.hdmi_count > 1 ? `${prefix}:VGA-${i}` : `${prefix}:VGA`,
+          side: 'rear',
+          slot_index: s.index,
+        })
+      }
+      for (let i = 1; i <= s.usb_count; i++) {
+        palette.push({
+          id: `slot-${s.index}-usb-${i}`,
+          kind: 'usb',
+          label: s.usb_count > 1 ? `${prefix}:USB-${i}` : `${prefix}:USB`,
+          side: 'rear',
+          slot_index: s.index,
+        })
+      }
+      if (n10 <= 0 && n1 <= 0 && s.ipmi_count <= 0 && s.hdmi_count <= 0 && s.usb_count <= 0) {
+        palette.push({
+          id: `slot-${s.index}-blank`,
+          kind: 'slot',
+          label: `${prefix}:空白`,
+          side: 'rear',
+          slot_index: s.index,
+          blank: true,
+        })
+      }
+      continue
+    }
+
+    // 扩展槽：仅单一类型网口
+    const dataPorts = n10 > 0 ? n10 : n1
+    const portType = n10 > 0 ? '10g' : n1 > 0 ? '1g' : undefined
+    if (dataPorts > 0 && portType) {
+      palette.push({
+        id: `slot-${s.index}-nic`,
+        kind: 'slot',
+        label: serverSlotNicPaletteLabel(s),
+        side: 'rear',
+        slot_index: s.index,
+        port_count: dataPorts,
+        port_type: portType,
+      })
+    } else {
+      palette.push({
+        id: `slot-${s.index}-blank`,
+        kind: 'slot',
+        label: `${prefix}:空白`,
+        side: 'rear',
+        slot_index: s.index,
+        blank: true,
+      })
+    }
+  }
+
+  pushFanAndPsu(palette, attrs, 'rear')
+  const rearDisks = asCount(attrs.disk_rear_count, 6)
+  for (let i = 1; i <= rearDisks; i++) {
+    palette.push({
+      id: `disk-r-${i}`,
+      kind: 'disk_rear',
+      label: `后盘${i}`,
+      side: 'rear',
+    })
+  }
+  return palette
+}
+
+function buildSecurityPanelPalette(attrs: Record<string, unknown>): PanelPaletteItem[] {
+  const palette: PanelPaletteItem[] = []
+  const slots = readSecurityIfaceSlots(attrs)
+  for (const s of slots) {
+    if (s.ports_10g > 0) {
+      palette.push({
+        id: `sec-${s.index}-10g`,
+        kind: 'port_main',
+        label: `S${s.index}:10G×${s.ports_10g}`,
+        side: 'front',
+        slot_index: s.index,
+        port_count: s.ports_10g,
+        port_type: '10g',
+      })
+    }
+    if (s.ports_1g > 0) {
+      palette.push({
+        id: `sec-${s.index}-1g`,
+        kind: 'port_main',
+        label: `S${s.index}:1G×${s.ports_1g}`,
+        side: 'front',
+        slot_index: s.index,
+        port_count: s.ports_1g,
+        port_type: '1g',
+      })
+    }
+    if (s.control_count > 0) {
+      palette.push({
+        id: `sec-${s.index}-ctl`,
+        kind: 'port_uplink',
+        label: `S${s.index}:Control×${s.control_count}`,
+        side: 'front',
+        slot_index: s.index,
+        port_count: s.control_count,
+        port_type: '1g',
+      })
+    }
+    if (s.ha_count > 0) {
+      palette.push({
+        id: `sec-${s.index}-ha`,
+        kind: 'port_uplink',
+        label: `S${s.index}:HA×${s.ha_count}`,
+        side: 'front',
+        slot_index: s.index,
+        port_count: s.ha_count,
+        port_type: '10g',
+      })
+    }
+    if (s.mgmt_count > 0) {
+      palette.push({
+        id: `sec-${s.index}-mgmt`,
+        kind: 'bmc',
+        label: `S${s.index}:MGMT×${s.mgmt_count}`,
+        side: 'front',
+        slot_index: s.index,
+        port_count: s.mgmt_count,
+      })
+    }
+    for (let i = 1; i <= s.usb_count; i++) {
+      palette.push({
+        id: `sec-${s.index}-usb-${i}`,
+        kind: 'usb',
+        label: s.usb_count > 1 ? `S${s.index}:USB${i}` : `S${s.index}:USB`,
+        side: 'front',
+        slot_index: s.index,
+      })
+    }
+  }
+  pushFanAndPsu(palette, attrs, 'rear')
+  return palette
+}
+
+function buildServerPanelPaletteFromDesignSlots(
+  attrs: Record<string, unknown>,
+  slots: DesignSlotAttr[],
+): PanelPaletteItem[] {
   const palette: PanelPaletteItem[] = []
 
   const frontDisks = asCount(attrs.disk_front_count, 48)
@@ -310,12 +603,29 @@ export function buildPanelPalette(attrs: Record<string, unknown>, slots: DesignS
   }
 
   for (const s of slots) {
+    const list = Array.isArray(s.interfaces) ? s.interfaces : []
+    let n10 = list.filter((x) => String(x.port_type) === '10g').length
+    let n1 = list.filter((x) => String(x.port_type) === '1g').length
+    if (!list.length) {
+      if (s.type === 'nic_10g') n10 = Number(s.port_count) || 0
+      else if (s.type === 'nic_1g') n1 = Number(s.port_count) || 0
+    }
+    // 同 Slot 仅一种
+    if (n10 > 0) n1 = 0
+    const dataPorts = n10 + n1
+    const label =
+      s.type === 'blank' || dataPorts <= 0
+        ? `Slot${s.index}:空白`
+        : serverSlotNicPaletteLabel({ index: s.index, ports_10g: n10, ports_1g: n1 })
     palette.push({
       id: `slot-${s.index}`,
       kind: 'slot',
-      label: slotShortLabel(s),
+      label,
       side: 'rear',
       slot_index: s.index,
+      port_count: dataPorts,
+      port_type: n10 > 0 ? '10g' : n1 > 0 ? '1g' : undefined,
+      blank: s.type === 'blank' || dataPorts <= 0,
     })
   }
   pushFanAndPsu(palette, attrs, 'rear')
@@ -328,7 +638,7 @@ export function buildPanelPalette(attrs: Record<string, unknown>, slots: DesignS
       side: 'rear',
     })
   }
-  const rearDisks = asCount(attrs.disk_rear_count, 4)
+  const rearDisks = asCount(attrs.disk_rear_count, 6)
   for (let i = 1; i <= rearDisks; i++) {
     palette.push({
       id: `disk-r-${i}`,
@@ -560,6 +870,7 @@ function placeSequential(
       h,
       port_count: p.port_count,
       port_type: p.port_type,
+      port_start: p.port_start,
       blank: p.blank,
     })
     col += w
@@ -575,24 +886,62 @@ function syncSideItems(
   cols: number,
   rows: number,
 ): PanelLayoutItem[] {
-  const byId = new Map(palette.filter((p) => p.side === side).map((p) => [p.id, p]))
-  return existing
-    .filter((it) => byId.has(it.id) && itemFits(it, cols, rows))
-    .map((it) => {
-      const p = byId.get(it.id)!
-      return {
-        ...it,
-        label: p.label,
-        kind: p.kind,
-        slot_index: p.slot_index,
-        side,
-        w: Math.max(1, it.w || 1),
-        h: Math.max(1, it.h || 1),
-        port_count: p.port_count ?? it.port_count,
-        port_type: p.port_type ?? it.port_type,
-        blank: p.blank ?? it.blank,
+  const sidePal = palette.filter((p) => p.side === side)
+  const byId = new Map(sidePal.map((p) => [p.id, p]))
+  const used = new Set<string>()
+  const out: PanelLayoutItem[] = []
+
+  for (const it of existing) {
+    if (!itemFits(it, cols, rows)) continue
+    let p = byId.get(it.id)
+    // 旧 HDMI id → VGA
+    if (!p && it.id.includes('-hdmi-')) {
+      p = byId.get(it.id.replace('-hdmi-', '-vga-'))
+    }
+    // 兼容旧 id（card-optic-N / port-uplink / card-* / slot-N-10g|1g|nic）
+    if (!p && it.slot_index != null) {
+      if (it.kind === 'slot') {
+        p = sidePal.find(
+          (x) =>
+            x.kind === 'slot' &&
+            x.slot_index === it.slot_index &&
+            !used.has(x.id) &&
+            (!it.port_type || !x.port_type || x.port_type === it.port_type),
+        )
       }
+      if (!p) {
+        p = sidePal.find(
+          (x) =>
+            x.slot_index === it.slot_index &&
+            !used.has(x.id) &&
+            x.kind === it.kind,
+        )
+      }
+      if (!p) {
+        p = sidePal.find((x) => x.slot_index === it.slot_index && !used.has(x.id))
+      }
+    }
+    if (!p && it.id === 'port-uplink') {
+      p = sidePal.find((x) => x.kind === 'port_uplink' && !used.has(x.id))
+    }
+    if (!p || used.has(p.id)) continue
+    used.add(p.id)
+    out.push({
+      ...it,
+      id: p.id,
+      label: p.label,
+      kind: p.kind,
+      slot_index: p.slot_index,
+      side,
+      w: Math.max(1, it.w || 1),
+      h: Math.max(1, it.h || 1),
+      port_count: p.port_count ?? it.port_count,
+      port_type: p.port_type ?? it.port_type,
+      port_start: p.port_start ?? it.port_start,
+      blank: p.blank ?? it.blank,
     })
+  }
+  return out
 }
 
 /**

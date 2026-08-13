@@ -250,6 +250,8 @@ rackdcim-pro/
 | [12-Deployment.md](12-Deployment.md) | Deployment | DevOps |
 | [13-Test-Plan.md](13-Test-Plan.md) | Testing strategy | QA |
 | [14-Roadmap.md](14-Roadmap.md) | Operations guide | Ops |
+| [16-Model-Design.md](16-Model-Design.md) | 模型设计 / 拓扑布线与端口池 | PM, Full-stack |
+| [17-Interface-Rules.md](17-Interface-Rules.md) | 接口编号与布线对称规则 | PM, Full-stack |
 
 ---
 

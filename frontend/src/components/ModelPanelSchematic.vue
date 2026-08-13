@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
   PanelItemKind,
   PanelLayoutConfig,
@@ -42,6 +42,8 @@ const emit = defineEmits<{
 }>()
 
 const selectedPaletteId = ref<string | null>(null)
+/** 面板上已放置组件的选中态（用于删除） */
+const selectedPlaced = ref<{ side: PanelSide; id: string } | null>(null)
 const activeSide = ref<PanelSide>('front')
 const anchor = ref<{ side: PanelSide; row: number; col: number } | null>(null)
 const hoverCell = ref<{ side: PanelSide; row: number; col: number } | null>(null)
@@ -65,8 +67,8 @@ const cellW = computed(() => {
   // 中间线 1px + 两侧各 16px 间距
   const dividerChrome = stacked ? 0 : 1 + 32
   const panelW = stacked ? total : (total - dividerChrome) / 2
-  // side-block padding/border + grid border
-  const chrome = 8 * 2 + 2 + 2 * 2
+  // side-block padding/border + grid border + left ruler
+  const chrome = 8 * 2 + 2 + 2 * 2 + 18
   const avail = Math.max(48, panelW - chrome)
   const fitted = Math.floor(avail / Math.max(1, cols.value))
   return Math.max(MIN_CELL_W, Math.min(BASE_CELL_W, fitted))
@@ -81,6 +83,18 @@ function gridAreaStyle() {
   return {
     gridTemplateColumns: `repeat(${cols.value}, ${cellW.value}px)`,
     gridTemplateRows: `repeat(${rows.value}, ${cellH.value}px)`,
+  }
+}
+
+function rulerLeftStyle() {
+  return {
+    gridTemplateRows: `repeat(${rows.value}, ${cellH.value}px)`,
+  }
+}
+
+function rulerBottomStyle() {
+  return {
+    gridTemplateColumns: `repeat(${cols.value}, ${cellW.value}px)`,
   }
 }
 
@@ -260,11 +274,74 @@ function placeItem(side: PanelSide, row: number, col: number, w: number, h: numb
     h,
     port_count: pal.port_count,
     port_type: pal.port_type,
+    port_start: pal.port_start,
     blank: pal.blank,
   })
   emitFull({ ...cur, [side]: sideData })
   cancelAnchor()
   selectedPaletteId.value = null
+  selectedPlaced.value = { side, id: pal.id }
+}
+
+function isPlacedSelected(side: PanelSide, id: string) {
+  return selectedPlaced.value?.side === side && selectedPlaced.value.id === id
+}
+
+function selectPlacedItem(side: PanelSide, item: PanelLayoutItem) {
+  activeSide.value = side
+  selectedPaletteId.value = null
+  cancelAnchor()
+  selectedPlaced.value = { side, id: item.id }
+}
+
+function removeItemOnSide(side: PanelSide, id: string) {
+  const cur = normalizePanelLayoutConfig(props.modelValue)
+  emitFull({
+    ...cur,
+    [side]: {
+      cols: cur.cols,
+      rows: cur.rows,
+      items: cur[side].items.filter((i) => i.id !== id),
+    },
+  })
+  if (selectedPlaced.value?.side === side && selectedPlaced.value.id === id) {
+    selectedPlaced.value = null
+  }
+}
+
+function removeSelectedOnSide(side: PanelSide) {
+  if (!props.editable) return
+  if (!selectedPlaced.value || selectedPlaced.value.side !== side) {
+    ElMessage.warning(`请先点选${side === 'front' ? '前面板' : '后面板'}上的组件`)
+    return
+  }
+  removeItemOnSide(side, selectedPlaced.value.id)
+  ElMessage.success('已删除选中组件')
+}
+
+async function clearSideComponents(side: PanelSide) {
+  if (!props.editable) return
+  const cur = normalizePanelLayoutConfig(props.modelValue)
+  const count = cur[side].items.length
+  if (!count) {
+    ElMessage.info(`${side === 'front' ? '前面板' : '后面板'}暂无组件`)
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定清空${side === 'front' ? '前面板' : '后面板'}上的全部 ${count} 个组件？`,
+      '清空组件',
+      { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  emitFull({
+    ...cur,
+    [side]: { cols: cur.cols, rows: cur.rows, items: [] },
+  })
+  if (selectedPlaced.value?.side === side) selectedPlaced.value = null
+  ElMessage.success('已清空组件')
 }
 
 function onCellClick(side: PanelSide, row: number, col: number) {
@@ -274,24 +351,10 @@ function onCellClick(side: PanelSide, row: number, col: number) {
   const occ = side === 'front' ? frontOcc.value : rearOcc.value
   const occupied = occ.get(`${row}:${col}`)
 
-  // 未选组件：点已放置块可删除；Slot 可编辑
+  // 未选组件库：点已放置块 → 选中（Slot 双击仍可编辑，见 onSlotAreaClick）
   if (!selectedPaletteId.value) {
-    if (occupied) {
-      if (occupied.kind === 'slot') {
-        suppressGridClickUntil.value = Date.now() + 300
-        emit('edit-slot', { side, item: occupied })
-        return
-      }
-      const cur = normalizePanelLayoutConfig(props.modelValue)
-      emitFull({
-        ...cur,
-        [side]: {
-          cols: cur.cols,
-          rows: cur.rows,
-          items: cur[side].items.filter((i) => i.id !== occupied.id),
-        },
-      })
-    }
+    if (occupied) selectPlacedItem(side, occupied)
+    else selectedPlaced.value = null
     return
   }
 
@@ -300,15 +363,7 @@ function onCellClick(side: PanelSide, row: number, col: number) {
 
   // 再次点击同组件已占区：移除
   if (occupied && occupied.id === pal.id) {
-    const cur = normalizePanelLayoutConfig(props.modelValue)
-    emitFull({
-      ...cur,
-      [side]: {
-        cols: cur.cols,
-        rows: cur.rows,
-        items: cur[side].items.filter((i) => i.id !== pal.id),
-      },
-    })
+    removeItemOnSide(side, pal.id)
     cancelAnchor()
   }
 }
@@ -358,6 +413,7 @@ function onCellMouseUp(side: PanelSide, row: number, col: number) {
 function selectPalette(id: string, side: PanelSide) {
   activeSide.value = side
   selectedPaletteId.value = selectedPaletteId.value === id ? null : id
+  selectedPlaced.value = null
   cancelAnchor()
 }
 
@@ -384,13 +440,32 @@ function findSlot(slotIndex?: number): DesignSlotAttr | undefined {
 }
 
 function itemTypeText(item: PanelLayoutItem): string {
+  // 与「设备配置及组件」按钮文案保持一致：优先调色板 label，其次布局项 label
+  const pal = props.palette.find((p) => p.id === item.id)
+  if (pal?.label) return pal.label
+  if (item.label) return item.label
   if (item.kind === 'slot') {
     const slot = findSlot(item.slot_index)
-    if (!slot) return item.label
+    if (!slot) return item.id
     if (slot.type === 'raid') return `Slot${slot.index} ${String(slot.raid_level || 'raid1').toUpperCase()}`
+    const list = Array.isArray(slot.interfaces) ? slot.interfaces : []
+    const n10 = list.filter((x) => String(x.port_type) === '10g').length
+    const n1 = list.filter((x) => String(x.port_type) === '1g').length
+    if (n10 > 0) return `Slot${slot.index}:10G×${n10}`
+    if (n1 > 0) return `Slot${slot.index}:1G×${n1}`
+    if (slot.type === 'blank') return `Slot${slot.index}:空白`
     return `Slot${slot.index} ${slotTypeLabel(String(slot.type))}`
   }
-  return item.label
+  return item.id
+}
+
+function palettePortTypeClass(p: PanelPaletteItem): string {
+  const t = String(p.port_type || '')
+  if (t === '10g' || t === '25g') return 'ptype-10g'
+  if (t === '1g') return 'ptype-1g'
+  if (t === '40_100g' || t === '100g') return 'ptype-100g'
+  if (p.kind === 'slot' && (p.port_count || 0) > 0 && !p.port_type) return 'ptype-mixed'
+  return ''
 }
 
 function isPortBlock(item: PanelLayoutItem) {
@@ -401,35 +476,62 @@ function resolvedPortMeta(item: PanelLayoutItem): {
   blank: boolean
   count: number
   port_type: string
+  port_start: number
 } {
   const pal = props.palette.find((p) => p.id === item.id)
   const blank = !!(item.blank ?? pal?.blank)
   const count = Math.max(0, Math.min(128, Number(item.port_count ?? pal?.port_count) || 0))
   const port_type = String(item.port_type || pal?.port_type || '1g')
-  return { blank, count, port_type }
+  const port_start = Math.max(0, Math.trunc(Number(item.port_start ?? pal?.port_start) || 0))
+  return { blank, count, port_type, port_start }
 }
 
 function itemInterfaces(item: PanelLayoutItem): DesignSlotInterface[] {
   if (item.kind === 'slot') {
     const slot = findSlot(item.slot_index)
     if (!slot) return []
-    const list = Array.isArray(slot.interfaces) ? slot.interfaces : []
-    const t = String(slot.type)
-    if (t === 'nic_1g' || t === 'nic_10g') {
-      const def = defaultPortTypeForSlot(t)
-      return list.map((x) => ({ ...x, port_type: def }))
+    let list = Array.isArray(slot.interfaces) ? slot.interfaces : []
+    // 板载 10G/1G 分组件：按 port_type 过滤，避免同一 Slot 口重复显示
+    const wantType = String(item.port_type || props.palette.find((p) => p.id === item.id)?.port_type || '')
+    if (wantType && list.length) {
+      list = list.filter((x) => String(x.port_type) === wantType)
     }
-    return list
+    if (!list.length) {
+      const meta = resolvedPortMeta(item)
+      if (meta.blank || meta.count <= 0) return []
+      const out: DesignSlotInterface[] = []
+      const tag = meta.port_type === '10g' ? '10G' : meta.port_type === '1g' ? '1G' : '口'
+      const prefix = item.slot_index === 1 ? '板载' : `Slot${item.slot_index}`
+      for (let i = 0; i < meta.count; i++) {
+        out.push({
+          index: i + 1,
+          port_type: meta.port_type,
+          local_label: `${prefix}:${tag}-${i + 1}`,
+          local_info: '',
+          peer_label: '',
+          peer_info: '',
+        })
+      }
+      return out
+    }
+    const t = String(slot.type)
+    const def =
+      t === 'nic_1g' || t === 'nic_10g' ? defaultPortTypeForSlot(t) : undefined
+    return list.map((x) => ({
+      ...x,
+      port_type: String(x.port_type || def || '1g'),
+    }))
   }
   if (item.kind !== 'line_card' && item.kind !== 'port_main' && item.kind !== 'port_uplink') return []
   const meta = resolvedPortMeta(item)
   if (meta.blank || meta.count <= 0) return []
   const out: DesignSlotInterface[] = []
-  for (let i = 1; i <= meta.count; i++) {
+  for (let i = 0; i < meta.count; i++) {
+    const num = meta.port_start + i
     out.push({
-      index: i,
+      index: i + 1,
       port_type: meta.port_type,
-      local_label: `${i}`,
+      local_label: `${num}`,
       local_info: '',
       peer_label: '',
       peer_info: '',
@@ -438,31 +540,93 @@ function itemInterfaces(item: PanelLayoutItem): DesignSlotInterface[] {
   return out
 }
 
-type SwitchPortsView = {
+type EvenPortsView = {
   ifaces: DesignSlotInterface[]
   gridStyle: Record<string, string>
   portStyle: Record<string, string>
 }
 
-/** 交换机：无标题字样；双排列向编号；接口均匀平铺满框选区 */
-function switchPortsView(item: PanelLayoutItem): SwitchPortsView | null {
+/** 按框选区宽高比决定行列，接口均匀铺开 */
+function evenPortGrid(n: number, boxW: number, boxH: number): { cols: number; rows: number } {
+  if (n <= 1) return { cols: 1, rows: 1 }
+  const vertical = boxH >= boxW * 1.15
+  if (vertical) {
+    if (n <= 5) return { cols: 1, rows: n }
+    return { cols: 2, rows: Math.ceil(n / 2) }
+  }
+  if (n <= 4) return { cols: n, rows: 1 }
+  if (n <= 6) return { cols: Math.ceil(n / 2), rows: 2 }
+  const preferCols = Math.max(2, Math.ceil(n / 2))
+  const byAspect = Math.max(2, Math.round(Math.sqrt((n * boxW) / Math.max(1, boxH))))
+  const cols = Math.min(n, Math.max(preferCols, Math.min(byAspect, Math.ceil(n / 2) + 2)))
+  return { cols, rows: Math.ceil(n / cols) }
+}
+
+/** 交换机板卡 / 服务器 Slot：接口均匀分布；服务器为正方框 */
+function evenPortsView(item: PanelLayoutItem): EvenPortsView | null {
   const ifaces = itemInterfaces(item)
   const n = ifaces.length
   if (!n) return null
 
   const scale = cellW.value / BASE_CELL_W
-  const pad = Math.max(1, Math.round(1 * scale))
+  const pad = Math.max(2, Math.round(2 * scale))
   const itemPad = 2
   const boxW = Math.max(1, item.w || 1) * cellW.value - itemPad
   const boxH = Math.max(1, item.h || 1) * cellH.value - itemPad
   const availW = Math.max(8, boxW - pad * 2)
   const availH = Math.max(8, boxH - pad * 2)
 
-  const rows = n <= 1 ? 1 : 2
-  const cols = Math.max(1, Math.ceil(n / rows))
-  // 按框选区宽高均分，口格铺满区域
-  const cellSizeW = Math.max(4, Math.floor(availW / cols))
-  const cellSizeH = Math.max(4, Math.floor(availH / rows))
+  const isSwitchCard =
+    item.kind === 'line_card' || item.kind === 'port_main' || item.kind === 'port_uplink'
+  const isServerSlot = item.kind === 'slot'
+
+  if (isServerSlot) {
+    const { cols, rows } = evenPortGrid(n, availW, availH)
+    const minGap = Math.max(2, Math.round(2 * scale))
+    // 正方口：取行列可容纳的最大边长，边距与间距均匀（space-evenly）
+    let side = Math.floor(
+      Math.min((availW - minGap * (cols + 1)) / cols, (availH - minGap * (rows + 1)) / rows),
+    )
+    side = Math.max(6, side)
+    const fontPx = Math.max(5, Math.floor(side * 0.36))
+    return {
+      ifaces,
+      gridStyle: {
+        display: 'grid',
+        gridTemplateColumns: `repeat(${cols}, ${side}px)`,
+        gridTemplateRows: `repeat(${rows}, ${side}px)`,
+        gridAutoFlow: 'row',
+        gap: '0px',
+        width: '100%',
+        height: '100%',
+        minHeight: '0',
+        padding: `${pad}px`,
+        boxSizing: 'border-box',
+        justifyContent: 'space-evenly',
+        alignContent: 'space-evenly',
+        justifyItems: 'center',
+        alignItems: 'center',
+      },
+      portStyle: {
+        width: `${side}px`,
+        height: `${side}px`,
+        minWidth: `${side}px`,
+        minHeight: `${side}px`,
+        maxWidth: `${side}px`,
+        maxHeight: `${side}px`,
+        aspectRatio: '1 / 1',
+        flex: 'none',
+        fontSize: `${fontPx}px`,
+      },
+    }
+  }
+
+  const { cols, rows } = isSwitchCard
+    ? { rows: n <= 1 ? 1 : 2, cols: Math.max(1, Math.ceil(n / (n <= 1 ? 1 : 2))) }
+    : evenPortGrid(n, availW, availH)
+  const gap = 0
+  const cellSizeW = Math.max(4, Math.floor((availW - gap * (cols - 1)) / cols))
+  const cellSizeH = Math.max(4, Math.floor((availH - gap * (rows - 1)) / rows))
   const fontPx = Math.max(5, Math.floor(Math.min(cellSizeW, cellSizeH) * 0.42))
 
   return {
@@ -471,13 +635,15 @@ function switchPortsView(item: PanelLayoutItem): SwitchPortsView | null {
       display: 'grid',
       gridTemplateColumns: `repeat(${cols}, 1fr)`,
       gridTemplateRows: `repeat(${rows}, 1fr)`,
-      gridAutoFlow: 'column',
-      gap: '0px',
+      gridAutoFlow: isSwitchCard ? 'column' : 'row',
+      gap: `${gap}px`,
       width: '100%',
       height: '100%',
       minHeight: '0',
       padding: `${pad}px`,
       boxSizing: 'border-box',
+      alignContent: 'stretch',
+      justifyContent: 'stretch',
     },
     portStyle: {
       width: '100%',
@@ -487,7 +653,12 @@ function switchPortsView(item: PanelLayoutItem): SwitchPortsView | null {
   }
 }
 
-/** Slot 仍用简易均分；交换机块用 switchPortsView */
+/** @deprecated 兼容旧调用名 */
+function switchPortsView(item: PanelLayoutItem): EvenPortsView | null {
+  return evenPortsView(item)
+}
+
+/** Slot 简易轴（非均匀网格回退） */
 function portLayoutAxis(item: PanelLayoutItem): 'horizontal' | 'vertical' {
   const w = Math.max(1, item.w || 1)
   const h = Math.max(1, item.h || 1)
@@ -519,13 +690,26 @@ function portTrackStyle(item: PanelLayoutItem) {
 }
 
 function usesSwitchPortLayout(item: PanelLayoutItem) {
-  return item.kind === 'line_card' || item.kind === 'port_main' || item.kind === 'port_uplink'
+  if (item.kind === 'line_card' || item.kind === 'port_main' || item.kind === 'port_uplink') return true
+  // 服务器/通用 Slot：有接口时同样均匀铺满框选区
+  if (item.kind === 'slot' && !item.blank && itemInterfaces(item).length > 0) return true
+  return false
 }
 
 function onSlotAreaClick(side: PanelSide, item: PanelLayoutItem) {
   if (!props.editable || placing.value) return
-  suppressGridClickUntil.value = Date.now() + 600
-  emit('edit-slot', { side, item })
+  const already = isPlacedSelected(side, item.id)
+  selectPlacedItem(side, item)
+  // Slot：再次点击已选中的打开编辑
+  if (item.kind === 'slot' && already) {
+    suppressGridClickUntil.value = Date.now() + 600
+    emit('edit-slot', { side, item })
+  }
+}
+
+function onPlacedItemClick(side: PanelSide, item: PanelLayoutItem) {
+  if (!props.editable || placing.value) return
+  onSlotAreaClick(side, item)
 }
 
 function onPortClick(side: PanelSide, item: PanelLayoutItem, _iface: DesignSlotInterface) {
@@ -533,6 +717,7 @@ function onPortClick(side: PanelSide, item: PanelLayoutItem, _iface: DesignSlotI
 }
 
 function displayPortType(item: PanelLayoutItem, iface: DesignSlotInterface): string {
+  if (iface.port_type) return String(iface.port_type)
   if (item.kind === 'slot') {
     const slot = findSlot(item.slot_index)
     const t = String(slot?.type || '')
@@ -540,7 +725,15 @@ function displayPortType(item: PanelLayoutItem, iface: DesignSlotInterface): str
   }
   if (usesSwitchPortLayout(item)) return resolvedPortMeta(item).port_type
   if (item.port_type) return String(item.port_type)
-  return iface.port_type
+  return '1g'
+}
+
+function portDisplayLabel(iface: DesignSlotInterface): string {
+  const raw = String(iface.local_label || iface.index)
+  // 板载:10G-1 / Slot2:1G-1 → 10G-1
+  const colon = raw.lastIndexOf(':')
+  if (colon >= 0 && colon < raw.length - 1) return raw.slice(colon + 1)
+  return raw.replace(/^slot\d+-/i, '')
 }
 
 function portTypeShort(t: string) {
@@ -584,12 +777,10 @@ function portTypeShort(t: string) {
         />
       </label>
       <span class="size-badge">宽 {{ cols }} × 高 {{ rows }}</span>
+      <el-button v-if="editable && anchor" link type="warning" size="small" @click="cancelAnchor">
+        取消框选
+      </el-button>
     </div>
-
-    <p v-if="editable" class="tb-hint">
-      ① 点选「设备配置及组件」中的组件 ② 在面板上拖拽框选范围放置；交换机口自动双排紧凑均分。
-      <el-button v-if="anchor" link type="warning" size="small" @click="cancelAnchor">取消框选</el-button>
-    </p>
 
     <div ref="sidesRef" class="sides" :class="{ stacked: sidesStacked }">
       <section
@@ -607,7 +798,12 @@ function portTypeShort(t: string) {
                 :key="p.id"
                 type="button"
                 class="palette-item"
-                :class="[kindClass(p.kind), { active: selectedPaletteId === p.id && activeSide === side }]"
+                :class="[
+                  kindClass(p.kind),
+                  palettePortTypeClass(p),
+                  { active: selectedPaletteId === p.id && activeSide === side },
+                ]"
+                :title="p.label"
                 @click="selectPalette(p.id, side)"
               >
                 {{ p.label }}
@@ -635,8 +831,26 @@ function portTypeShort(t: string) {
           <div class="side-head">
             <strong>{{ side === 'front' ? '前面板' : '后面板' }}</strong>
             <span class="dim">{{ cols }}×{{ rows }}</span>
+            <div v-if="editable" class="side-actions">
+              <el-button
+                link
+                type="danger"
+                size="small"
+                :disabled="!(selectedPlaced && selectedPlaced.side === side)"
+                @click="removeSelectedOnSide(side)"
+              >
+                删除
+              </el-button>
+              <el-button link type="danger" size="small" @click="clearSideComponents(side)">
+                清空组件
+              </el-button>
+            </div>
           </div>
-          <div class="grid area" :style="gridAreaStyle()">
+          <div class="grid-frame">
+            <div class="ruler ruler-left" :style="rulerLeftStyle()" aria-hidden="true">
+              <span v-for="r in rows" :key="`rl-${side}-${r}`" class="ruler-tick">{{ r - 1 }}</span>
+            </div>
+            <div class="grid area" :style="gridAreaStyle()">
             <button
               v-for="cell in cells"
               :key="`c-${side}-${cell.row}-${cell.col}`"
@@ -666,11 +880,20 @@ function portTypeShort(t: string) {
               class="cell item"
               :class="[
                 kindClass(item.kind),
+                palettePortTypeClass({
+                  id: item.id,
+                  kind: item.kind,
+                  label: item.label,
+                  side,
+                  port_count: item.port_count,
+                  port_type: item.port_type ?? props.palette.find((p) => p.id === item.id)?.port_type,
+                }),
                 {
                   placing,
                   'is-slot': isPortBlock(item),
-                  interactive: editable && !placing && item.kind === 'slot',
+                  interactive: editable && !placing,
                   blank: !!item.blank,
+                  selected: isPlacedSelected(side, item.id),
                 },
               ]"
               :style="{
@@ -678,7 +901,7 @@ function portTypeShort(t: string) {
                 gridColumn: `${item.col + 1} / span ${Math.max(1, item.w || 1)}`,
               }"
               :title="itemTypeText(item)"
-              @click.stop="item.kind === 'slot' && onSlotAreaClick(side, item)"
+              @click.stop="onPlacedItemClick(side, item)"
             >
               <template v-if="isPortBlock(item)">
                 <div v-if="!usesSwitchPortLayout(item)" class="slot-title">{{ itemTypeText(item) }}</div>
@@ -686,16 +909,16 @@ function portTypeShort(t: string) {
                   <template v-for="sw in [switchPortsView(item)]" :key="`${item.id}-sw`">
                     <div v-if="sw" class="switch-ports" :style="sw.gridStyle">
                       <button
-                        v-for="(iface, idx) in sw.ifaces"
+                        v-for="iface in sw.ifaces"
                         :key="iface.index"
                         type="button"
                         class="sw-port"
                         :class="`port-${iface.port_type}`"
                         disabled
-                        :title="`${itemTypeText(item)} · 口${idx + 1}`"
+                        :title="`${itemTypeText(item)} · ${iface.local_label || '口' + iface.index}`"
                         :style="sw.portStyle"
                       >
-                        <span class="sw-port-lab">{{ idx + 1 }}</span>
+                        <span class="sw-port-lab">{{ portDisplayLabel(iface) }}</span>
                       </button>
                     </div>
                     <div v-else class="slot-ports empty">
@@ -752,6 +975,11 @@ function portTypeShort(t: string) {
                 gridColumn: `${previewRect.col + 1} / span ${previewRect.w}`,
               }"
             />
+            </div>
+            <div class="ruler-corner" aria-hidden="true" />
+            <div class="ruler ruler-bottom" :style="rulerBottomStyle()" aria-hidden="true">
+              <span v-for="c in cols" :key="`rb-${side}-${c}`" class="ruler-tick">{{ c - 1 }}</span>
+            </div>
           </div>
         </div>
       </section>
@@ -802,7 +1030,8 @@ function portTypeShort(t: string) {
 }
 .cell.item.is-slot.kind-port_main,
 .cell.item.is-slot.kind-port_uplink,
-.cell.item.is-slot.kind-line_card {
+.cell.item.is-slot.kind-line_card,
+.cell.item.is-slot.kind-slot {
   padding: 0;
   gap: 0;
 }
@@ -821,6 +1050,7 @@ function portTypeShort(t: string) {
   overflow: hidden;
   line-height: 1;
   flex: 0 0 auto;
+  aspect-ratio: 1 / 1;
 }
 .sw-port.port-1g {
   background: #fff;
@@ -862,12 +1092,6 @@ function portTypeShort(t: string) {
   font-size: 12px;
   color: #409eff;
   font-variant-numeric: tabular-nums;
-}
-.tb-hint {
-  margin: 0;
-  font-size: 12px;
-  color: #909399;
-  line-height: 1.5;
 }
 .sides {
   display: grid;
@@ -926,6 +1150,12 @@ function portTypeShort(t: string) {
   margin-bottom: 6px;
   font-size: 13px;
 }
+.side-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
 .dim {
   color: #909399;
   font-size: 12px;
@@ -979,6 +1209,22 @@ function portTypeShort(t: string) {
 .palette-item.active {
   outline: 2px solid var(--el-color-primary);
 }
+.palette-item.ptype-1g {
+  border-color: #67c23a;
+  background: #f0f9eb;
+}
+.palette-item.ptype-10g {
+  border-color: #409eff;
+  background: #ecf5ff;
+}
+.palette-item.ptype-100g {
+  border-color: #909399;
+  background: #f4f4f5;
+}
+.palette-item.ptype-mixed {
+  border-color: #409eff;
+  background: linear-gradient(90deg, #ecf5ff 0 50%, #f0f9eb 50% 100%);
+}
 .palette-more {
   flex: 0 0 auto;
   border: 1px solid #c0c4cc;
@@ -1007,6 +1253,61 @@ function portTypeShort(t: string) {
   background: #fff;
   box-sizing: border-box;
   user-select: none;
+}
+.grid-frame {
+  display: grid;
+  grid-template-columns: 18px max-content;
+  grid-template-rows: max-content 16px;
+  grid-template-areas:
+    'left main'
+    'corner bottom';
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+  align-items: stretch;
+}
+.grid-frame .grid.area {
+  grid-area: main;
+}
+.ruler {
+  display: grid;
+  gap: 0;
+  font-size: 9px;
+  line-height: 1;
+  color: #909399;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.ruler-left {
+  grid-area: left;
+  width: 18px;
+  border-right: 1px solid #dcdfe6;
+  background: #fafafa;
+}
+.ruler-bottom {
+  grid-area: bottom;
+  height: 16px;
+  border-top: 1px solid #dcdfe6;
+  background: #fafafa;
+}
+.ruler-corner {
+  grid-area: corner;
+  width: 18px;
+  height: 16px;
+  border-top: 1px solid #dcdfe6;
+  border-right: 1px solid #dcdfe6;
+  background: #f5f7fa;
+  box-sizing: border-box;
+}
+.ruler-tick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  box-shadow: inset 0 0 0 1px rgba(192, 196, 204, 0.25);
 }
 .cell {
   border: none;
@@ -1075,6 +1376,26 @@ function portTypeShort(t: string) {
   background: #e8f3ff;
   border-color: #79bbff;
 }
+.cell.item.ptype-1g,
+.kind-slot.ptype-1g {
+  background: #f0f9eb;
+  border-color: #67c23a;
+}
+.cell.item.ptype-10g,
+.kind-slot.ptype-10g {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+.cell.item.ptype-100g,
+.kind-slot.ptype-100g {
+  background: #f4f4f5;
+  border-color: #909399;
+}
+.cell.item.ptype-mixed,
+.kind-slot.ptype-mixed {
+  background: linear-gradient(90deg, #ecf5ff 0 50%, #f0f9eb 50% 100%);
+  border-color: #409eff;
+}
 .kind-psu {
   background: #fef0f0;
   border-color: #f89898;
@@ -1086,6 +1407,10 @@ function portTypeShort(t: string) {
 .kind-usb {
   background: #fdf6ec;
   border-color: #eebe77;
+}
+.kind-hdmi {
+  background: #f3e8ff;
+  border-color: #c084fc;
 }
 .kind-disk_front {
   background: #eceff5;
@@ -1129,6 +1454,12 @@ function portTypeShort(t: string) {
   pointer-events: auto;
   cursor: pointer;
   z-index: 5;
+}
+.cell.item.selected {
+  outline: 2px solid #409eff;
+  outline-offset: -1px;
+  z-index: 6;
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.35);
 }
 .slot-title {
   flex: 0 0 auto;

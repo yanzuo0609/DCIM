@@ -92,7 +92,8 @@ export type NetworkDesignModelUpdate = Partial<NetworkDesignModelCreate>
 
 export interface NetworkWiringRule {
   id: string
-  topology_id: string
+  project_id?: string | null
+  topology_id?: string | null
   name: string
   enabled: boolean
   mode: WiringMode | string
@@ -103,7 +104,8 @@ export interface NetworkWiringRule {
 }
 
 export interface NetworkWiringRuleCreate {
-  topology_id: string
+  project_id?: string | null
+  topology_id?: string | null
   name: string
   enabled?: boolean
   mode?: WiringMode
@@ -111,8 +113,9 @@ export interface NetworkWiringRuleCreate {
   description?: string | null
 }
 
-export type NetworkWiringRuleUpdate = Partial<Omit<NetworkWiringRuleCreate, 'topology_id'>>
-
+export type NetworkWiringRuleUpdate = Partial<
+  Omit<NetworkWiringRuleCreate, 'topology_id' | 'project_id'>
+>
 export async function fetchModelTaxonomy() {
   const response = await api.get<ApiResponse<TaxonomyCategory[]>>('/network-model-design/taxonomy')
   return unwrap(response) || []
@@ -219,10 +222,17 @@ export async function deleteDesignModel(id: string) {
   return unwrap(response)
 }
 
-export async function listWiringRules(topologyId: string) {
+export async function listWiringRules(opts?: {
+  projectId?: string | null
+  topologyId?: string | null
+}) {
+  const params: Record<string, string> = {}
+  // 兼容旧调用；后端已改为返回全局规则，忽略过滤
+  if (opts?.projectId) params.project_id = opts.projectId
+  if (opts?.topologyId) params.topology_id = opts.topologyId
   const response = await api.get<ApiResponse<NetworkWiringRule[]>>(
     '/network-model-design/wiring-rules',
-    { params: { topology_id: topologyId } },
+    { params },
   )
   return unwrap(response) || []
 }

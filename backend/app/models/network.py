@@ -92,6 +92,8 @@ class NetworkNode(BaseModel):
     # 网络角色 CORE/AGG/ACCESS/SERVER/FIREWALL；可覆盖模型继承值
     network_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     device_group: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # 多设备组：JSON 字符串数组，可与 device_group 并存（首个同步到 device_group）
+    device_groups: Mapped[list | None] = mapped_column(JSON, nullable=True)
     pos_x: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
     pos_y: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
     switch_port_count: Mapped[int] = mapped_column(Integer, nullable=False, default=48)

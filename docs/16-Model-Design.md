@@ -66,17 +66,31 @@ date: 2026-08-07
 - **布线规则**（`network_wiring_rule.config` 结构化参数）：
   - 01 设备：Source/Target Role、Group、显式设备、Connection Type、Required
   - 02/03 链路：Link Count / Min / Max、Speed、Speed Mode、配对模式
-  - 04 端口：Port Purpose、范围、口类型；PEER 口不参与普通业务布线
+  - 04 端口：Port Purpose、**端口池**、范围、口类型；PEER 口不参与普通业务布线
   - 05 冗余：A/B、设备/路径/机柜/板卡/端口多样性
   - 06/08 Peer-Link / LAG / Keepalive
   - 09/10 介质与距离：AUTO（≤3m DAC / ≤10m AOC / 否则光纤）可覆盖
   - 执行后写回 `NetworkLink`（含 connection_type、speed、LAG、冗余路径、介质等），保存拓扑后在「接口设计」连线表与 Excel 可见
 - Eve-NG：后端代理同步 Lab；浏览器不直连凭证
 
+### 端口池与模型板卡/上联
+
+模型属性驱动面板端口，布线按池选取：
+
+| 端口池 | 模型来源 | layout / group.role | 典型 Purpose |
+| --- | --- | --- | --- |
+| `OPTICAL`（板卡光口） | `optical_card_count × optical_ports_per_card`（或 `downlink_count`） | `main` / `card`，标签 `1…N`，类型多为 `1g`/`10g` | DOWNLINK / SERVER |
+| `UPLINK`（40/100G 上联） | `uplink_count` | `uplink`，标签 `U1…Un`，类型多为 `40_100g`（千兆上联可为 `10g`） | UPLINK / PEER / DAD |
+
+- `source_port_pool` / `target_port_pool`：`AUTO | OPTICAL | UPLINK`
+- **AUTO**：按 Purpose 推导——UPLINK/PEER/DAD → 上联池；DOWNLINK/SERVER → 板卡光口池
+- 连接类型 UPLINK 默认：源池=上联、目的池=板卡光口；Speed Mode 用 MIN（两端速率可不同）
+- 画布节点加载时按 `group.role` 补全 Purpose，保证旧拓扑也能按池匹配
+
 ### 布线示例
 
-| 规则 | Source → Target | Connection | Link Count | Purpose |
+| 规则 | Source → Target | Connection | Link Count | 源池 → 目的池 |
 | --- | --- | --- | --- | --- |
-| 核心上联 | CORE → AGG | UPLINK | 2 | UPLINK |
-| 接入服务器 | ACCESS → SERVER | SERVER | 2 + A/B + 设备多样性 | SERVER |
-| 堆叠互联 | ACCESS ↔ ACCESS | PEER | Peer-Link=2 | PEER |
+| 核心上联 | CORE → AGG | UPLINK | 2 | UPLINK → OPTICAL |
+| 接入服务器 | ACCESS → SERVER | SERVER | 2 + A/B + 设备多样性 | OPTICAL → OPTICAL(SERVER) |
+| 堆叠互联 | ACCESS ↔ ACCESS | PEER | Peer-Link=2 | UPLINK → UPLINK |

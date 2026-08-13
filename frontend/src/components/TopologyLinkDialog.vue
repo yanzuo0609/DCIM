@@ -668,6 +668,7 @@ const assocRuleTitle = computed(() => {
         <el-select
           v-model="form.source_port"
           filterable
+          popper-class="inspector-select-dropdown"
           style="width: 100%"
           :disabled="(lockSource && !!sourcePort) || !sourceBindId"
           placeholder="选择设备定义面板上的接口"
@@ -708,6 +709,7 @@ const assocRuleTitle = computed(() => {
         <el-select
           v-model="form.target_port"
           filterable
+          popper-class="inspector-select-dropdown"
           style="width: 100%"
           :disabled="!targetBindId"
           placeholder="选择设备定义面板上的接口"

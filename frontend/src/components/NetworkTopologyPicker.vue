@@ -9,8 +9,10 @@ const props = withDefaults(
     currentId: string | null
     loading?: boolean
     title?: string
+    hideTitle?: boolean
+    compact?: boolean
   }>(),
-  { title: '拓扑列表' },
+  { title: '拓扑列表', hideTitle: false, compact: false },
 )
 
 const emit = defineEmits<{
@@ -40,10 +42,15 @@ function submitCreate() {
 </script>
 
 <template>
-  <aside class="topology-picker">
-    <div class="picker-header">
+  <aside class="topology-picker" :class="{ compact }">
+    <div v-if="!hideTitle" class="picker-header">
       <span>{{ title }}</span>
       <el-button v-if="canCreate" type="primary" link @click="openCreateDialog">新建</el-button>
+    </div>
+    <div v-else class="picker-actions">
+      <el-button v-if="canCreate" type="primary" link size="small" @click="openCreateDialog">
+        新建
+      </el-button>
     </div>
     <el-scrollbar v-loading="loading" class="topology-list">
       <div
@@ -56,7 +63,7 @@ function submitCreate() {
         <div class="name">{{ item.name }}</div>
         <div class="desc">{{ item.description || '无描述' }}</div>
       </div>
-      <el-empty v-if="!topologies.length" description="暂无拓扑" />
+      <el-empty v-if="!topologies.length" description="暂无拓扑" :image-size="compact ? 48 : 80" />
     </el-scrollbar>
     <el-button
       v-if="canDelete && currentId"
@@ -105,9 +112,25 @@ function submitCreate() {
   font-weight: 600;
 }
 
+.picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
 .topology-list {
   flex: 1;
   min-height: 120px;
+}
+
+.topology-picker.compact .topology-list {
+  min-height: 80px;
+  max-height: min(280px, 36vh);
+}
+
+.topology-picker.compact .topology-item {
+  padding: 8px 10px;
+  margin-bottom: 6px;
 }
 
 .topology-item {

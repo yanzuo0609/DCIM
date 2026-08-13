@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +22,8 @@ from app.schemas.network import (
 from app.services.lab.base import LabEngine, LabLinkSpec, LabNodeSpec, NoneLabEngine
 from app.services.lab.eve_ng import EveNgAdapter
 from app.services.lab.mock import MockLabEngine
+
+logger = logging.getLogger(__name__)
 
 
 def get_lab_engine(settings: Settings | None = None) -> LabEngine:
@@ -38,6 +42,26 @@ def get_lab_engine(settings: Settings | None = None) -> LabEngine:
     if engine == "mock":
         return MockLabEngine()
     return NoneLabEngine()
+
+
+def _safe_int(value: Any, default: int | None = None) -> int | None:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _str_dict(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, val in raw.items():
+        if val is None:
+            continue
+        out[str(key)] = str(val)
+    return out
 
 
 class TopologyLabService:
@@ -62,6 +86,21 @@ class TopologyLabService:
             configured=configured,
             base_url=self.settings.eve_ng_base_url or None if self.engine.name == "eve-ng" else None,
             message=message,
+        )
+
+    def _to_response(self, session: NetworkLabSession) -> NetworkLabSessionResponse:
+        return NetworkLabSessionResponse(
+            id=session.id,
+            topology_id=session.topology_id,
+            engine=session.engine or self.engine.name,
+            external_lab_path=session.external_lab_path,
+            status=session.status or "idle",
+            last_sync_at=session.last_sync_at,
+            error_message=session.error_message,
+            node_map=_str_dict(session.node_map) or None,
+            node_status=_str_dict(session.node_status) or None,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
         )
 
     async def _get_topology(self, topology_id: uuid.UUID) -> NetworkTopology:
@@ -92,14 +131,13 @@ class TopologyLabService:
     async def get_session(self, topology_id: uuid.UUID) -> NetworkLabSessionResponse:
         await self._get_topology(topology_id)
         session = await self._get_or_create_session(topology_id)
-        return NetworkLabSessionResponse.model_validate(session)
+        return self._to_response(session)
 
     def _sim_image_from_model(self, model: NetworkDesignModel | None, kind: str) -> str:
         attrs = (model.attributes if model and isinstance(model.attributes, dict) else {}) or {}
         image = str(attrs.get("sim_image") or "").strip()
         if image:
             return image
-        # Sensible Eve template defaults by kind
         if kind == "switch":
             return "viosl2"
         if kind == "security":
@@ -133,17 +171,18 @@ class TopologyLabService:
         for n in nodes:
             model = models.get(n.design_model_id) if n.design_model_id else None
             attrs = (model.attributes if model and isinstance(model.attributes, dict) else {}) or {}
+            eth = max(4, _safe_int(n.switch_port_count, 8) or 8)
             specs.append(
                 LabNodeSpec(
                     local_id=str(n.id),
-                    name=n.name,
-                    image=self._sim_image_from_model(model, n.kind),
+                    name=n.name or str(n.id)[:8],
+                    image=self._sim_image_from_model(model, n.kind or "switch"),
                     left=int(n.pos_x or 100),
                     top=int(n.pos_y or 100),
                     icon=str(attrs.get("sim_icon") or "") or None,
-                    ram=int(attrs["sim_ram"]) if attrs.get("sim_ram") is not None else None,
-                    cpu=int(attrs["sim_cpu"]) if attrs.get("sim_cpu") is not None else None,
-                    ethernet=max(4, int(n.switch_port_count or 8)),
+                    ram=_safe_int(attrs.get("sim_ram")),
+                    cpu=_safe_int(attrs.get("sim_cpu")),
+                    ethernet=eth,
                 )
             )
 
@@ -157,9 +196,9 @@ class TopologyLabService:
         link_specs = [
             LabLinkSpec(
                 source_local_id=str(lk.source_node_id),
-                source_port=lk.source_port,
+                source_port=str(lk.source_port or ""),
                 target_local_id=str(lk.target_node_id),
-                target_port=lk.target_port,
+                target_port=str(lk.target_port or ""),
             )
             for lk in links_db
         ]
@@ -167,84 +206,105 @@ class TopologyLabService:
         session = await self._get_or_create_session(topology_id)
         try:
             result = await self.engine.sync_lab(
-                lab_name=topo.name,
+                lab_name=topo.name or f"topo-{topology_id}",
                 existing_path=session.external_lab_path,
                 nodes=specs,
                 links=link_specs,
-                existing_node_map={str(k): str(v) for k, v in (session.node_map or {}).items()},
+                existing_node_map=_str_dict(session.node_map),
             )
             session.external_lab_path = result.lab_path
-            session.node_map = result.node_map
+            session.node_map = _str_dict(result.node_map)
+            session.node_status = _str_dict(session.node_status)
             session.status = "synced"
             session.error_message = None
             session.last_sync_at = datetime.now(timezone.utc)
             session.engine = self.engine.name
             session.updated_by = user_id
+        except ValidationError:
+            raise
         except Exception as exc:
+            logger.exception("lab sync failed topology=%s", topology_id)
             session.status = "error"
             session.error_message = str(exc)[:1000]
             session.updated_by = user_id
             await self.session.flush()
-            raise ValidationError(str(exc)) from exc
+            raise ValidationError(f"同步实验室失败：{exc}") from exc
 
         await self.session.flush()
-        return NetworkLabSessionResponse.model_validate(session)
+        try:
+            return self._to_response(session)
+        except Exception as exc:
+            logger.exception("lab sync response build failed")
+            raise ValidationError(f"同步成功但响应序列化失败：{exc}") from exc
 
     async def start(self, topology_id: uuid.UUID, user_id: uuid.UUID | None = None) -> NetworkLabSessionResponse:
         session = await self._require_synced(topology_id)
         try:
-            result = await self.engine.start_lab(session.external_lab_path or "", dict(session.node_map or {}))
+            result = await self.engine.start_lab(
+                session.external_lab_path or "",
+                _str_dict(session.node_map),
+            )
             session.status = result.status
-            session.node_status = result.node_status
+            session.node_status = _str_dict(result.node_status)
             session.error_message = None
             session.updated_by = user_id
         except Exception as exc:
             session.status = "error"
             session.error_message = str(exc)[:1000]
             await self.session.flush()
-            raise ValidationError(str(exc)) from exc
+            raise ValidationError(f"启动实验室失败：{exc}") from exc
         await self.session.flush()
-        return NetworkLabSessionResponse.model_validate(session)
+        return self._to_response(session)
 
     async def stop(self, topology_id: uuid.UUID, user_id: uuid.UUID | None = None) -> NetworkLabSessionResponse:
         session = await self._require_synced(topology_id)
         try:
-            result = await self.engine.stop_lab(session.external_lab_path or "", dict(session.node_map or {}))
+            result = await self.engine.stop_lab(
+                session.external_lab_path or "",
+                _str_dict(session.node_map),
+            )
             session.status = result.status
-            session.node_status = result.node_status
+            session.node_status = _str_dict(result.node_status)
             session.error_message = None
             session.updated_by = user_id
         except Exception as exc:
             session.status = "error"
             session.error_message = str(exc)[:1000]
             await self.session.flush()
-            raise ValidationError(str(exc)) from exc
+            raise ValidationError(f"停止实验室失败：{exc}") from exc
         await self.session.flush()
-        return NetworkLabSessionResponse.model_validate(session)
+        return self._to_response(session)
 
     async def refresh_status(self, topology_id: uuid.UUID) -> NetworkLabSessionResponse:
         session = await self._get_or_create_session(topology_id)
         if not session.external_lab_path or not session.node_map:
-            return NetworkLabSessionResponse.model_validate(session)
+            return self._to_response(session)
         if not self.engine.is_configured():
-            return NetworkLabSessionResponse.model_validate(session)
+            return self._to_response(session)
         try:
-            result = await self.engine.get_status(session.external_lab_path, dict(session.node_map or {}))
+            result = await self.engine.get_status(
+                session.external_lab_path,
+                _str_dict(session.node_map),
+            )
             session.status = result.status
-            session.node_status = result.node_status
+            session.node_status = _str_dict(result.node_status)
             session.error_message = None
         except Exception as exc:
             session.error_message = str(exc)[:1000]
         await self.session.flush()
-        return NetworkLabSessionResponse.model_validate(session)
+        return self._to_response(session)
 
     async def console(self, topology_id: uuid.UUID, node_id: uuid.UUID) -> LabConsoleResponse:
         session = await self._require_synced(topology_id)
-        ext = (session.node_map or {}).get(str(node_id))
+        ext = _str_dict(session.node_map).get(str(node_id))
         if not ext:
             raise ValidationError("该节点尚未同步到实验室")
         url = await self.engine.console_url(session.external_lab_path or "", ext)
-        return LabConsoleResponse(node_id=node_id, console_url=url, message=None if url else "引擎未提供控制台地址")
+        return LabConsoleResponse(
+            node_id=node_id,
+            console_url=url,
+            message=None if url else "引擎未提供控制台地址",
+        )
 
     async def _require_synced(self, topology_id: uuid.UUID) -> NetworkLabSession:
         await self._get_topology(topology_id)

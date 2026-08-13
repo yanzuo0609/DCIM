@@ -9,8 +9,8 @@ const auth = useAuthStore()
 
 const tabs = computed(() => {
   const items = [
-    { path: '/network/models', label: '模型设计' },
-    { path: '/network/topology', label: '拓扑设计' },
+    { path: '/network/models', label: '模型库' },
+    { path: '/network/topology', label: '拓扑管理' },
     { path: '/network/interfaces', label: '接口设计' },
   ]
   return auth.hasPermission('network:view') ? items : []

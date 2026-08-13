@@ -161,6 +161,7 @@ class NetworkNodeResponse(BaseModel):
     contract_device_name: str | None = None
     network_role: str | None = None
     device_group: str | None = None
+    device_groups: list[str] | None = None
     pos_x: float
     pos_y: float
     switch_port_count: int
@@ -371,6 +372,7 @@ class CanvasNodeInput(BaseModel):
     contract_device_name: str | None = Field(default=None, max_length=100)
     network_role: str | None = Field(default=None, max_length=20)
     device_group: str | None = Field(default=None, max_length=80)
+    device_groups: list[str] | None = None
     pos_x: float = 100.0
     pos_y: float = 100.0
     switch_port_count: int = Field(default=48, ge=1, le=128)
@@ -385,6 +387,29 @@ class CanvasNodeInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_node(self) -> CanvasNodeInput:
+        # 归一多组：从 device_groups / device_group 合并，并回写首组到 device_group
+        groups: list[str] = []
+        seen: set[str] = set()
+
+        def _push(raw: object) -> None:
+            if isinstance(raw, list):
+                for item in raw:
+                    s = str(item or "").strip()
+                    if s and s not in seen:
+                        seen.add(s)
+                        groups.append(s)
+            elif isinstance(raw, str) and raw.strip():
+                for part in raw.replace(";", ",").split(","):
+                    s = part.strip()
+                    if s and s not in seen:
+                        seen.add(s)
+                        groups.append(s)
+
+        _push(self.device_groups)
+        _push(self.device_group)
+        self.device_groups = groups or None
+        self.device_group = groups[0] if groups else None
+
         if self.port_layout and self.port_layout.slots_def:
             self.slots = _slots_from_layout_def(self.port_layout.slots_def)
         elif self.kind in (NetworkNodeKind.SERVER, NetworkNodeKind.SECURITY):

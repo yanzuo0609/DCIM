@@ -4,6 +4,8 @@ import {
   NODE_KIND_LABELS,
   PORT_TYPE_LABELS,
   SWITCH_SUBTYPE_LABELS,
+  extractPortNumber,
+  extractSlotNumber,
   listNodePortOptions,
   type NetworkLink,
   type NetworkNode,
@@ -11,6 +13,7 @@ import {
 } from '@/api/network'
 import { FABRIC_ROLE_OPTIONS, type FabricRole } from '@/utils/wiringTypes'
 import { resolveNodeFabricRole } from '@/utils/fabricRole'
+import { nodeGroupList } from '@/utils/deviceGroups'
 
 const props = defineProps<{
   node: NetworkNode
@@ -25,7 +28,13 @@ const emit = defineEmits<{
   connectPort: [portId: string]
   clearPort: [portId: string]
   rename: [name: string]
-  updateMeta: [patch: { network_role?: string | null; device_group?: string | null }]
+  updateMeta: [
+    patch: {
+      network_role?: string | null
+      device_group?: string | null
+      device_groups?: string[] | null
+    },
+  ]
   manageGroups: []
   unplace: []
   remove: []
@@ -35,13 +44,14 @@ const emit = defineEmits<{
 const editingName = ref(false)
 const nameDraft = ref('')
 const roleDraft = ref<FabricRole | ''>('')
-const groupDraft = ref('')
+const groupDraft = ref<string[]>([])
+const portSortDir = ref<'asc' | 'desc'>('asc')
 
 watch(
   () => props.node.id,
   () => {
     roleDraft.value = (props.node.network_role as FabricRole) || resolveNodeFabricRole(props.node)
-    groupDraft.value = props.node.device_group || ''
+    groupDraft.value = [...nodeGroupList(props.node)]
   },
   { immediate: true },
 )
@@ -58,7 +68,7 @@ const effectiveRole = computed(() => resolveNodeFabricRole(props.node))
 
 const portRows = computed(() => {
   const opts = listNodePortOptions(props.node)
-  return opts.map((opt) => {
+  const rows = opts.map((opt) => {
     const frame = props.node.port_layout?.ports?.find((p) => p.id === opt.id)
     const link =
       props.links.find(
@@ -81,6 +91,7 @@ const portRows = computed(() => {
       }
     }
     const peerNode = peerNodeId ? props.nodes.find((n) => n.id === peerNodeId) : null
+    const numberKey = extractPortNumber(frame?.label || opt.id)
     return {
       id: opt.id,
       label: opt.label,
@@ -91,8 +102,17 @@ const portRows = computed(() => {
       peerPort,
       peerName: peerNode?.name || peerLabel || peerNodeId?.slice(0, 8) || '',
       linkLabel: peerLabel,
+      slotIndex: extractSlotNumber(opt.slot_index, opt.id),
+      numberKey,
     }
   })
+  const dir = portSortDir.value === 'desc' ? -1 : 1
+  rows.sort((a, b) => {
+    if (a.slotIndex !== b.slotIndex) return (a.slotIndex - b.slotIndex) * dir
+    if (a.numberKey !== b.numberKey) return (a.numberKey - b.numberKey) * dir
+    return a.id.localeCompare(b.id, 'en', { numeric: true, sensitivity: 'base' }) * dir
+  })
+  return rows
 })
 
 const linkedCount = computed(() => portRows.value.filter((p) => p.linked).length)
@@ -113,9 +133,11 @@ function commitRole() {
 }
 
 function commitGroup() {
-  const raw = typeof groupDraft.value === 'string' ? groupDraft.value.trim() : ''
-  groupDraft.value = raw
-  emit('updateMeta', { device_group: raw || null })
+  const list = (Array.isArray(groupDraft.value) ? groupDraft.value : [])
+    .map((g) => String(g || '').trim())
+    .filter(Boolean)
+  groupDraft.value = list
+  emit('updateMeta', { device_groups: list })
 }
 
 function peerTitle(row: (typeof portRows.value)[0]) {
@@ -126,6 +148,7 @@ function peerTitle(row: (typeof portRows.value)[0]) {
 
 <template>
   <div class="inspector-panel">
+    <div class="inspector-body">
     <h3>设备详情</h3>
 
     <div class="field">
@@ -146,6 +169,7 @@ function peerTitle(row: (typeof portRows.value)[0]) {
         v-if="editable"
         v-model="roleDraft"
         size="small"
+        popper-class="inspector-select-dropdown"
         style="width: 140px"
         @change="commitRole"
       >
@@ -164,19 +188,23 @@ function peerTitle(row: (typeof portRows.value)[0]) {
         <el-select
           v-model="groupDraft"
           size="small"
+          multiple
           clearable
           filterable
           allow-create
           default-first-option
-          placeholder="选择或新建"
-          style="width: 140px"
+          collapse-tags
+          collapse-tags-tooltip
+          popper-class="inspector-select-dropdown"
+          placeholder="可多选"
+          style="width: 160px"
           @change="commitGroup"
         >
           <el-option v-for="g in groupOptions || []" :key="g" :label="g" :value="g" />
         </el-select>
         <el-button type="primary" link size="small" @click="emit('manageGroups')">管理</el-button>
       </div>
-      <span v-else>{{ node.device_group || '-' }}</span>
+      <span v-else>{{ nodeGroupList(node).join('、') || '-' }}</span>
     </div>
     <p>
       <span class="label">状态</span>
@@ -200,7 +228,25 @@ function peerTitle(row: (typeof portRows.value)[0]) {
       </el-button>
     </template>
 
-    <h4 class="sub">接口与连线</h4>
+    <div class="sub-row">
+      <h4 class="sub">接口与连线</h4>
+      <el-button-group v-if="portRows.length" class="port-sort">
+        <el-button
+          size="small"
+          :type="portSortDir === 'asc' ? 'primary' : 'default'"
+          @click="portSortDir = 'asc'"
+        >
+          升序
+        </el-button>
+        <el-button
+          size="small"
+          :type="portSortDir === 'desc' ? 'primary' : 'default'"
+          @click="portSortDir = 'desc'"
+        >
+          降序
+        </el-button>
+      </el-button-group>
+    </div>
     <div v-if="!portRows.length" class="empty">暂无接口定义，请先在「设备定义」配置面板</div>
     <div v-else class="port-list">
       <div v-for="row in portRows" :key="row.id" class="port-row" :class="{ linked: row.linked }">
@@ -231,6 +277,7 @@ function peerTitle(row: (typeof portRows.value)[0]) {
         </div>
       </div>
     </div>
+    </div>
 
     <div v-if="editable" class="danger-actions">
       <el-button
@@ -248,15 +295,44 @@ function peerTitle(row: (typeof portRows.value)[0]) {
 </template>
 
 <style scoped>
+.inspector-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
 .inspector-panel h3 {
   margin: 0 0 12px;
   font-size: 15px;
 }
 
-.sub {
+.sub-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin: 14px 0 8px;
+}
+
+.sub {
+  margin: 0;
   font-size: 13px;
   color: #606266;
+}
+
+.port-sort :deep(.el-button) {
+  padding: 4px 8px;
 }
 
 .field {
@@ -301,9 +377,12 @@ p {
 .port-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: calc(100vh - 420px);
+  gap: 4px;
+  width: 100%;
+  max-height: 50vh;
   overflow: auto;
+  min-height: 0;
+  flex: 1;
 }
 
 .port-row {
@@ -311,7 +390,7 @@ p {
   align-items: flex-start;
   justify-content: space-between;
   gap: 6px;
-  padding: 8px;
+  padding: 6px 8px;
   border: 1px solid #ebeef5;
   border-radius: 6px;
   background: #fafafa;
@@ -352,6 +431,16 @@ p {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 14px;
+  flex-shrink: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #ebeef5;
+  background: #fff;
+}
+</style>
+
+<style>
+.inspector-select-dropdown .el-select-dropdown__wrap {
+  max-height: 50vh !important;
 }
 </style>

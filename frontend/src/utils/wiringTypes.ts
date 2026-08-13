@@ -1,7 +1,13 @@
 /** 拓扑布线规则结构化配置（与后端 wiring_rule_config 对齐；UI 按表格分区） */
 
 export type FabricRole = 'CORE' | 'AGG' | 'ACCESS' | 'SERVER' | 'FIREWALL' | 'OTHER'
+/** 布线连接类型（业务语义）；旧值在 normalize 时迁移 */
 export type ConnectionType =
+  | 'ACCESS_ENDPOINT'
+  | 'BMC_ENDPOINT'
+  | 'CORE_TO_ACCESS'
+  | 'SWITCH_INTERCONNECT'
+  // legacy
   | 'UPLINK'
   | 'DOWNLINK'
   | 'SERVER'
@@ -12,11 +18,19 @@ export type ConnectionType =
 export type SpeedMode = 'EXACT' | 'MIN'
 export type PairingMode = 'PER_SOURCE_TARGET' | 'POOL'
 export type PortPurpose = 'UPLINK' | 'DOWNLINK' | 'MGMT' | 'PEER' | 'DAD' | 'SERVER' | 'OTHER'
+/** 端口池：关联模型板卡光口 / 40/100G 上联口 */
+export type PortPool = 'AUTO' | 'OPTICAL' | 'UPLINK'
 export type DiversityLevel = 'REQUIRED' | 'OPTIONAL' | 'OFF'
 export type RedundancyMode = 'NONE' | 'A_B'
 export type LagMode = 'STATIC' | 'LACP'
 export type DistanceMode = 'AUTO' | 'FIXED'
 export type CableLengthMode = 'AUTO' | 'FIXED'
+/** 端口分配模式：AUTO 场景配对；MANUAL 仅 pairs；HYBRID 先预览可改口 */
+export type AllocationMode = 'AUTO' | 'MANUAL' | 'HYBRID'
+/** 候选口排序/选取策略 */
+export type PortSelectPolicy = 'MIN_ASC' | 'MAX_DESC' | 'SAME_NUMBER' | 'SLOT_SPREAD'
+/** 端口介质类型（内置键或自定义 value；兼容旧 FIBER|COPPER） */
+export type PortMediaFilter = string
 export type MediaKind =
   | 'AUTO'
   | 'DAC'
@@ -37,7 +51,13 @@ export interface WiringPair {
 export interface WiringRuleConfig {
   source_role?: FabricRole | null
   target_role?: FabricRole | null
+  /** 源设备组（可多选） */
+  source_groups?: string[]
+  /** 目标设备组（可多选） */
+  target_groups?: string[]
+  /** @deprecated 兼容旧配置，normalize 时并入 source_groups */
   source_group?: string | null
+  /** @deprecated 兼容旧配置，normalize 时并入 target_groups */
   target_group?: string | null
   source_node_ids?: string[]
   target_node_ids?: string[]
@@ -56,6 +76,9 @@ export interface WiringRuleConfig {
 
   source_port_purpose?: PortPurpose | null
   target_port_purpose?: PortPurpose | null
+  /** 源端口池：AUTO 按 purpose 推导；OPTICAL=板卡光口；UPLINK=40/100G 上联 */
+  source_port_pool?: PortPool | null
+  target_port_pool?: PortPool | null
   port_speed?: string | null
   port_type?: string | null
   source_port_types?: string[]
@@ -65,7 +88,14 @@ export interface WiringRuleConfig {
   source_port_range?: string | null
   target_port_range?: string | null
   peer_port_range?: string | null
+  /** @deprecated 用 allocation_mode */
   port_allocation?: 'AUTO'
+  /** AUTO | MANUAL | HYBRID */
+  allocation_mode?: AllocationMode
+  source_port_policy?: PortSelectPolicy
+  target_port_policy?: PortSelectPolicy
+  /** 端口能力介质过滤（非线缆类型） */
+  port_media?: PortMediaFilter | null
   port_priority?: number
 
   redundancy_mode?: RedundancyMode
@@ -81,6 +111,16 @@ export interface WiringRuleConfig {
   peer_link_speed?: string | null
   peer_media?: MediaKind | null
   peer_port_purpose?: PortPurpose
+  /** 组内 INTRA / 组间 INTER — docs/rules.md 第四节 */
+  interconnect_scope?: 'INTRA_GROUP' | 'INTER_GROUP'
+  /** 启用 peer-link（UPLINK 尾口） */
+  enable_peer_link?: boolean
+  /** 启用 DAD（DOWNLINK 尾口） */
+  enable_dad?: boolean
+  /** peer 使用 UPLINK 末口数量，默认 2 */
+  peer_tail_count?: number
+  /** DAD 使用 DOWNLINK 末口数量，默认 2 */
+  dad_tail_count?: number
 
   keepalive?: boolean
   keepalive_network?: string | null
@@ -116,13 +156,46 @@ export const FABRIC_ROLE_OPTIONS: { value: FabricRole; label: string }[] = [
 ]
 
 export const CONNECTION_TYPE_OPTIONS: { value: ConnectionType; label: string }[] = [
-  { value: 'UPLINK', label: '上联 UPLINK' },
-  { value: 'DOWNLINK', label: '下联 DOWNLINK' },
-  { value: 'SERVER', label: '服务器接入 SERVER' },
-  { value: 'SECURITY', label: '安全接入 SECURITY' },
-  { value: 'PEER', label: '互联线 PEER-LINK' },
-  { value: 'DAD', label: '心跳线 DAD' },
+  { value: 'ACCESS_ENDPOINT', label: '接入到服务器/安全设备' },
+  { value: 'BMC_ENDPOINT', label: 'BMC到服务器/安全设备' },
+  { value: 'CORE_TO_ACCESS', label: '核心/汇聚到接入交换机' },
+  { value: 'SWITCH_INTERCONNECT', label: '交换机到交换机互联' },
 ]
+
+const LEGACY_CONNECTION_MAP: Record<string, ConnectionType> = {
+  UPLINK: 'CORE_TO_ACCESS',
+  DOWNLINK: 'CORE_TO_ACCESS',
+  SERVER: 'ACCESS_ENDPOINT',
+  SECURITY: 'ACCESS_ENDPOINT',
+  PEER: 'SWITCH_INTERCONNECT',
+  DAD: 'SWITCH_INTERCONNECT',
+  MGMT: 'BMC_ENDPOINT',
+}
+
+/** 将旧连接类型迁移为现行四类 */
+export function migrateConnectionType(raw: string | null | undefined): ConnectionType {
+  const v = String(raw || '').trim() || 'CORE_TO_ACCESS'
+  if (
+    v === 'ACCESS_ENDPOINT' ||
+    v === 'BMC_ENDPOINT' ||
+    v === 'CORE_TO_ACCESS' ||
+    v === 'SWITCH_INTERCONNECT'
+  ) {
+    return v
+  }
+  return LEGACY_CONNECTION_MAP[v] || 'CORE_TO_ACCESS'
+}
+
+export function connectionTypeLabel(raw: string | null | undefined): string {
+  const v = migrateConnectionType(raw)
+  return CONNECTION_TYPE_OPTIONS.find((o) => o.value === v)?.label || v
+}
+
+/** 交换机互联（含旧 PEER/DAD） */
+export function isSwitchInterconnect(conn: string | null | undefined): boolean {
+  const v = migrateConnectionType(conn)
+  return v === 'SWITCH_INTERCONNECT' || conn === 'PEER' || conn === 'DAD'
+}
 
 export const PORT_PURPOSE_OPTIONS: { value: PortPurpose; label: string }[] = [
   { value: 'UPLINK', label: 'UPLINK' },
@@ -130,7 +203,62 @@ export const PORT_PURPOSE_OPTIONS: { value: PortPurpose; label: string }[] = [
   { value: 'MGMT', label: 'MGMT' },
   { value: 'PEER', label: 'PEER-LINK' },
   { value: 'DAD', label: 'DAD' },
+  { value: 'SERVER', label: 'SERVER' },
 ]
+
+export const PORT_POOL_OPTIONS: { value: PortPool; label: string }[] = [
+  { value: 'AUTO', label: '自动（按 Purpose）' },
+  { value: 'OPTICAL', label: '板卡光口' },
+  { value: 'UPLINK', label: '40/100G 上联' },
+]
+
+export const ALLOCATION_MODE_OPTIONS: { value: AllocationMode; label: string }[] = [
+  { value: 'AUTO', label: '自动分配' },
+  { value: 'HYBRID', label: '自动后可改' },
+  { value: 'MANUAL', label: '手动指定端口' },
+]
+
+export const INTERCONNECT_SCOPE_OPTIONS: {
+  value: 'INTRA_GROUP' | 'INTER_GROUP'
+  label: string
+}[] = [
+  { value: 'INTRA_GROUP', label: '组内互联（Peer + DAD）' },
+  { value: 'INTER_GROUP', label: '组间互联（交叉上联）' },
+]
+
+export const PORT_POLICY_OPTIONS: { value: PortSelectPolicy; label: string }[] = [
+  { value: 'MIN_ASC', label: '口号升序' },
+  { value: 'MAX_DESC', label: '口号降序' },
+  { value: 'SAME_NUMBER', label: '同号优先' },
+  { value: 'SLOT_SPREAD', label: 'Slot 分散' },
+]
+
+/** @deprecated 使用 portMediaCatalog.listPortMediaTypes */
+export const PORT_MEDIA_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'AUTO', label: '不限' },
+  { value: 'LC_LC', label: 'LC-LC光纤接口' },
+  { value: 'MPO8', label: 'MPO8芯光纤' },
+  { value: 'MPO4', label: 'MPO4芯光纤' },
+  { value: 'FIBER', label: '光纤口（旧）' },
+  { value: 'COPPER', label: '电口（旧）' },
+]
+
+/** Purpose → 默认端口池 */
+export function poolFromPurpose(purpose: PortPurpose | null | undefined): PortPool {
+  if (purpose === 'UPLINK' || purpose === 'PEER' || purpose === 'DAD') return 'UPLINK'
+  if (purpose === 'DOWNLINK' || purpose === 'SERVER') return 'OPTICAL'
+  return 'AUTO'
+}
+
+/** 解析有效端口池（显式非 AUTO 优先，否则按 purpose） */
+export function resolveEffectivePortPool(
+  pool: PortPool | null | undefined,
+  purpose: PortPurpose | null | undefined,
+): PortPool | null {
+  if (pool && pool !== 'AUTO') return pool
+  const derived = poolFromPurpose(purpose)
+  return derived === 'AUTO' ? null : derived
+}
 
 export const MEDIA_OPTIONS: { value: MediaKind; label: string }[] = [
   { value: 'AUTO', label: 'AUTO' },
@@ -145,17 +273,27 @@ export const MEDIA_OPTIONS: { value: MediaKind; label: string }[] = [
 
 export const SPEED_OPTIONS = ['1G', '10G', '25G', '40G', '100G', '400G']
 
-export const CONNECTION_TO_LINK_ROLE: Record<ConnectionType, string> = {
+export const CONNECTION_TO_LINK_ROLE: Record<string, string> = {
+  ACCESS_ENDPOINT: 'server',
+  BMC_ENDPOINT: 'mgmt',
+  CORE_TO_ACCESS: 'uplink',
+  SWITCH_INTERCONNECT: 'interconnect',
+  // legacy
   UPLINK: 'uplink',
   DOWNLINK: 'downlink',
   SERVER: 'server',
   SECURITY: 'security',
   PEER: 'interconnect',
   DAD: 'interconnect',
-  MGMT: 'downlink',
+  MGMT: 'mgmt',
 }
 
-export const CONNECTION_TO_LINK_TYPE: Record<ConnectionType, string> = {
+export const CONNECTION_TO_LINK_TYPE: Record<string, string> = {
+  ACCESS_ENDPOINT: 'switch_server',
+  BMC_ENDPOINT: 'switch_server',
+  CORE_TO_ACCESS: 'switch_switch',
+  SWITCH_INTERCONNECT: 'switch_switch',
+  // legacy
   UPLINK: 'switch_switch',
   DOWNLINK: 'switch_switch',
   SERVER: 'switch_server',
@@ -165,57 +303,130 @@ export const CONNECTION_TO_LINK_TYPE: Record<ConnectionType, string> = {
   MGMT: 'switch_switch',
 }
 
-function defaultPurpose(conn: ConnectionType, _side: 'source' | 'target'): PortPurpose {
-  if (conn === 'UPLINK') return 'UPLINK'
-  if (conn === 'DOWNLINK') return 'DOWNLINK'
-  if (conn === 'SERVER') return 'DOWNLINK'
-  if (conn === 'SECURITY') return 'DOWNLINK'
-  if (conn === 'PEER') return 'PEER'
-  if (conn === 'DAD') return 'DAD'
-  if (conn === 'MGMT') return 'MGMT'
+function defaultPurpose(conn: ConnectionType, side: 'source' | 'target'): PortPurpose {
+  const c = migrateConnectionType(conn)
+  // 核心/汇聚板卡口(DOWNLINK) → 接入 UPLINK
+  if (c === 'CORE_TO_ACCESS') return side === 'source' ? 'DOWNLINK' : 'UPLINK'
+  if (c === 'ACCESS_ENDPOINT') return side === 'source' ? 'DOWNLINK' : 'SERVER'
+  if (c === 'BMC_ENDPOINT') return 'MGMT'
+  if (c === 'SWITCH_INTERCONNECT') return 'PEER'
   return 'OTHER'
 }
 
-/** 连接类型切换时同步 Peer/DAD 相关开关与默认 Purpose */
+function defaultSpeedForConnection(conn: ConnectionType): string {
+  const c = migrateConnectionType(conn)
+  if (c === 'CORE_TO_ACCESS' || c === 'SWITCH_INTERCONNECT') return '100G'
+  if (c === 'BMC_ENDPOINT') return '1G'
+  return '10G'
+}
+
+function defaultRolesForConnection(conn: ConnectionType): {
+  source_role: FabricRole
+  target_role: FabricRole
+} {
+  const c = migrateConnectionType(conn)
+  if (c === 'ACCESS_ENDPOINT' || c === 'BMC_ENDPOINT') {
+    return { source_role: 'ACCESS', target_role: 'SERVER' }
+  }
+  if (c === 'SWITCH_INTERCONNECT') {
+    return { source_role: 'ACCESS', target_role: 'ACCESS' }
+  }
+  // CORE_TO_ACCESS
+  return { source_role: 'CORE', target_role: 'ACCESS' }
+}
+
+/** 连接类型切换时同步 Peer、Purpose、端口池、默认角色与速率 */
 export function applyConnectionTypeSideEffects(cfg: WiringRuleConfig): WiringRuleConfig {
-  const conn = cfg.connection_type || 'UPLINK'
-  if (conn === 'PEER') {
+  const conn = migrateConnectionType(cfg.connection_type)
+  cfg.connection_type = conn
+  const roles = defaultRolesForConnection(conn)
+  cfg.source_role = roles.source_role
+  cfg.target_role = roles.target_role
+
+  if (conn === 'SWITCH_INTERCONNECT') {
     cfg.peer_link = true
     cfg.keepalive = false
     cfg.source_port_purpose = 'PEER'
     cfg.target_port_purpose = 'PEER'
-  } else if (conn === 'DAD') {
-    cfg.peer_link = true
-    cfg.keepalive = true
-    cfg.source_port_purpose = 'DAD'
-    cfg.target_port_purpose = 'DAD'
+    cfg.source_port_pool = 'UPLINK'
+    cfg.target_port_pool = 'UPLINK'
+    cfg.speed_mode = 'EXACT'
+    cfg.interconnect_scope = cfg.interconnect_scope || 'INTRA_GROUP'
+    cfg.enable_peer_link = cfg.enable_peer_link ?? true
+    cfg.enable_dad = cfg.enable_dad ?? true
+    cfg.peer_tail_count = Math.max(1, Number(cfg.peer_tail_count) || 2)
+    cfg.dad_tail_count = Math.max(1, Number(cfg.dad_tail_count) || 2)
+    if (cfg.interconnect_scope === 'INTER_GROUP' && !cfg.allocation_mode) {
+      cfg.allocation_mode = 'MANUAL'
+    } else if (!cfg.allocation_mode) {
+      cfg.allocation_mode = 'AUTO'
+    }
   } else {
     cfg.peer_link = false
     cfg.keepalive = false
     cfg.source_port_purpose = defaultPurpose(conn, 'source')
     cfg.target_port_purpose = defaultPurpose(conn, 'target')
+    cfg.source_port_pool = poolFromPurpose(cfg.source_port_purpose)
+    cfg.target_port_pool = poolFromPurpose(cfg.target_port_purpose)
+    cfg.speed_mode = conn === 'CORE_TO_ACCESS' ? 'MIN' : 'EXACT'
+    if (conn === 'ACCESS_ENDPOINT') {
+      cfg.target_port_policy = 'SLOT_SPREAD'
+      cfg.source_port_policy = 'MIN_ASC'
+    }
   }
+  const speed = defaultSpeedForConnection(conn)
+  cfg.speed = speed
+  cfg.port_speed = speed
   return cfg
+}
+
+/** 将 source_group(s) / target_group(s) 统一为去重字符串数组 */
+export function coerceWiringGroups(raw: unknown): string[] {
+  const out: string[] = []
+  const push = (v: unknown) => {
+    const s = String(v ?? '').trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  if (Array.isArray(raw)) {
+    for (const item of raw) push(item)
+  } else if (raw != null && raw !== '') {
+    push(raw)
+  }
+  return out
+}
+
+/** 合并复数与旧版单数字段 */
+export function resolveWiringGroups(
+  groups: unknown,
+  legacySingular: unknown,
+): string[] {
+  const fromList = coerceWiringGroups(groups)
+  if (fromList.length) return fromList
+  return coerceWiringGroups(legacySingular)
 }
 
 export function defaultWiringConfig(): WiringRuleConfig {
   return {
     source_role: 'CORE',
-    target_role: 'AGG',
+    target_role: 'ACCESS',
+    source_groups: [],
+    target_groups: [],
     source_group: null,
     target_group: null,
     source_node_ids: [],
     target_node_ids: [],
-    connection_type: 'UPLINK',
+    connection_type: 'CORE_TO_ACCESS',
     required: true,
     link_count: 2,
     min_link_count: 2,
     max_link_count: 4,
     speed: '100G',
-    speed_mode: 'EXACT',
+    speed_mode: 'MIN',
     pairing: 'PER_SOURCE_TARGET',
-    source_port_purpose: 'UPLINK',
+    source_port_purpose: 'DOWNLINK',
     target_port_purpose: 'UPLINK',
+    source_port_pool: 'OPTICAL',
+    target_port_pool: 'UPLINK',
     port_speed: '100G',
     source_port_types: [],
     target_port_types: [],
@@ -225,6 +436,10 @@ export function defaultWiringConfig(): WiringRuleConfig {
     target_port_range: null,
     peer_port_range: null,
     port_allocation: 'AUTO',
+    allocation_mode: 'AUTO',
+    source_port_policy: 'MIN_ASC',
+    target_port_policy: 'MIN_ASC',
+    port_media: 'AUTO',
     port_priority: 100,
     redundancy_mode: 'A_B',
     device_diversity: 'OFF',
@@ -238,6 +453,11 @@ export function defaultWiringConfig(): WiringRuleConfig {
     peer_link_speed: '100G',
     peer_media: 'DAC',
     peer_port_purpose: 'PEER',
+    interconnect_scope: 'INTRA_GROUP',
+    enable_peer_link: true,
+    enable_dad: true,
+    peer_tail_count: 2,
+    dad_tail_count: 2,
     keepalive: false,
     keepalive_network: 'OOB',
     lag: true,
@@ -261,9 +481,7 @@ export function defaultWiringConfig(): WiringRuleConfig {
 export function normalizeWiringConfig(raw: Record<string, unknown> | null | undefined): WiringRuleConfig {
   const base = defaultWiringConfig()
   const data = { ...base, ...(raw || {}) } as WiringRuleConfig
-  let conn = (data.connection_type || 'UPLINK') as ConnectionType
-  // 兼容旧 MGMT
-  if ((conn as string) === 'MGMT') conn = 'DOWNLINK'
+  const conn = migrateConnectionType(data.connection_type as string)
   data.connection_type = conn
 
   if (data.max_link_count == null && data.max_links != null) {
@@ -278,19 +496,22 @@ export function normalizeWiringConfig(raw: Record<string, unknown> | null | unde
   if (!data.source_port_purpose) data.source_port_purpose = defaultPurpose(conn, 'source')
   if (!data.target_port_purpose) data.target_port_purpose = defaultPurpose(conn, 'target')
   if (!data.port_speed && data.speed) data.port_speed = data.speed
+  if (!data.source_port_pool) data.source_port_pool = poolFromPurpose(data.source_port_purpose)
+  if (!data.target_port_pool) data.target_port_pool = poolFromPurpose(data.target_port_purpose)
 
-  if (data.peer_link || conn === 'PEER' || conn === 'DAD') {
+  if (data.peer_link || isSwitchInterconnect(conn)) {
     data.peer_link = true
-    if (conn === 'DAD') {
-      data.keepalive = true
-      data.source_port_purpose = 'DAD'
-      data.target_port_purpose = 'DAD'
-    } else {
-      if (conn !== 'PEER') data.connection_type = 'PEER'
-      data.source_port_purpose = data.source_port_purpose || 'PEER'
-      data.target_port_purpose = data.target_port_purpose || 'PEER'
-    }
+    data.connection_type = 'SWITCH_INTERCONNECT'
+    data.source_port_purpose = data.source_port_purpose || 'PEER'
+    data.target_port_purpose = data.target_port_purpose || 'PEER'
+    data.source_port_pool = 'UPLINK'
+    data.target_port_pool = 'UPLINK'
     data.link_count = Math.max(1, Number(data.peer_link_count) || 2)
+    data.interconnect_scope = data.interconnect_scope || 'INTRA_GROUP'
+    data.enable_peer_link = data.enable_peer_link ?? true
+    data.enable_dad = data.enable_dad ?? true
+    data.peer_tail_count = Math.max(1, Number(data.peer_tail_count) || 2)
+    data.dad_tail_count = Math.max(1, Number(data.dad_tail_count) || 2)
     if (data.peer_port_range) {
       data.source_port_range = data.source_port_range || data.peer_port_range
       data.target_port_range = data.target_port_range || data.peer_port_range
@@ -306,5 +527,58 @@ export function normalizeWiringConfig(raw: Record<string, unknown> | null | unde
   data.target_node_ids = Array.isArray(data.target_node_ids) ? data.target_node_ids : []
   data.source_port_types = Array.isArray(data.source_port_types) ? data.source_port_types : []
   data.target_port_types = Array.isArray(data.target_port_types) ? data.target_port_types : []
+  data.source_port_ids = Array.isArray(data.source_port_ids) ? data.source_port_ids : []
+  data.target_port_ids = Array.isArray(data.target_port_ids) ? data.target_port_ids : []
+
+  // allocation_mode：兼容旧 port_allocation
+  const modeRaw = String(data.allocation_mode || data.port_allocation || 'AUTO').toUpperCase()
+  data.allocation_mode =
+    modeRaw === 'MANUAL' || modeRaw === 'HYBRID' ? (modeRaw as AllocationMode) : 'AUTO'
+  data.port_allocation = 'AUTO'
+  if (!data.source_port_policy) data.source_port_policy = 'MIN_ASC'
+  if (!data.target_port_policy) data.target_port_policy = 'MIN_ASC'
+  if (!data.port_media) data.port_media = 'AUTO'
+  if (!data.speed_mode) {
+    data.speed_mode =
+      conn === 'CORE_TO_ACCESS' || conn === 'ACCESS_ENDPOINT' ? 'MIN' : 'EXACT'
+  }
+
+  data.source_groups = resolveWiringGroups(data.source_groups, data.source_group)
+  data.target_groups = resolveWiringGroups(data.target_groups, data.target_group)
+  data.source_group = data.source_groups[0] ?? null
+  data.target_group = data.target_groups[0] ?? null
+
+  // 接入→服务器：纠正连接类型与 purpose/pool/speed 不一致（残留 CORE 的 UPLINK/100G 会导致空池）
+  if (conn === 'ACCESS_ENDPOINT') {
+    const badTarget =
+      !data.target_port_purpose ||
+      data.target_port_purpose === 'UPLINK' ||
+      data.target_port_purpose === 'PEER' ||
+      data.target_port_purpose === 'DAD'
+    if (badTarget) data.target_port_purpose = 'SERVER'
+    const badSource =
+      !data.source_port_purpose ||
+      data.source_port_purpose === 'UPLINK' ||
+      data.source_port_purpose === 'PEER' ||
+      data.source_port_purpose === 'SERVER'
+    if (badSource) data.source_port_purpose = 'DOWNLINK'
+    if (!data.source_port_pool || data.source_port_pool === 'UPLINK') {
+      data.source_port_pool = poolFromPurpose(data.source_port_purpose)
+    }
+    if (!data.target_port_pool || data.target_port_pool === 'UPLINK') {
+      data.target_port_pool = poolFromPurpose(data.target_port_purpose)
+    }
+    const sp = String(data.port_speed || data.speed || '')
+      .trim()
+      .toUpperCase()
+      .replace('_', '')
+    if (!sp || sp === '40G' || sp === '100G' || sp === '400G' || sp === '40100G') {
+      data.speed = '10G'
+      data.port_speed = '10G'
+    }
+    // MIN：允许 25G NIC；避免 EXACT+错误速率把两端滤空
+    data.speed_mode = 'MIN'
+  }
+
   return data
 }
