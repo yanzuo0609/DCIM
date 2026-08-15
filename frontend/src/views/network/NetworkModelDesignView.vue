@@ -6,6 +6,8 @@ import SwitchChassisSchematic from '@/components/SwitchChassisSchematic.vue'
 import SwitchChassisRearSchematic from '@/components/SwitchChassisRearSchematic.vue'
 import AccessSwitchSchematic from '@/components/AccessSwitchSchematic.vue'
 import AccessSwitchRearSchematic from '@/components/AccessSwitchRearSchematic.vue'
+import ServerFrontSchematic from '@/components/ServerFrontSchematic.vue'
+import ServerRearSchematic from '@/components/ServerRearSchematic.vue'
 import TitleHintBang from '@/components/TitleHintBang.vue'
 import TopologyDeviceIcon from '@/components/TopologyDeviceIcon.vue'
 import {
@@ -107,19 +109,37 @@ import {
   defaultServerAttributes,
   diskFrontMaxForU,
   diskRearMaxForU,
+  groupServerPorts,
+  listServerPorts,
+  PCIE_FLEX_PORT_OPTIONS,
+  readPcieSlots,
+  normalizeDiskSize,
+  normalizeFlexSpeed,
+  normalizeMemoryType,
+  normalizeOsSupport,
+  normalizePsuRedundancy,
   normalizeServerFormFactor,
   readServerIfaceSlots,
   renumberServerSlotPorts,
+  SERVER_DISK_PROTO_OPTIONS,
+  SERVER_DISK_SIZE_OPTIONS,
+  SERVER_FLEX_SPEED_OPTIONS,
   SERVER_HEIGHT_OPTIONS,
+  SERVER_MEMORY_TYPE_OPTIONS,
+  SERVER_OS_OPTIONS,
+  SERVER_PSU_REDUNDANCY_OPTIONS,
+  SERVER_SSD_IFACE_OPTIONS,
+  SERVER_SSD_TYPE_OPTIONS,
   serverIfaceSlotsToDesignSlots,
+  serverPortKindLabel,
   serverSlotLabelFromInterfaces,
-  serverSlotNicType,
   applyServerSlotNicType,
   isOnboardSlot,
   defaultExpansionSlot,
-  serverSlotPortRangeLabel,
   syncServerDerivedAttrs,
   type ServerIfaceSlotAttr,
+  type ServerPcieSlotAttr,
+  type ServerPortAttr,
   type ServerSlotNicType,
 } from '@/utils/serverModelAttrs'
 import {
@@ -196,6 +216,11 @@ const modelForm = reactive({
 const contractSummaries = ref<DeviceContractSummary[]>([])
 const selectedSummaryKey = ref<string | null>(null)
 const customPanelVisible = ref(false)
+const panelDemoZoom = ref<1 | 2>(1)
+const panelDemoCssZoom = computed(() => (panelDemoZoom.value === 1 ? 0.88 : 2))
+const serverStyleFrontInput = ref<HTMLInputElement | null>(null)
+const serverStyleRearInput = ref<HTMLInputElement | null>(null)
+const serverPanelShowImage = ref(false)
 const ifaceBoardViewport = ref<HTMLElement | null>(null)
 const ifaceBoardCanPrev = ref(false)
 const ifaceBoardCanNext = ref(false)
@@ -287,6 +312,7 @@ const schemaFields = computed(() =>
         'system_ports',
         'panel_style_image',
         'panel_style_mode',
+        'panel_style_image_rear',
         'security_slots',
         'control_ports',
         'ha_ports',
@@ -338,7 +364,10 @@ const blankPanelRows = computed<number[]>(() => {
 
 /** 各区块说明（相同规则只写一次，挂在标题叹号） */
 const SERVER_SLOT_CONFIG_HINT =
-  'Slot1 固定为板载（可同时配置 IPMI / VGA / USB / 10G / 1G 并自动编号）；Slot2+ 为扩展卡，仅配置万兆或千兆一种网口。'
+  '管理口与网络口均分配稳定 ID（如 bmc-p0）与编号（BMC1 / LOM1 / F10G1），供拓扑布线引用。IPMI 通常走 BMC 管理口，需要独立口时再填写个数。'
+
+const SERVER_PANEL_HINT =
+  '按机箱 1U/2U/4U 与盘位自动生成前后面板仿真。可 1×/2× 缩放、自定义网格，或上传前后面板样式图片覆盖演示。左键选接口、右键查看 ID/编号。'
 
 const SECURITY_SLOT_CONFIG_HINT =
   '默认 4 槽；每槽含 Control/HA/MGMT/USB、10G 光口与 1G 电口，编号分别为 slotx-10G-(n)、slotx-1G-(n)。'
@@ -349,9 +378,9 @@ const switchSlotConfigHint = computed(() => {
     return '核心/汇聚：正面/背面同时显示。左键点击接口编辑，右键查看接口信息。空白面板可拖拽或用 ↑↓ 调整位置。点击「自定义面板」后，在网格上框选定义业务接口板。'
   }
   if (role === 'ten_gigabit') {
-    return '万兆：业务口为万兆以太网光接口（默认 48，可自定义）；上联为 40G 或 100G 光接口（默认 6 或 8）。面板演示可将上联放在中间或右侧；mgmt 在背面右侧。'
+    return '万兆：业务口为万兆以太网光接口（默认 48，可自定义）；上联为 40G 或 100G 光接口（默认 6 或 8）。面板演示可将上联放在中间或右侧；mgmt 在背面右侧。点击「自定义面板」可在网格上框选自定义布局。'
   }
-  return '千兆：业务口为千兆以太网光接口或电口（默认 48，可自定义）；上联默认 8 个，面板演示上联在右侧；mgmt 在背面右侧。'
+  return '千兆：业务口为千兆以太网光接口或电口（默认 48，可自定义）；上联默认 8 个，面板演示上联在右侧；mgmt 在背面右侧。点击「自定义面板」可在网格上框选自定义布局。'
 })
 
 const panelStyleHint = computed(() => {
@@ -432,6 +461,23 @@ const serverIfaceSlots = computed<ServerIfaceSlotAttr[]>(() => {
   return readServerIfaceSlots(m.attributes)
 })
 
+const serverPorts = computed<ServerPortAttr[]>(() => {
+  const m = selectedModel.value
+  if (!m?.attributes || !isServerModel.value) return []
+  return listServerPorts(m.attributes)
+})
+
+const serverPortGroups = computed(() => groupServerPorts(serverPorts.value))
+
+const serverPcieSlots = computed<ServerPcieSlotAttr[]>(() => {
+  const m = selectedModel.value
+  if (!m?.attributes || !isServerModel.value) return []
+  return readPcieSlots(m.attributes)
+})
+
+const serverStyleImageFront = computed(() => String(selectedModel.value?.attributes?.panel_style_image || ''))
+const serverStyleImageRear = computed(() => String(selectedModel.value?.attributes?.panel_style_image_rear || ''))
+
 const serverOnboardSlot = computed(() => serverIfaceSlots.value.find((s) => isOnboardSlot(s)) || null)
 
 const serverExpansionSlots = computed(() => serverIfaceSlots.value.filter((s) => !isOnboardSlot(s)))
@@ -443,7 +489,7 @@ function serverSlotListIndex(slot: ServerIfaceSlotAttr): number {
 const serverSlots = computed<DesignSlotAttr[]>(() => {
   const m = selectedModel.value
   if (!m || m.category !== 'server') return []
-  return serverIfaceSlotsToDesignSlots(serverIfaceSlots.value)
+  return serverIfaceSlotsToDesignSlots(serverIfaceSlots.value, m.attributes)
 })
 
 const serverDiskFrontMax = computed(() =>
@@ -901,7 +947,7 @@ async function selectModel(row: NetworkDesignModel) {
     }
     syncServerDerivedAttrs(row.attributes)
     row.height_u = normalizeServerFormFactor(row.attributes.form_factor_u ?? row.height_u)
-    ensurePanelLayout(row.attributes, serverIfaceSlotsToDesignSlots(readServerIfaceSlots(row.attributes)), false)
+    ensurePanelLayout(row.attributes, serverIfaceSlotsToDesignSlots(readServerIfaceSlots(row.attributes), row.attributes), false)
   }
   if (row.category === 'security' && row.attributes) {
     if (!Array.isArray(row.attributes.security_slots) || !row.attributes.security_slots.length) {
@@ -951,7 +997,7 @@ async function saveSelectedModel() {
     if (m.category === 'server') {
       attrs.form_factor_u = normalizeServerFormFactor(m.height_u)
       syncServerDerivedAttrs(attrs)
-      ensurePanelLayout(attrs, serverIfaceSlotsToDesignSlots(readServerIfaceSlots(attrs)), false)
+      ensurePanelLayout(attrs, serverIfaceSlotsToDesignSlots(readServerIfaceSlots(attrs), attrs), false)
       m.attributes = attrs
       m.height_u = asInt(attrs.form_factor_u, 1)
     }
@@ -1038,26 +1084,67 @@ function setAttrField(key: string, value: unknown) {
     m.category === 'server' &&
     [
       'psu_count',
+      'psu_watt',
+      'psu_redundancy',
       'bmc_ports',
+      'ipmi_iface_count',
+      'vga_count',
+      'usb_count',
       'usb_ports',
+      'lom_1g_count',
+      'flex_io_count',
+      'flex_io_speed',
       'slot_count',
       'server_slots',
       'disk_front_count',
       'disk_rear_count',
+      'disk_front_size',
+      'disk_rear_size',
+      'disk_front_proto',
+      'disk_rear_proto',
+      'ssd_internal_count',
+      'ssd_internal_iface',
+      'ssd_max_count',
+      'ssd_max_type',
+      'pcie_slot_max',
+      'pcie_slots',
+      'memory_type',
+      'memory_modules',
+      'os_support',
+      'os_support_custom',
       'fan_count',
       'form_factor_u',
       'cpu_sockets',
       'cpu_cores_per_socket',
       'memory_module_gb',
       'memory_gb',
+      'panel_style_image',
+      'panel_style_image_rear',
     ].includes(key)
   ) {
-    if (['slot_count', 'server_slots', 'disk_front_count', 'disk_rear_count', 'form_factor_u'].includes(key)) {
+    if (
+      [
+        'slot_count',
+        'server_slots',
+        'disk_front_count',
+        'disk_rear_count',
+        'form_factor_u',
+        'bmc_ports',
+        'ipmi_iface_count',
+        'vga_count',
+        'usb_count',
+        'lom_1g_count',
+        'flex_io_count',
+        'flex_io_speed',
+        'pcie_slot_max',
+        'pcie_slots',
+      ].includes(key)
+    ) {
       syncServerDerivedAttrs(m.attributes)
     }
     ensurePanelLayout(
       m.attributes,
-      serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes)),
+      serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes), m.attributes),
       false,
     )
   }
@@ -1504,12 +1591,30 @@ function onChassisPortInspect(payload: { slotIndex: number; portIndex: number; x
 
 function systemPortMeta(portId: string) {
   const spec = switchSystemPorts.value.find((p) => p.id === portId)
-  if (!spec) return null
+  if (spec) {
+    return {
+      spec,
+      boardLabel: systemPortKindLabel(spec.kind),
+      ordinal: `第 ${spec.index + 1} 个`,
+      portNo: spec.code,
+    }
+  }
+  const srv = serverPorts.value.find((p) => p.id === portId)
+  if (!srv) return null
   return {
-    spec,
-    boardLabel: systemPortKindLabel(spec.kind),
-    ordinal: `第 ${spec.index + 1} 个`,
-    portNo: spec.code,
+    spec: {
+      index: srv.index,
+      id: srv.id,
+      code: srv.code,
+      iface_type: srv.iface_type === 'optical' ? 'optical' : 'copper',
+      speed: srv.speed,
+      module: srv.module,
+      connector: srv.connector,
+      fiber_mode: srv.fiber_mode === 'sm' || srv.fiber_mode === 'mm' ? srv.fiber_mode : 'na',
+    },
+    boardLabel: serverPortKindLabel(srv.kind),
+    ordinal: `第 ${srv.index + 1} 个`,
+    portNo: srv.code,
   }
 }
 
@@ -1518,6 +1623,7 @@ function onSystemPortSelect(portId: string) {
   const meta = systemPortMeta(portId)
   if (!meta) return
   selectedChassisPort.value = { slotIndex: 0, portIndex: meta.spec.index, portId }
+  if (isServerModel.value) return
   applyChassisPortDraft(meta.spec, {
     slotIndex: 0,
     portId,
@@ -1675,6 +1781,7 @@ function openCustomPanel() {
 function onCustomPanelBoardChange(payload: { items: PanelLayoutItem[] }) {
   const m = selectedModel.value
   if (!m?.attributes || !canEdit.value) return
+  if (!isCoreAggSwitch.value) return
   const cap = Math.max(1, Number(m.attributes.modular_expansion_slots) || 6)
   const boards = payload.items
     .filter((item) => item.kind === 'line_card' && !item.blank)
@@ -1723,9 +1830,9 @@ function commitServerIfaceSlots(slots: ServerIfaceSlotAttr[]) {
   const next = renumberServerSlotPorts(slots)
   m.attributes.server_slots = next
   m.attributes.slot_count = next.length
-  m.attributes.slots = serverIfaceSlotsToDesignSlots(next)
+  m.attributes.slots = serverIfaceSlotsToDesignSlots(next, m.attributes)
   syncServerDerivedAttrs(m.attributes)
-  ensurePanelLayout(m.attributes, serverIfaceSlotsToDesignSlots(next), false)
+  ensurePanelLayout(m.attributes, serverIfaceSlotsToDesignSlots(next, m.attributes), false)
 }
 
 function onServerHeightChange(v: number | string | undefined) {
@@ -1736,7 +1843,7 @@ function onServerHeightChange(v: number | string | undefined) {
   Object.assign(m.attributes, applyServerHeightDefaults(m.attributes, u))
   ensurePanelLayout(
     m.attributes,
-    serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes)),
+    serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes), m.attributes),
     false,
   )
 }
@@ -1805,6 +1912,62 @@ function onServerDiskFrontChange(v: number | undefined) {
 
 function onServerDiskRearChange(v: number | undefined) {
   setAttrField('disk_rear_count', Math.max(0, Math.min(serverDiskRearMax.value, v ?? 0)))
+}
+
+function onPcieSlotFlexChange(slotIndex: number, count: number) {
+  const m = selectedModel.value
+  if (!m?.attributes) return
+  const next = readPcieSlots(m.attributes).map((s) =>
+    s.index === slotIndex ? { ...s, flex_ports: Math.max(0, Math.min(4, count)) } : { ...s },
+  )
+  setAttrField('pcie_slots', next)
+}
+
+function onServerMemoryModulesChange(v: number | undefined) {
+  const m = selectedModel.value
+  if (!m?.attributes) return
+  const modules = Math.max(1, Math.min(64, v ?? 8))
+  m.attributes.memory_modules = modules
+  const moduleGb = Math.max(1, Number(m.attributes.memory_module_gb) || 16)
+  m.attributes.memory_gb = moduleGb * modules
+  setAttrField('memory_modules', modules)
+}
+
+function onServerOsSupportChange(v: string[]) {
+  setAttrField('os_support', normalizeOsSupport(v))
+}
+
+function onServerStyleImageUpload(side: 'front' | 'rear', ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件')
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    ElMessage.warning('图片不超过 2MB')
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const key = side === 'front' ? 'panel_style_image' : 'panel_style_image_rear'
+    setAttrField(key, String(reader.result || ''))
+    setAttrField('panel_style_mode', 'custom')
+    serverPanelShowImage.value = true
+    ElMessage.success(side === 'front' ? '已上传前面板样式图' : '已上传后面板样式图')
+  }
+  reader.readAsDataURL(file)
+}
+
+function clearServerStyleImage(side: 'front' | 'rear') {
+  const key = side === 'front' ? 'panel_style_image' : 'panel_style_image_rear'
+  setAttrField(key, null)
+  if (!serverStyleImageFront.value && !serverStyleImageRear.value) {
+    setAttrField('panel_style_mode', 'generated')
+    serverPanelShowImage.value = false
+  }
 }
 
 function commitSecurityIfaceSlots(slots: SecurityIfaceSlotAttr[]) {
@@ -2082,7 +2245,7 @@ function resetPanelAutoPlace() {
     syncServerDerivedAttrs(m.attributes)
     ensurePanelLayout(
       m.attributes,
-      serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes)),
+      serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes), m.attributes),
       true,
     )
   } else {
@@ -2297,9 +2460,33 @@ onMounted(() => {
         <div class="editor-scroll">
           <template v-if="isSwitchModel || isServerModel || isSecurityModel">
             <div class="sec-title">基本信息</div>
-            <el-form label-position="left" label-width="108px" size="small" class="attr-grid-form">
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form">
               <el-form-item label="编号">
                 <el-input v-model="selectedModel.code" :disabled="!canEdit" />
+              </el-form-item>
+              <el-form-item label="型号">
+                <el-input v-model="selectedModel.vendor_sku" disabled placeholder="自动关联合同型号" />
+              </el-form-item>
+              <el-form-item label="厂商">
+                <el-input
+                  v-model="selectedModel.manufacturer_name"
+                  disabled
+                  placeholder="自动关联合同厂商"
+                />
+              </el-form-item>
+              <el-form-item v-if="isSwitchModel" label="交换机样式">
+                <el-select
+                  :model-value="switchRole"
+                  :disabled="!canEdit"
+                  @change="(v: SwitchSubtype) => onSwitchRoleChange(v)"
+                >
+                  <el-option
+                    v-for="opt in SWITCH_STYLE_OPTIONS"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item label="设备名称" class="span-2">
                 <el-select
@@ -2307,7 +2494,6 @@ onMounted(() => {
                   filterable
                   clearable
                   placeholder="关联合同/采购汇总设备名称"
-                  style="width: 100%"
                   :disabled="!canEdit"
                   @change="onSummaryChange"
                   @focus="() => { if (!contractSummaries.length) loadContractSummaries() }"
@@ -2320,36 +2506,11 @@ onMounted(() => {
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item label="型号">
-                <el-input v-model="selectedModel.vendor_sku" disabled placeholder="自动关联合同型号" />
-              </el-form-item>
-              <el-form-item label="厂商">
-                <el-input
-                  v-model="selectedModel.manufacturer_name"
-                  disabled
-                  placeholder="自动关联合同厂商"
-                />
-              </el-form-item>
-              <el-form-item v-if="isSwitchModel" label="交换机样式" class="span-2">
-                <el-select
-                  :model-value="switchRole"
-                  :disabled="!canEdit"
-                  style="width: 100%"
-                  @change="(v: SwitchSubtype) => onSwitchRoleChange(v)"
-                >
-                  <el-option
-                    v-for="opt in SWITCH_STYLE_OPTIONS"
-                    :key="opt.value"
-                    :label="opt.label"
-                    :value="opt.value"
-                  />
-                </el-select>
-              </el-form-item>
             </el-form>
           </template>
           <template v-else>
             <div class="sec-title">基本属性</div>
-            <el-form label-position="left" label-width="64px" size="small" class="attr-grid-form">
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form">
               <el-form-item label="编号">
                 <el-input v-model="selectedModel.code" :disabled="!canEdit" />
               </el-form-item>
@@ -2407,7 +2568,70 @@ onMounted(() => {
 
           <template v-if="isSwitchModel">
             <div class="sec-title">硬件配置信息</div>
-            <el-form label-position="left" label-width="120px" size="small" class="attr-grid-form">
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form hw-attr-form">
+              <el-form-item label="风道类型">
+                <el-select
+                  :model-value="String(attrFieldValue('airflow_type') || 'front_to_rear')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('airflow_type', v)"
+                >
+                  <el-option
+                    v-for="opt in AIRFLOW_OPTIONS"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="整机高度">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('chassis_height_u') ?? selectedModel.height_u ?? 1)"
+                    :min="1"
+                    :max="48"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="onSwitchHeightChange"
+                  />
+                  <span class="unit-lab">U</span>
+                </div>
+              </el-form-item>
+              <el-form-item label="最大供电能力">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('max_power_watt') ?? 3000)"
+                    :min="0"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="(v: number | undefined) => setAttrField('max_power_watt', v ?? 0)"
+                  />
+                  <span class="unit-lab">W</span>
+                </div>
+              </el-form-item>
+              <el-form-item label="风扇个数">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('fan_count') ?? (isCoreAggSwitch ? 4 : 2))"
+                  :min="0"
+                  :max="16"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('fan_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="电源个数">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('psu_count') ?? (isCoreAggSwitch ? 4 : 2))"
+                  :min="0"
+                  :max="16"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('psu_count', v ?? 0)"
+                />
+              </el-form-item>
               <el-form-item v-if="isCoreAggSwitch" label="交换网板槽位">
                 <el-input-number
                   :model-value="Number(attrFieldValue('fabric_slot_count') ?? 2)"
@@ -2418,21 +2642,6 @@ onMounted(() => {
                   class="num-compact"
                   @change="(v: number | undefined) => setAttrField('fabric_slot_count', v ?? 0)"
                 />
-              </el-form-item>
-              <el-form-item label="风道类型">
-                <el-select
-                  :model-value="String(attrFieldValue('airflow_type') || 'front_to_rear')"
-                  :disabled="!canEdit"
-                  style="width: 100%"
-                  @change="(v: string) => setAttrField('airflow_type', v)"
-                >
-                  <el-option
-                    v-for="opt in AIRFLOW_OPTIONS"
-                    :key="opt.value"
-                    :label="opt.label"
-                    :value="opt.value"
-                  />
-                </el-select>
               </el-form-item>
               <el-form-item v-if="attrFieldValue('airflow_type') === 'custom'" label="自定义风道" class="span-2">
                 <el-input
@@ -2470,76 +2679,17 @@ onMounted(() => {
                     class="num-compact"
                     @change="(v: number | undefined) => setAttrField('chassis_dim_c', v ?? 1)"
                   />
-                  <span class="slot-lab muted">mm</span>
+                  <span class="unit-lab">mm</span>
                 </div>
-              </el-form-item>
-              <el-form-item label="整机高度">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('chassis_height_u') ?? selectedModel.height_u ?? 1)"
-                  :min="1"
-                  :max="48"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="onSwitchHeightChange"
-                />
-                <span class="slot-lab muted">U</span>
-              </el-form-item>
-              <el-form-item label="最大供电能力">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('max_power_watt') ?? 3000)"
-                  :min="0"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="(v: number | undefined) => setAttrField('max_power_watt', v ?? 0)"
-                />
-                <span class="slot-lab muted">W</span>
-              </el-form-item>
-              <el-form-item label="风扇个数">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('fan_count') ?? (isCoreAggSwitch ? 4 : 2))"
-                  :min="0"
-                  :max="16"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="(v: number | undefined) => setAttrField('fan_count', v ?? 0)"
-                />
-              </el-form-item>
-              <el-form-item label="电源个数">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('psu_count') ?? (isCoreAggSwitch ? 4 : 2))"
-                  :min="0"
-                  :max="16"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="(v: number | undefined) => setAttrField('psu_count', v ?? 0)"
-                />
               </el-form-item>
             </el-form>
           </template>
 
           <template v-if="isServerModel">
-            <div class="sec-title">配置属性（{{ normalizeServerFormFactor(selectedModel.height_u) }}U）</div>
-            <el-form label-position="left" label-width="120px" size="small" class="attr-grid-form">
-              <el-form-item label="设备高度">
-                <el-select
-                  :model-value="normalizeServerFormFactor(selectedModel.height_u)"
-                  :disabled="!canEdit"
-                  style="width: 140px"
-                  @change="onServerHeightChange"
-                >
-                  <el-option
-                    v-for="opt in SERVER_HEIGHT_OPTIONS"
-                    :key="opt.value"
-                    :label="opt.label"
-                    :value="opt.value"
-                  />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="CPU个数">
+            <div class="sec-title">硬件配置信息（{{ normalizeServerFormFactor(selectedModel.height_u) }}U）</div>
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form hw-attr-form">
+              <div class="attr-subhead span-4">处理器 / 内存 / 扩展</div>
+              <el-form-item label="处理器颗数">
                 <el-input-number
                   :model-value="Number(attrFieldValue('cpu_sockets') ?? 2)"
                   :min="1"
@@ -2550,7 +2700,7 @@ onMounted(() => {
                   @change="(v: number | undefined) => setAttrField('cpu_sockets', v ?? 1)"
                 />
               </el-form-item>
-              <el-form-item label="核心数">
+              <el-form-item label="每颗核数">
                 <el-input-number
                   :model-value="Number(attrFieldValue('cpu_cores_per_socket') ?? 16)"
                   :min="1"
@@ -2561,202 +2711,463 @@ onMounted(() => {
                   @change="(v: number | undefined) => setAttrField('cpu_cores_per_socket', v ?? 1)"
                 />
               </el-form-item>
-              <el-form-item label="单内存大小">
+              <el-form-item label="内存类型">
+                <el-select
+                  :model-value="normalizeMemoryType(attrFieldValue('memory_type'))"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('memory_type', v)"
+                >
+                  <el-option v-for="opt in SERVER_MEMORY_TYPE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="单条容量">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('memory_module_gb') ?? 16)"
+                    :min="1"
+                    :max="1024"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="onServerMemoryModuleChange"
+                  />
+                  <span class="unit-lab">GB</span>
+                </div>
+              </el-form-item>
+              <el-form-item label="内存条数">
                 <el-input-number
-                  :model-value="Number(attrFieldValue('memory_module_gb') ?? 16)"
+                  :model-value="Number(attrFieldValue('memory_modules') ?? 8)"
                   :min="1"
-                  :max="1024"
+                  :max="64"
                   :controls="false"
                   :disabled="!canEdit"
                   class="num-compact"
-                  @change="onServerMemoryModuleChange"
+                  @change="onServerMemoryModulesChange"
                 />
-                <span class="slot-lab muted">GB</span>
               </el-form-item>
-              <el-form-item label="总内存大小">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('memory_gb') ?? 128)"
-                  :min="1"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="(v: number | undefined) => setAttrField('memory_gb', v ?? 1)"
-                />
-                <span class="slot-lab muted">GB</span>
+              <el-form-item label="内存总量">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('memory_gb') ?? 128)"
+                    :min="1"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="(v: number | undefined) => setAttrField('memory_gb', v ?? 1)"
+                  />
+                  <span class="unit-lab">GB</span>
+                </div>
               </el-form-item>
-              <el-form-item label="前面板磁盘插槽">
+              <el-form-item label="PCIE插槽">
                 <el-input-number
-                  :model-value="Number(attrFieldValue('disk_front_count') ?? 0)"
+                  :model-value="Number(attrFieldValue('pcie_slot_max') ?? 6)"
                   :min="0"
-                  :max="serverDiskFrontMax"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="onServerDiskFrontChange"
-                />
-                <span class="slot-lab muted">≤{{ serverDiskFrontMax }}</span>
-              </el-form-item>
-              <el-form-item label="后面板磁盘插槽">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('disk_rear_count') ?? 0)"
-                  :min="0"
-                  :max="serverDiskRearMax"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="onServerDiskRearChange"
-                />
-                <span class="slot-lab muted">≤{{ serverDiskRearMax }}</span>
-              </el-form-item>
-            </el-form>
-
-            <div class="sec-title">接口属性</div>
-            <el-form label-position="left" label-width="120px" size="small" class="attr-grid-form">
-              <el-form-item label="板卡插槽数">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('slot_count') ?? serverIfaceSlots.length)"
-                  :min="1"
                   :max="16"
                   :controls="false"
                   :disabled="!canEdit"
                   class="num-compact"
-                  @change="onServerSlotCountChange"
+                  @change="(v: number | undefined) => setAttrField('pcie_slot_max', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="机箱高度">
+                <el-select
+                  :model-value="normalizeServerFormFactor(selectedModel.height_u)"
+                  :disabled="!canEdit"
+                  @change="onServerHeightChange"
+                >
+                  <el-option v-for="opt in SERVER_HEIGHT_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <div class="attr-subhead span-4">存储方案</div>
+              <el-form-item label="前置盘位">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('disk_front_count') ?? 0)"
+                    :min="0"
+                    :max="serverDiskFrontMax"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="onServerDiskFrontChange"
+                  />
+                  <span class="unit-lab">≤{{ serverDiskFrontMax }}</span>
+                </div>
+              </el-form-item>
+              <el-form-item label="前置尺寸">
+                <el-select
+                  :model-value="normalizeDiskSize(attrFieldValue('disk_front_size'), '3.5')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('disk_front_size', v)"
+                >
+                  <el-option v-for="opt in SERVER_DISK_SIZE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="前置协议">
+                <el-select
+                  :model-value="String(attrFieldValue('disk_front_proto') || 'sas_sata')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('disk_front_proto', v)"
+                >
+                  <el-option v-for="opt in SERVER_DISK_PROTO_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="后置盘位">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('disk_rear_count') ?? 0)"
+                    :min="0"
+                    :max="serverDiskRearMax"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="onServerDiskRearChange"
+                  />
+                  <span class="unit-lab">≤{{ serverDiskRearMax }}</span>
+                </div>
+              </el-form-item>
+              <el-form-item label="后置尺寸">
+                <el-select
+                  :model-value="normalizeDiskSize(attrFieldValue('disk_rear_size'), '2.5')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('disk_rear_size', v)"
+                >
+                  <el-option v-for="opt in SERVER_DISK_SIZE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="后置协议">
+                <el-select
+                  :model-value="String(attrFieldValue('disk_rear_proto') || 'sas_sata')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('disk_rear_proto', v)"
+                >
+                  <el-option v-for="opt in SERVER_DISK_PROTO_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="内置SSD">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('ssd_internal_count') ?? 0)"
+                  :min="0"
+                  :max="16"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('ssd_internal_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="SSD接口">
+                <el-select
+                  :model-value="String(attrFieldValue('ssd_internal_iface') || 'sata')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('ssd_internal_iface', v)"
+                >
+                  <el-option v-for="opt in SERVER_SSD_IFACE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="最大SSD">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('ssd_max_count') ?? 2)"
+                  :min="0"
+                  :max="64"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('ssd_max_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="SSD类型">
+                <el-select
+                  :model-value="String(attrFieldValue('ssd_max_type') || 'sata')"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('ssd_max_type', v)"
+                >
+                  <el-option v-for="opt in SERVER_SSD_TYPE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <div class="attr-subhead span-4">电源 / 散热 / 系统</div>
+              <el-form-item label="电源功率">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('psu_watt') ?? 800)"
+                    :min="100"
+                    :max="5000"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="(v: number | undefined) => setAttrField('psu_watt', v ?? 800)"
+                  />
+                  <span class="unit-lab">W</span>
+                </div>
+              </el-form-item>
+              <el-form-item label="电源冗余">
+                <el-select
+                  :model-value="normalizePsuRedundancy(attrFieldValue('psu_redundancy'))"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('psu_redundancy', v)"
+                >
+                  <el-option v-for="opt in SERVER_PSU_REDUNDANCY_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="电源数量">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('psu_count') ?? 2)"
+                  :min="0"
+                  :max="8"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('psu_count', v ?? 2)"
+                />
+              </el-form-item>
+              <el-form-item label="风扇模组">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('fan_count') ?? 4)"
+                  :min="0"
+                  :max="16"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('fan_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="操作系统" class="span-2">
+                <el-checkbox-group
+                  :model-value="normalizeOsSupport(attrFieldValue('os_support'))"
+                  :disabled="!canEdit"
+                  @change="onServerOsSupportChange"
+                >
+                  <el-checkbox v-for="opt in SERVER_OS_OPTIONS" :key="opt.value" :label="opt.value">
+                    {{ opt.label }}
+                  </el-checkbox>
+                </el-checkbox-group>
+              </el-form-item>
+              <el-form-item v-if="normalizeOsSupport(attrFieldValue('os_support')).includes('other')" label="自定义系统" class="span-2">
+                <el-input
+                  :model-value="String(attrFieldValue('os_support_custom') || '')"
+                  :disabled="!canEdit"
+                  placeholder="其他操作系统名称"
+                  @update:model-value="(v: string) => setAttrField('os_support_custom', v)"
                 />
               </el-form-item>
             </el-form>
 
+            <div class="sec-title">接口属性</div>
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form hw-attr-form">
+              <div class="attr-subhead span-4">管理功能</div>
+              <el-form-item label="BMC管理口">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('bmc_ports') ?? 1)"
+                  :min="0"
+                  :max="4"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('bmc_ports', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="IPMI接口">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('ipmi_iface_count') ?? 0)"
+                  :min="0"
+                  :max="4"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('ipmi_iface_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="VGA接口">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('vga_count') ?? 1)"
+                  :min="0"
+                  :max="4"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('vga_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="USB个数">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('usb_count') ?? 2)"
+                  :min="0"
+                  :max="8"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('usb_count', v ?? 0)"
+                />
+              </el-form-item>
+              <div class="attr-subhead span-4">网络接口</div>
+              <el-form-item label="板载LOM">
+                <el-input-number
+                  :model-value="Number(attrFieldValue('lom_1g_count') ?? 2)"
+                  :min="0"
+                  :max="8"
+                  :controls="false"
+                  :disabled="!canEdit"
+                  class="num-compact"
+                  @change="(v: number | undefined) => setAttrField('lom_1g_count', v ?? 0)"
+                />
+              </el-form-item>
+              <el-form-item label="灵活IO速率">
+                <el-select
+                  :model-value="normalizeFlexSpeed(attrFieldValue('flex_io_speed'))"
+                  :disabled="!canEdit"
+                  @change="(v: string) => setAttrField('flex_io_speed', v)"
+                >
+                  <el-option v-for="opt in SERVER_FLEX_SPEED_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="PCIE光口" class="span-2">
+                <div class="pcie-slot-defs">
+                  <div v-for="slot in serverPcieSlots" :key="`pcie-def-${slot.index}`" class="pcie-slot-def">
+                    <span class="pcie-slot-lab">Slot{{ slot.index }}</span>
+                    <el-select
+                      :model-value="slot.flex_ports"
+                      size="small"
+                      :disabled="!canEdit"
+                      @change="(v: number) => onPcieSlotFlexChange(slot.index, v)"
+                    >
+                      <el-option
+                        v-for="opt in PCIE_FLEX_PORT_OPTIONS"
+                        :key="opt.value"
+                        :label="opt.label"
+                        :value="opt.value"
+                      />
+                    </el-select>
+                  </div>
+                </div>
+              </el-form-item>
+            </el-form>
+            <div v-if="serverPortGroups.length" class="sys-port-strip">
+              <div v-for="group in serverPortGroups" :key="`${group.kind}-${group.label}`" class="sys-port-group">
+                <span class="sys-port-kind">{{ group.label }}</span>
+                <button
+                  v-for="p in group.ports"
+                  :key="p.id"
+                  type="button"
+                  class="sys-port-chip"
+                  :class="{ selected: selectedChassisPort?.portId === p.id }"
+                  :title="`${p.code} · ${p.id}`"
+                  @click="onSystemPortSelect(p.id)"
+                  @contextmenu="onSystemPortInspect(p.id, $event)"
+                >
+                  {{ p.code }}
+                </button>
+              </div>
+            </div>
+
             <div class="sec-title-row">
               <span class="sec-title with-hint">
-                Slot 配置（共 {{ serverIfaceSlots.length }} 槽）
-                <TitleHintBang title="说明" :content="SERVER_SLOT_CONFIG_HINT" />
+                面板演示
+                <TitleHintBang title="说明" :content="SERVER_PANEL_HINT" :width="360" />
               </span>
+              <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                <el-radio-button :value="1">1×</el-radio-button>
+                <el-radio-button :value="2">2×</el-radio-button>
+              </el-radio-group>
+              <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">自定义面板</el-button>
+              <el-button v-if="canEdit" size="small" @click="serverStyleFrontInput?.click()">上传前面板</el-button>
+              <el-button v-if="canEdit" size="small" @click="serverStyleRearInput?.click()">上传后面板</el-button>
+              <el-radio-group
+                v-if="serverStyleImageFront || serverStyleImageRear"
+                v-model="serverPanelShowImage"
+                size="small"
+                class="panel-zoom-toggles"
+              >
+                <el-radio-button :value="false">仿真</el-radio-button>
+                <el-radio-button :value="true">图片</el-radio-button>
+              </el-radio-group>
+              <input
+                ref="serverStyleFrontInput"
+                class="hidden-file"
+                type="file"
+                accept="image/*"
+                @change="(e: Event) => onServerStyleImageUpload('front', e)"
+              />
+              <input
+                ref="serverStyleRearInput"
+                class="hidden-file"
+                type="file"
+                accept="image/*"
+                @change="(e: Event) => onServerStyleImageUpload('rear', e)"
+              />
             </div>
-
-            <div v-if="serverOnboardSlot" class="slot-row-block">
-              <div class="slot-row-label with-hint">
-                板载
-                <TitleHintBang
-                  title="接口编号"
-                  :content="serverSlotPortRangeLabel(serverOnboardSlot)"
-                  :width="320"
+            <div class="chassis-demo-pair server-demo-pair" :style="{ zoom: panelDemoCssZoom }">
+              <div class="chassis-demo-col">
+                <div class="chassis-demo-lab">
+                  正面
+                  <el-button
+                    v-if="canEdit && serverStyleImageFront"
+                    link
+                    type="danger"
+                    size="small"
+                    @click="clearServerStyleImage('front')"
+                  >
+                    清除图片
+                  </el-button>
+                </div>
+                <img
+                  v-if="serverPanelShowImage && serverStyleImageFront"
+                  class="style-preview"
+                  :src="serverStyleImageFront"
+                  alt="前面板样式"
+                />
+                <ServerFrontSchematic
+                  v-else
+                  :height-u="normalizeServerFormFactor(selectedModel.height_u)"
+                  :disk-count="Number(attrFieldValue('disk_front_count') ?? 0)"
+                  :disk-size="String(attrFieldValue('disk_front_size') || '3.5')"
+                  :disk-proto="String(attrFieldValue('disk_front_proto') || 'sas_sata')"
+                  :usb-ports="serverPorts.filter((p) => p.kind === 'usb')"
+                  :vga-ports="serverPorts.filter((p) => p.kind === 'vga')"
+                  :selected-port-id="selectedChassisPort?.portId"
+                  @select-port="onSystemPortSelect"
+                  @inspect-port="onSystemPortInspect"
                 />
               </div>
-              <div class="slot-grid slot-grid-onboard">
-                <div class="slot-card switch-slot-card is-onboard">
-                  <span class="slot-idx">板载</span>
-                  <span class="slot-lab">IPMI</span>
-                  <el-input-number
-                    :model-value="serverOnboardSlot.ipmi_count"
-                    :min="0"
-                    :max="4"
-                    :controls="false"
+              <div class="chassis-demo-col">
+                <div class="chassis-demo-lab">
+                  背面
+                  <el-button
+                    v-if="canEdit && serverStyleImageRear"
+                    link
+                    type="danger"
                     size="small"
-                    class="slot-num"
-                    :disabled="!canEdit"
-                    @change="(v: number | undefined) => patchServerIfaceSlot(serverSlotListIndex(serverOnboardSlot), { ipmi_count: v ?? 0 })"
-                  />
-                  <span class="slot-lab">VGA</span>
-                  <el-input-number
-                    :model-value="serverOnboardSlot.hdmi_count"
-                    :min="0"
-                    :max="4"
-                    :controls="false"
-                    size="small"
-                    class="slot-num"
-                    :disabled="!canEdit"
-                    @change="(v: number | undefined) => patchServerIfaceSlot(serverSlotListIndex(serverOnboardSlot), { hdmi_count: v ?? 0 })"
-                  />
-                  <span class="slot-lab">USB</span>
-                  <el-input-number
-                    :model-value="serverOnboardSlot.usb_count"
-                    :min="0"
-                    :max="8"
-                    :controls="false"
-                    size="small"
-                    class="slot-num"
-                    :disabled="!canEdit"
-                    @change="(v: number | undefined) => patchServerIfaceSlot(serverSlotListIndex(serverOnboardSlot), { usb_count: v ?? 0 })"
-                  />
-                  <span class="slot-lab">10G光口</span>
-                  <el-input-number
-                    :model-value="serverOnboardSlot.ports_10g"
-                    :min="0"
-                    :max="16"
-                    :controls="false"
-                    size="small"
-                    class="slot-num"
-                    :disabled="!canEdit"
-                    @change="(v: number | undefined) => patchServerIfaceSlot(serverSlotListIndex(serverOnboardSlot), { ports_10g: v ?? 0 })"
-                  />
-                  <span class="slot-lab">1G电口</span>
-                  <el-input-number
-                    :model-value="serverOnboardSlot.ports_1g"
-                    :min="0"
-                    :max="16"
-                    :controls="false"
-                    size="small"
-                    class="slot-num"
-                    :disabled="!canEdit"
-                    @change="(v: number | undefined) => patchServerIfaceSlot(serverSlotListIndex(serverOnboardSlot), { ports_1g: v ?? 0 })"
-                  />
+                    @click="clearServerStyleImage('rear')"
+                  >
+                    清除图片
+                  </el-button>
                 </div>
+                <img
+                  v-if="serverPanelShowImage && serverStyleImageRear"
+                  class="style-preview"
+                  :src="serverStyleImageRear"
+                  alt="后面板样式"
+                />
+                <ServerRearSchematic
+                  v-else
+                  :height-u="normalizeServerFormFactor(selectedModel.height_u)"
+                  :psu-count="Number(attrFieldValue('psu_count') ?? 2)"
+                  :psu-watt="Number(attrFieldValue('psu_watt') ?? 800)"
+                  :pcie-slot-defs="serverPcieSlots"
+                  :disk-count="Number(attrFieldValue('disk_rear_count') ?? 0)"
+                  :disk-size="String(attrFieldValue('disk_rear_size') || '2.5')"
+                  :ports="serverPorts"
+                  :selected-port-id="selectedChassisPort?.portId"
+                  @select-port="onSystemPortSelect"
+                  @inspect-port="onSystemPortInspect"
+                />
               </div>
             </div>
-
-            <div v-if="serverExpansionSlots.length" class="slot-row-block">
-              <div class="slot-row-label">扩展 Slot</div>
-              <div class="slot-grid">
-                <div
-                  v-for="slot in serverExpansionSlots"
-                  :key="`srv-exp-${slot.index}`"
-                  class="slot-card switch-slot-card"
-                >
-                  <span class="slot-idx-wrap with-hint">
-                    <span class="slot-idx">Slot {{ slot.index }}</span>
-                    <TitleHintBang
-                      title="接口编号"
-                      :content="serverSlotPortRangeLabel(slot)"
-                      :width="280"
-                    />
-                  </span>
-                  <span class="slot-lab">网口类型</span>
-                  <el-select
-                    :model-value="serverSlotNicType(slot)"
-                    size="small"
-                    class="slot-nic-type"
-                    :disabled="!canEdit"
-                    teleported
-                    @change="(v: ServerSlotNicType) => onServerSlotNicTypeChange(serverSlotListIndex(slot), v)"
-                  >
-                    <el-option label="万兆 10G" value="10g" />
-                    <el-option label="千兆 1G" value="1g" />
-                    <el-option label="无网口" value="none" />
-                  </el-select>
-                  <span class="slot-lab">口数</span>
-                  <el-input-number
-                    :model-value="
-                      serverSlotNicType(slot) === '10g'
-                        ? slot.ports_10g
-                        : serverSlotNicType(slot) === '1g'
-                          ? slot.ports_1g
-                          : 0
-                    "
-                    :min="serverSlotNicType(slot) === 'none' ? 0 : 1"
-                    :max="16"
-                    :controls="false"
-                    size="small"
-                    class="slot-num"
-                    :disabled="!canEdit || serverSlotNicType(slot) === 'none'"
-                    @change="(v: number | undefined) => onServerSlotNicCountChange(serverSlotListIndex(slot), v)"
-                  />
-                </div>
-              </div>
+            <div v-if="canEdit" class="chassis-hint">
+              左键点击接口编辑，右键查看接口 ID 与编号；可上传自定义前后面板样式图
             </div>
           </template>
 
           <template v-else-if="isSecurityModel">
             <div class="sec-title">接口属性</div>
-            <el-form label-position="left" label-width="120px" size="small" class="attr-grid-form">
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form">
               <el-form-item label="设备高度">
                 <el-select
                   :model-value="normalizeSecurityFormFactor(selectedModel.height_u)"
@@ -2876,7 +3287,7 @@ onMounted(() => {
             <el-form
               v-if="isCoreAggSwitch"
               label-position="left"
-              label-width="140px"
+              label-width="7em"
               size="small"
               class="attr-grid-form"
             >
@@ -3067,7 +3478,7 @@ onMounted(() => {
             <el-form
               v-else
               label-position="left"
-              label-width="140px"
+              label-width="7em"
               size="small"
               class="attr-grid-form"
             >
@@ -3080,11 +3491,10 @@ onMounted(() => {
                 <span class="field-hint">勾选后按 BMC_SWITCH 参与带外管理布线（场景 B1）</span>
               </el-form-item>
               <div class="attr-subhead span-4">业务接口</div>
-              <el-form-item v-if="switchRole === 'gigabit'" label="接口类型" class="span-2">
+              <el-form-item v-if="switchRole === 'gigabit'" label="接口类型">
                 <el-select
                   :model-value="readGigabitDownlinkMedia(selectedModel.attributes)"
                   :disabled="!canEdit"
-                  style="width: 100%"
                   @change="(v: string) => onGigabitDownlinkMedia(v as GigabitDownlinkMedia)"
                 >
                   <el-option
@@ -3095,7 +3505,7 @@ onMounted(() => {
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item v-else label="接口类型" class="span-2">
+              <el-form-item v-else label="接口类型">
                 <span class="field-static">万兆以太网光接口</span>
               </el-form-item>
               <el-form-item label="接口数量">
@@ -3205,13 +3615,15 @@ onMounted(() => {
                   面板演示
                   <TitleHintBang title="说明" :content="switchSlotConfigHint" :width="360" />
                 </span>
-                <div class="panel-demo-actions">
-                  <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">
-                    自定义面板
-                  </el-button>
-                </div>
+                <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                  <el-radio-button :value="1">1×</el-radio-button>
+                  <el-radio-button :value="2">2×</el-radio-button>
+                </el-radio-group>
+                <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">
+                  自定义面板
+                </el-button>
               </div>
-              <div class="chassis-demo-pair">
+              <div class="chassis-demo-pair" :style="{ zoom: panelDemoCssZoom }">
                 <div class="chassis-demo-col">
                   <div class="chassis-demo-lab">正面</div>
                   <SwitchChassisSchematic
@@ -3267,8 +3679,15 @@ onMounted(() => {
                   面板演示
                   <TitleHintBang title="说明" :content="switchSlotConfigHint" :width="360" />
                 </span>
+                <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                  <el-radio-button :value="1">1×</el-radio-button>
+                  <el-radio-button :value="2">2×</el-radio-button>
+                </el-radio-group>
+                <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">
+                  自定义面板
+                </el-button>
               </div>
-              <div class="chassis-demo-pair access-demo-pair">
+              <div class="chassis-demo-pair access-demo-pair" :style="{ zoom: panelDemoCssZoom }">
                 <div class="chassis-demo-col">
                   <div class="chassis-demo-lab">正面</div>
                   <AccessSwitchSchematic
@@ -3284,6 +3703,7 @@ onMounted(() => {
                   <div class="chassis-demo-lab">背面</div>
                   <AccessSwitchRearSchematic
                     :fan-count="Number(attrFieldValue('fan_count') ?? 2)"
+                    :psu-count="Number(attrFieldValue('psu_count') ?? 2)"
                     :mgmt-ports="accessMgmtPorts"
                     :selected-port-id="selectedChassisPort?.portId"
                     @select-port="onSystemPortSelect"
@@ -3320,7 +3740,7 @@ onMounted(() => {
 
           <template v-else-if="selectedModel.category !== 'software'">
             <div class="sec-title">规格属性</div>
-            <el-form label-position="left" label-width="auto" size="small" class="attr-grid-form">
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form">
               <template v-for="field in schemaFields" :key="field.key">
                 <el-form-item
                   v-if="field.type === 'list'"
@@ -3387,7 +3807,7 @@ onMounted(() => {
             </el-form>
           </template>
 
-          <template v-if="usesGridPanel && !isSwitchModel">
+          <template v-if="usesGridPanel && !isSwitchModel && !isServerModel">
             <div class="sec-title-row">
               <span class="sec-title with-hint">
                 面板样式
@@ -3657,7 +4077,11 @@ onMounted(() => {
       class="custom-panel-dialog"
     >
       <p class="custom-panel-hint">
-        在网格上拖拽框选定义业务接口板；右键已放置的接口板设置接口类型和个数。数量不超过模块化扩展插槽。
+        {{
+          isCoreAggSwitch
+            ? '在网格上拖拽框选定义业务接口板；右键已放置的接口板设置接口类型和个数。数量不超过模块化扩展插槽。'
+            : '在网格上拖拽框选自定义面板布局；右键已放置的组件可设置接口类型和个数。完成后与模型属性一并保存。'
+        }}
       </p>
       <ModelPanelSchematic
         v-if="customPanelVisible"
@@ -3666,7 +4090,9 @@ onMounted(() => {
         :slots="serverSlots"
         :editable="canEdit"
         free-board
-        :max-boards="Number(attrFieldValue('modular_expansion_slots') ?? 6)"
+        :max-boards="
+          isCoreAggSwitch ? Number(attrFieldValue('modular_expansion_slots') ?? 6) : 8
+        "
         @edit-slot="openPanelSlotEditor"
         @board-change="onCustomPanelBoardChange"
       />
@@ -3773,10 +4199,16 @@ onMounted(() => {
 <style scoped>
 .model-design {
   display: grid;
-  grid-template-columns: 260px 340px minmax(360px, 1fr);
+  grid-template-columns: 260px 340px minmax(0, 1fr);
   gap: 12px;
   height: calc(100vh - 140px);
   min-height: 520px;
+}
+.tree-pane {
+  min-width: 260px;
+}
+.list-pane {
+  min-width: 340px;
 }
 .tree-pane,
 .list-pane,
@@ -3871,23 +4303,29 @@ onMounted(() => {
 .editor-scroll {
   flex: 1;
   overflow: auto;
-  padding: 10px 12px 20px;
+  padding: 8px 10px 16px;
+  container-type: inline-size;
+  container-name: model-attrs;
 }
 .sec-title {
   font-weight: 700;
   font-size: 13px;
-  margin: 10px 0 6px;
+  margin: 8px 0 4px;
   color: #303133;
 }
 .sec-title-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 .sec-title-row .sec-title {
-  margin: 10px 0 6px;
+  margin: 8px 0 4px;
+}
+.panel-zoom-toggles {
+  flex: 0 0 auto;
 }
 .sec-title.with-hint,
 .slot-row-label.with-hint,
@@ -3897,32 +4335,61 @@ onMounted(() => {
   padding-right: 14px;
 }
 .attr-grid-form {
+  font-size: 12px;
+  --attr-label-w: 7em;
+  --attr-col-w: 272px;
+  width: max-content;
+  max-width: 100%;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  column-gap: 10px;
+  grid-template-columns: var(--attr-col-w) var(--attr-col-w);
+  column-gap: 16px;
   row-gap: 4px;
+  justify-content: start;
   align-items: start;
+  --el-form-label-width: var(--attr-label-w);
 }
 .attr-grid-form :deep(.el-form-item) {
   margin-bottom: 0;
   min-width: 0;
+  width: 100%;
+  --el-form-label-width: var(--attr-label-w);
+}
+.attr-grid-form :deep(.el-form-item__label-wrap) {
+  margin: 0;
+  margin-right: 0 !important;
 }
 .attr-grid-form :deep(.el-form-item__label) {
-  padding-right: 6px;
+  display: block !important;
+  box-sizing: border-box !important;
+  width: var(--attr-label-w) !important;
+  min-width: var(--attr-label-w) !important;
+  max-width: var(--attr-label-w) !important;
+  flex: 0 0 var(--attr-label-w) !important;
+  padding: 0 8px 0 0 !important;
+  margin: 0 !important;
   line-height: 28px;
-  height: auto;
+  height: 28px;
+  overflow: hidden;
   white-space: nowrap;
+  text-align: justify;
+  text-align-last: justify;
   color: var(--el-text-color-regular);
   font-size: 12px;
 }
 .attr-grid-form :deep(.el-form-item__content) {
   line-height: 28px;
   min-width: 0;
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 4px;
 }
 .attr-grid-form :deep(.el-input),
 .attr-grid-form :deep(.el-select),
 .attr-grid-form :deep(.el-input-number) {
-  width: 100%;
+  width: 100% !important;
+  max-width: 100%;
+  min-width: 0;
 }
 .attr-grid-form :deep(.el-input-number .el-input__inner) {
   text-align: left;
@@ -3933,14 +4400,41 @@ onMounted(() => {
 .attr-grid-form .span-2 {
   grid-column: span 2;
 }
-.attr-grid-form .span-3 {
-  grid-column: span 3;
+.pcie-slot-defs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  width: 100%;
 }
-.attr-grid-form .span-4 {
-  grid-column: span 4;
+.pcie-slot-def {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 118px;
+}
+.pcie-slot-lab {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  white-space: nowrap;
+}
+.pcie-slot-def :deep(.el-select) {
+  width: 88px !important;
+}
+.attr-grid-form .span-3,
+.attr-grid-form .span-4,
+.attr-grid-form .attr-subhead {
+  grid-column: 1 / -1;
+}
+.attr-grid-form :deep(.el-checkbox-group) {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.attr-grid-form :deep(.el-checkbox) {
+  margin-right: 12px;
 }
 .attr-subhead {
-  margin: 8px 0 2px;
+  margin: 4px 0 1px;
   font-size: 12px;
   font-weight: 600;
   color: var(--el-text-color-regular);
@@ -4031,11 +4525,33 @@ onMounted(() => {
   margin-left: auto;
   padding: 0;
 }
-.dim-row {
+.dim-row,
+.unit-field {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: nowrap;
+  gap: 4px;
   min-width: 0;
+  width: 100%;
+}
+.unit-field :deep(.el-input-number) {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto !important;
+  max-width: none;
+}
+.dim-row :deep(.el-input-number) {
+  flex: 1 1 64px;
+  min-width: 0;
+  width: auto !important;
+  max-width: none;
+}
+.unit-lab {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 28px;
+  color: var(--el-text-color-regular);
+  white-space: nowrap;
 }
 .dim-x {
   color: var(--el-text-color-secondary);
@@ -4053,13 +4569,17 @@ onMounted(() => {
 .chassis-demo-pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px 20px;
-  max-width: 880px;
+  gap: 12px 16px;
+  max-width: 760px;
   margin: 6px 0 12px;
   align-items: start;
 }
+.server-demo-pair {
+  grid-template-columns: 1fr;
+  max-width: 860px;
+}
 .access-demo-pair {
-  max-width: 980px;
+  max-width: 760px;
   grid-template-columns: 1fr 1fr;
 }
 @media (max-width: 900px) {
@@ -4075,6 +4595,17 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 600;
   color: var(--el-text-color-regular);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.style-preview {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  background: #1c1f24;
+  border: 1px solid #5c636c;
 }
 .chassis-demo {
   max-width: 420px;
@@ -4190,6 +4721,7 @@ onMounted(() => {
 }
 .num-compact {
   width: 100%;
+  min-width: 0;
 }
 .field-static {
   font-size: 13px;
@@ -4301,46 +4833,32 @@ onMounted(() => {
 .desc-before-panel {
   margin-bottom: 4px;
 }
-@media (max-width: 1400px) {
-  .attr-grid-form {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-  .attr-grid-form .span-4 {
-    grid-column: span 3;
-  }
-  .attr-grid-form .span-3 {
-    grid-column: span 3;
-  }
-}
 @media (max-width: 1100px) {
   .model-design {
     grid-template-columns: 1fr;
     height: auto;
   }
-  .attr-grid-form {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .attr-grid-form .span-2,
-  .attr-grid-form .span-3,
-  .attr-grid-form .span-4 {
-    grid-column: span 2;
+  .tree-pane,
+  .list-pane {
+    min-width: 0;
   }
   .slot-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 @media (max-width: 640px) {
-  .attr-grid-form {
+  .slot-grid {
     grid-template-columns: 1fr;
   }
-  .attr-grid-form .span-1,
+}
+@container model-attrs (max-width: 520px) {
+  .attr-grid-form {
+    grid-template-columns: minmax(0, var(--attr-col-w));
+  }
   .attr-grid-form .span-2,
   .attr-grid-form .span-3,
   .attr-grid-form .span-4 {
     grid-column: span 1;
-  }
-  .slot-grid {
-    grid-template-columns: 1fr;
   }
 }
 </style>

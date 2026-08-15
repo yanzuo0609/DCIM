@@ -1196,6 +1196,36 @@ export function portTypeForSlot(slot: SwitchSlotAttr): PortType {
   return 'other'
 }
 
+/** 面板上的仿真接口外形：电口 / 光口 / MPO */
+export type SwitchPortFace = 'copper' | 'optical' | 'mpo'
+
+export function portFaceFromType(portType: string | null | undefined): SwitchPortFace {
+  const t = String(portType || '').toLowerCase()
+  if (
+    t.includes('40') ||
+    t.includes('100') ||
+    t.includes('400') ||
+    t.includes('qsfp') ||
+    t.includes('mpo')
+  ) {
+    return 'mpo'
+  }
+  if (t === '1g' || t === 'bmc' || t.includes('copper') || t.includes('rj45') || t.includes('电')) {
+    return 'copper'
+  }
+  return 'optical'
+}
+
+export function accessPortFace(
+  spec: Pick<SwitchBoardPortAttr, 'iface_type' | 'module' | 'connector'>,
+): SwitchPortFace {
+  const conn = String(spec.connector || '').toUpperCase()
+  const mod = String(spec.module || '').toUpperCase()
+  if (conn.includes('MPO') || mod.startsWith('QSFP')) return 'mpo'
+  if (spec.iface_type === 'copper' || mod === 'RJ45' || conn === 'RJ45') return 'copper'
+  return 'optical'
+}
+
 /** 切换交换机样式时重置接口 Slot */
 export function applySwitchStyleDefaults(
   attrs: Record<string, unknown>,

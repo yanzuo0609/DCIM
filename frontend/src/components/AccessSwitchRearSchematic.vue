@@ -4,6 +4,7 @@ import { ACCESS_DEMO, type SwitchSystemPortAttr } from '@/utils/switchModelAttrs
 
 const props = defineProps<{
   fanCount?: number
+  psuCount?: number
   mgmtPorts?: SwitchSystemPortAttr[]
   selectedPortId?: string | null
 }>()
@@ -13,8 +14,15 @@ const emit = defineEmits<{
   inspectPort: [portId: string, ev: MouseEvent]
 }>()
 
-const fans = computed(() => Math.max(1, Math.min(4, Math.trunc(props.fanCount || 2) || 2)))
+const fans = computed(() => Math.max(0, Math.min(16, Math.trunc(props.fanCount || 0) || 0)))
+const psus = computed(() => Math.max(0, Math.min(8, Math.trunc(props.psuCount ?? 2) || 0)))
 const mgmt = computed(() => (Array.isArray(props.mgmtPorts) ? props.mgmtPorts : []))
+
+const psuStyle = computed(() => {
+  const n = Math.max(1, psus.value)
+  const w = n <= 2 ? 58 : n <= 4 ? 48 : 40
+  return { width: `${w}px`, flexBasis: `${w}px` }
+})
 
 function onClick(id: string, ev: MouseEvent) {
   ev.preventDefault()
@@ -36,11 +44,18 @@ const frameStyle = computed(() => ({
 <template>
   <div class="access-rear" :style="frameStyle">
     <div class="rear-inner">
-      <div class="fan-row">
-        <div v-for="i in fans" :key="`fan-${i}`" class="fan-mod" :title="`风扇/电源 ${i}`">
+      <div v-if="psus" class="psu-row">
+        <div v-for="i in psus" :key="`psu-${i}`" class="psu-mod" :style="psuStyle" :title="`电源 ${i}`">
+          <span class="psu-inlet" aria-hidden="true" />
+          <span class="psu-led" />
+        </div>
+      </div>
+      <div v-if="fans" class="fan-row">
+        <div v-for="i in fans" :key="`fan-${i}`" class="fan-mod" :title="`风扇 ${i}`">
           <span class="fan-hub" />
         </div>
       </div>
+      <div v-else class="vent-fill" />
       <div class="mgmt-col">
         <button
           v-for="p in mgmt"
@@ -76,11 +91,49 @@ const frameStyle = computed(() => ({
   border: 1px solid #2c3e50;
   box-sizing: border-box;
 }
+.psu-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+.psu-mod {
+  flex: 0 0 auto;
+  position: relative;
+  box-sizing: border-box;
+  height: 100%;
+  background: linear-gradient(180deg, #4a515a 0%, #323840 100%);
+  border: 1px solid #1c2126;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.psu-inlet {
+  width: 20px;
+  height: 15px;
+  box-sizing: border-box;
+  border: 2px solid #c9ced6;
+  border-radius: 1px 1px 5px 5px;
+  background: #15181c;
+  box-shadow: inset 0 1px 0 #6a727c;
+}
+.psu-led {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #3d8b4a;
+  box-shadow: 0 0 3px #3d8b4a;
+}
 .fan-row {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  gap: 8px;
+  align-items: stretch;
+  gap: 6px;
 }
 .fan-mod {
   flex: 1 1 0;
@@ -97,16 +150,26 @@ const frameStyle = computed(() => ({
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 22px;
-  height: 22px;
-  margin: -11px 0 0 -11px;
+  width: clamp(10px, 28%, 22px);
+  height: clamp(10px, 28%, 22px);
+  margin: 0;
+  transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 2px solid #3a4048;
   background: #8a929c;
   box-shadow: inset 0 0 0 3px #5e656e;
+  box-sizing: border-box;
+}
+.vent-fill {
+  flex: 1 1 auto;
+  min-width: 0;
+  background:
+    repeating-linear-gradient(90deg, #6a727c 0 2px, #5e656e 2px 5px);
+  opacity: 0.55;
 }
 .mgmt-col {
   flex: 0 0 28px;
+  margin-left: auto;
   display: flex;
   flex-direction: column;
   justify-content: center;

@@ -27,9 +27,11 @@ import {
   SWITCH_IFACE_BOARD_OPTIONS,
   SWITCH_IFACE_BOARD_PORT_PRESETS,
   ifaceKindToPortType,
+  portFaceFromType,
   portTypeToIfaceKind,
   type SwitchIfaceBoardKind,
 } from '@/utils/switchModelAttrs'
+import SwitchSquarePort from '@/components/SwitchSquarePort.vue'
 
 const BASE_CELL_W = 16
 const BASE_CELL_H = 8
@@ -1151,7 +1153,10 @@ function portTypeShort(t: string) {
                         :title="`${itemTypeText(item)} · ${iface.local_label || '口' + iface.index}`"
                         :style="sw.portStyle"
                       >
-                        <span class="sw-port-lab">{{ portDisplayLabel(iface) }}</span>
+                        <SwitchSquarePort
+                          :kind="portFaceFromType(displayPortType(item, iface))"
+                          :label="portDisplayLabel(iface)"
+                        />
                       </button>
                     </div>
                     <div v-else class="slot-ports empty">
@@ -1329,46 +1334,16 @@ function portTypeShort(t: string) {
   position: relative;
   margin: 0;
   padding: 0;
-  border: 1px solid #303133;
+  border: 0;
   border-radius: 0;
-  background: #fff;
+  background: transparent;
   box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   cursor: default;
   overflow: hidden;
   line-height: 1;
   flex: 0 0 auto;
   aspect-ratio: 1 / 1;
-}
-.sw-port.port-1g {
-  background: #fff;
-  border-color: #303133;
-}
-.sw-port.port-10g,
-.sw-port.port-25g {
-  background: #f5f7fa;
-  border-color: #303133;
-}
-.sw-port.port-10g .sw-port-lab,
-.sw-port.port-25g .sw-port-lab {
-  color: #303133;
-}
-.sw-port.port-40_100g,
-.sw-port.port-100g {
-  background: #fafafa;
-  border-color: #303133;
-}
-.sw-port.port-40_100g .sw-port-lab,
-.sw-port.port-100g .sw-port-lab {
-  color: #303133;
-}
-.sw-port-lab {
-  font-size: inherit;
-  font-weight: 600;
-  color: #303133;
-  transform: none;
 }
 .size-field {
   display: inline-flex;

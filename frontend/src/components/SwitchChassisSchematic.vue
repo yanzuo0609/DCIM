@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ifaceBoardTwoRowLabels } from '@/utils/switchFrontPanel'
+import SwitchSquarePort from '@/components/SwitchSquarePort.vue'
 import {
   CHASSIS_DEMO,
+  accessPortFace,
   buildChassisDisplayRows,
   chassisDemoHeight,
   effectivePortCount,
@@ -164,7 +166,11 @@ function onDragEnd() {
                 @click.stop="onPortClick(row.slot, pi, $event)"
                 @contextmenu.prevent="onPortContext(row.slot, pi, $event)"
               >
-                <span class="sw-port-lab">{{ lab }}</span>
+                <SwitchSquarePort
+                  :kind="accessPortFace(resolveSlotPort(row.slot, pi))"
+                  :label="lab"
+                  :selected="isPortSelected(row.slotNo, pi)"
+                />
               </button>
             </div>
           </div>
@@ -328,12 +334,10 @@ function onDragEnd() {
   gap: 0;
 }
 .sw-port {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   box-sizing: border-box;
-  border: 1px solid #303133;
-  background: #fff;
+  border: 0;
+  background: transparent;
   min-width: 0;
   min-height: 0;
   width: 100%;
@@ -342,22 +346,9 @@ function onDragEnd() {
   padding: 0;
   cursor: pointer;
 }
-.sw-port:hover {
-  background: #ecf5ff;
-  border-color: #409eff;
-}
-.sw-port.selected {
-  background: #409eff;
-  border-color: #1d6ec7;
-}
-.sw-port.selected .sw-port-lab {
-  color: #fff;
-}
-.sw-port-lab {
-  font-size: 6px;
-  line-height: 1;
-  color: #303133;
-  font-weight: 600;
+.sw-port:hover :deep(.sq-port) {
+  outline: 1px solid #79bbff;
+  outline-offset: -1px;
 }
 .bay-row {
   flex: 0 0 14px;

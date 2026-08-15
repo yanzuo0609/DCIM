@@ -2267,23 +2267,23 @@ function nodeNameById(id: string) {
               <template #title>
                 <span class="acc-title">模型库</span>
               </template>
-              <el-select
+          <el-select
                 :model-value="currentProject?.model_root_folder_id || null"
                 placeholder="选择项目或文件夹"
-                style="width: 100%"
-                filterable
+            style="width: 100%"
+            filterable
                 clearable
                 :disabled="!currentProject || !canEdit"
                 :loading="bindSaving || modelsLoading"
                 @change="onModelRootChange"
-              >
-                <el-option
+          >
+            <el-option
                   v-for="f in allFolderOptions"
                   :key="f.id"
                   :label="f.label"
                   :value="f.id"
-                />
-              </el-select>
+            />
+          </el-select>
               <NetworkModelLibraryPane
                 :root-folder-id="currentProject?.model_root_folder_id || null"
                 :models="designModels"
@@ -2300,17 +2300,17 @@ function nodeNameById(id: string) {
               <template #title>
                 <span class="acc-title">拓扑管理</span>
               </template>
-              <NetworkTopologyPicker
+          <NetworkTopologyPicker
                 title="拓扑管理"
                 hide-title
                 compact
-                :topologies="topologies"
-                :current-id="currentId"
-                :loading="loading"
-                @select="selectTopology"
-                @create="handleCreateTopology"
-                @delete="removeTopology"
-              />
+            :topologies="topologies"
+            :current-id="currentId"
+            :loading="loading"
+            @select="selectTopology"
+            @create="handleCreateTopology"
+            @delete="removeTopology"
+          />
             </el-collapse-item>
 
             <el-collapse-item name="groups">

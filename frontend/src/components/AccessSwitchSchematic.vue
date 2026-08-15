@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import SwitchSquarePort from '@/components/SwitchSquarePort.vue'
 import {
   ACCESS_DEMO,
+  accessPortFace,
   effectivePortCount,
   resolveSlotPort,
   type SwitchSlotAttr,
@@ -85,6 +87,10 @@ function portLab(slot: SwitchSlotAttr, portIndex: number) {
   return String(Math.max(0, Number(slot.port_start) || 0) + portIndex)
 }
 
+function portKind(slot: SwitchSlotAttr, portIndex: number) {
+  return accessPortFace(resolveSlotPort(slot, portIndex))
+}
+
 const frameStyle = computed(() => ({
   height: `${ACCESS_DEMO.height}px`,
 }))
@@ -106,7 +112,11 @@ const frameStyle = computed(() => ({
               @click.stop="onClick(downlink, pi, $event)"
               @contextmenu.prevent="onContext(downlink, pi, $event)"
             >
-              <span class="sw-port-lab">{{ portLab(downlink, pi) }}</span>
+              <SwitchSquarePort
+                :kind="portKind(downlink, pi)"
+                :label="portLab(downlink, pi)"
+                :selected="isSelected(downlink.index, pi)"
+              />
             </button>
           </div>
         </div>
@@ -122,7 +132,11 @@ const frameStyle = computed(() => ({
               @click.stop="onClick(uplink, pi, $event)"
               @contextmenu.prevent="onContext(uplink, pi, $event)"
             >
-              <span class="sw-port-lab">{{ portLab(uplink, pi) }}</span>
+              <SwitchSquarePort
+                :kind="portKind(uplink, pi)"
+                :label="portLab(uplink, pi)"
+                :selected="isSelected(uplink.index, pi)"
+              />
             </button>
           </div>
         </div>
@@ -138,7 +152,11 @@ const frameStyle = computed(() => ({
               @click.stop="onClick(downlink, pi, $event)"
               @contextmenu.prevent="onContext(downlink, pi, $event)"
             >
-              <span class="sw-port-lab">{{ portLab(downlink, pi) }}</span>
+              <SwitchSquarePort
+                :kind="portKind(downlink, pi)"
+                :label="portLab(downlink, pi)"
+                :selected="isSelected(downlink.index, pi)"
+              />
             </button>
           </div>
         </div>
@@ -154,7 +172,11 @@ const frameStyle = computed(() => ({
               @click.stop="onClick(uplink, pi, $event)"
               @contextmenu.prevent="onContext(uplink, pi, $event)"
             >
-              <span class="sw-port-lab">{{ portLab(uplink, pi) }}</span>
+              <SwitchSquarePort
+                :kind="portKind(uplink, pi)"
+                :label="portLab(uplink, pi)"
+                :selected="isSelected(uplink.index, pi)"
+              />
             </button>
           </div>
         </div>
@@ -208,12 +230,10 @@ const frameStyle = computed(() => ({
   gap: 0;
 }
 .sw-port {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   box-sizing: border-box;
-  border: 1px solid #303133;
-  background: #fff;
+  border: 0;
+  background: transparent;
   min-width: 0;
   min-height: 0;
   width: 100%;
@@ -222,20 +242,8 @@ const frameStyle = computed(() => ({
   padding: 0;
   cursor: pointer;
 }
-.sw-port:hover {
-  background: #ecf5ff;
-  border-color: #409eff;
-}
-.sw-port.selected {
-  background: #409eff;
-  border-color: #1d6ec7;
-}
-.sw-port.selected .sw-port-lab {
-  color: #fff;
-}
-.sw-port-lab {
-  font-size: 7px;
-  line-height: 1;
-  color: #303133;
+.sw-port:hover :deep(.sq-port) {
+  outline: 1px solid #79bbff;
+  outline-offset: -1px;
 }
 </style>

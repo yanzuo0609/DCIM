@@ -8,6 +8,7 @@ import type {
   PortLayout,
   PortType,
   ServerSlotKind,
+  SlotInterfaceGroup,
   SwitchSubtype,
 } from '@/api/network'
 import { newCoreLineCard, SWITCH_SUBTYPE_DEFAULTS } from '@/api/network'
@@ -41,12 +42,17 @@ import {
   type SwitchSystemPortAttr,
 } from '@/utils/switchModelAttrs'
 import {
+  isOnboardSlot,
+  listServerPorts,
+  normalizeFlexSpeed,
   normalizeServerFormFactor,
+  readPcieSlots,
   readServerIfaceSlots,
-  serverPortLocalLabel,
   serverSlotNamePrefix,
   syncServerDerivedAttrs,
+  type ServerFlexSpeed,
   type ServerIfaceSlotAttr,
+  type ServerPcieSlotAttr,
 } from '@/utils/serverModelAttrs'
 import {
   normalizeSecurityFormFactor,
@@ -71,6 +77,10 @@ export interface DesignSlotInterface {
   peer_label: string
   /** 对端信息 */
   peer_info: string
+  /** 设备内稳定唯一 ID，供拓扑布线引用 */
+  id?: string
+  /** 人读编号，如 BMC1 / LOM1 / F10G1 */
+  code?: string
 }
 
 export interface DesignSlotAttr {
@@ -101,14 +111,13 @@ export function syncSlotInterfaces(slot: DesignSlotAttr): DesignSlotInterface[] 
     slot.interfaces = []
     return []
   }
-  const n = Math.max(1, Math.min(8, Number(slot.port_count) || 1))
-  slot.port_count = n
   const prev = Array.isArray(slot.interfaces) ? slot.interfaces : []
+  const n = Math.max(1, Math.min(32, Number(slot.port_count) || prev.length || 1))
+  slot.port_count = n
   const defType = defaultPortTypeForSlot(t)
   const next: DesignSlotInterface[] = []
   for (let i = 0; i < n; i++) {
     const src = prev[i]
-    // 千兆/万兆 Slot 强制接口速率与 Slot 类型一致，避免残留 10g/1g
     const portType =
       t === 'nic_1g' || t === 'nic_10g' ? defType : String(src?.port_type || defType)
     next.push({
@@ -118,6 +127,8 @@ export function syncSlotInterfaces(slot: DesignSlotAttr): DesignSlotInterface[] 
       local_info: String(src?.local_info || ''),
       peer_label: String(src?.peer_label || ''),
       peer_info: String(src?.peer_info || ''),
+      id: src?.id ? String(src.id) : undefined,
+      code: src?.code ? String(src.code) : undefined,
     })
   }
   slot.interfaces = next
@@ -464,11 +475,19 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
   syncServerDerivedAttrs(attrs)
   const ifaceSlots = readServerIfaceSlots(attrs)
   if (ifaceSlots.length && (Array.isArray(attrs.server_slots) || Array.isArray(attrs.slots))) {
-    const defs: LayoutSlotDef[] = ifaceSlots.map((s) => buildServerIfaceSlotDef(s))
+    const flexSpeed = normalizeFlexSpeed(attrs.flex_io_speed)
+    const defs: LayoutSlotDef[] = []
+    for (const s of ifaceSlots) {
+      if (!isOnboardSlot(s)) continue
+      defs.push(buildServerIfaceSlotDef(s, flexSpeed))
+    }
+    for (const pcie of readPcieSlots(attrs)) {
+      defs.push(buildPcieSlotDef(pcie, flexSpeed))
+    }
     layout.slots_def = defs
     layout.slot_count = defs.length
     generatePortsFromSlotsDef(layout, false)
-    applyServerIfaceSlotPortLabels(layout, ifaceSlots)
+    applyServerIfaceSlotPortLabels(layout, attrs)
   } else {
     const slots = normalizeDesignSlots(attrs)
     if (slots.length) {
@@ -517,25 +536,30 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
   return layout
 }
 
-function buildServerIfaceSlotDef(slot: ServerIfaceSlotAttr): LayoutSlotDef {
+function namedGroup(
+  portType: PortType,
+  count: number,
+  idNs: string,
+  role: NonNullable<SlotInterfaceGroup['role']>,
+) {
+  const g = newInterfaceGroup(portType, count, { role, grid_cols: Math.min(4, count) })
+  g.id = idNs
+  g.id_ns = idNs
+  return g
+}
+
+function buildServerIfaceSlotDef(slot: ServerIfaceSlotAttr, _flexSpeed: ServerFlexSpeed): LayoutSlotDef {
   const groups = []
-  if (slot.ports_10g > 0) {
-    groups.push(newInterfaceGroup('10g', slot.ports_10g, { role: 'card', grid_cols: Math.min(4, slot.ports_10g) }))
-  }
+  const bmc = Math.max(0, Number(slot.bmc_count) || 0)
+  const ipmi = Math.max(0, Number(slot.ipmi_count) || 0)
   if (slot.ports_1g > 0) {
-    groups.push(newInterfaceGroup('1g', slot.ports_1g, { role: 'card', grid_cols: Math.min(4, slot.ports_1g) }))
+    groups.push(namedGroup('1g', slot.ports_1g, 'lom', 'card'))
   }
-  if (slot.ipmi_count > 0) {
-    groups.push(newInterfaceGroup('bmc', slot.ipmi_count, { role: 'mgmt', grid_cols: slot.ipmi_count }))
-  }
-  if (slot.hdmi_count > 0) {
-    groups.push(newInterfaceGroup('other', slot.hdmi_count, { role: 'mgmt', grid_cols: slot.hdmi_count }))
-  }
-  if (slot.usb_count > 0) {
-    groups.push(newInterfaceGroup('other', slot.usb_count, { role: 'mgmt', grid_cols: Math.min(4, slot.usb_count) }))
-  }
-  const kind: ServerSlotKind =
-    slot.ports_10g > 0 ? 'nic_10g' : slot.ports_1g > 0 ? 'nic_1g' : groups.length ? 'nic_1g' : 'blank'
+  if (bmc > 0) groups.push(namedGroup('bmc', bmc, 'bmc', 'mgmt'))
+  if (ipmi > 0) groups.push(namedGroup('bmc', ipmi, 'ipmi', 'mgmt'))
+  if (slot.hdmi_count > 0) groups.push(namedGroup('other', slot.hdmi_count, 'vga', 'mgmt'))
+  if (slot.usb_count > 0) groups.push(namedGroup('other', slot.usb_count, 'usb', 'mgmt'))
+  const kind: ServerSlotKind = slot.ports_1g > 0 ? 'nic_1g' : groups.length ? 'nic_1g' : 'blank'
   return {
     server_slot_kind: kind,
     orientation: 'horizontal',
@@ -548,46 +572,39 @@ function buildServerIfaceSlotDef(slot: ServerIfaceSlotAttr): LayoutSlotDef {
   }
 }
 
-function applyServerIfaceSlotPortLabels(layout: PortLayout, slots: ServerIfaceSlotAttr[]) {
-  if (!layout.ports?.length) return
-  const bySlot = new Map<number, NonNullable<PortLayout['ports']>>()
-  for (const p of layout.ports) {
-    if (p.slot_index == null || p.slot_index <= 0) continue
-    const list = bySlot.get(p.slot_index) || []
-    list.push(p)
-    bySlot.set(p.slot_index, list)
+function buildPcieSlotDef(slot: ServerPcieSlotAttr, flexSpeed: ServerFlexSpeed): LayoutSlotDef {
+  const n = Math.max(0, Number(slot.flex_ports) || 0)
+  const groups = n > 0 ? [namedGroup(flexSpeed === '25ge' ? '25g' : '10g', n, `pcie${slot.index}`, 'card')] : []
+  return {
+    server_slot_kind: n > 0 ? 'nic_10g' : 'blank',
+    orientation: 'vertical',
+    groups,
+    layout_x: null,
+    layout_y: null,
+    layout_w: null,
+    layout_h: null,
+    zone_label: `PCIE${slot.index}`,
   }
-  for (const s of slots) {
-    const ports = (bySlot.get(s.index) || []).slice().sort((a, b) => a.id.localeCompare(b.id))
-    const g10 = ports.filter((p) => p.port_type === '10g')
-    const g1 = ports.filter((p) => p.port_type === '1g')
-    const gIpmi = ports.filter((p) => p.port_type === 'bmc')
-    const others = ports.filter((p) => p.port_type === 'other')
-    const vgaN = Math.max(0, Number(s.hdmi_count) || 0)
-    const gVga = others.slice(0, vgaN)
-    const gUsb = others.slice(vgaN)
-    const batches: { tag: string; list: typeof ports }[] = [
-      { tag: '10G', list: g10 },
-      { tag: '1G', list: g1 },
-      { tag: 'IPMI', list: gIpmi },
-      { tag: 'VGA', list: gVga },
-      { tag: 'USB', list: gUsb },
-    ]
-    const seen = new Set<string>()
-    for (const b of batches) {
-      b.list.forEach((p, i) => {
-        seen.add(p.id)
-        p.label = serverPortLocalLabel(s, b.tag, i + 1)
-        if (p.port_type === 'bmc') p.purpose = 'MGMT'
-        else if (!p.purpose) p.purpose = 'DOWNLINK'
-      })
+}
+
+function applyServerIfaceSlotPortLabels(layout: PortLayout, attrs: Record<string, unknown>) {
+  if (!layout.ports?.length) return
+  const specs = listServerPorts(attrs)
+  const byId = new Map(specs.map((s) => [s.id, s]))
+  for (const p of layout.ports) {
+    const spec = byId.get(p.id)
+    if (!spec) {
+      if (p.port_type === 'bmc') p.purpose = 'MGMT'
+      else if (!p.purpose) p.purpose = 'SERVER'
+      continue
     }
-    let extra = 0
-    for (const p of ports) {
-      if (seen.has(p.id)) continue
-      extra += 1
-      p.label = serverPortLocalLabel(s, '口', extra)
-      if (!p.purpose) p.purpose = 'DOWNLINK'
+    p.code = spec.code
+    p.label = spec.code
+    p.media = spec.iface_type === 'optical' ? 'FIBER' : 'COPPER'
+    if (spec.kind === 'bmc' || spec.kind === 'ipmi' || spec.kind === 'vga' || spec.kind === 'usb') {
+      p.purpose = 'MGMT'
+    } else {
+      p.purpose = 'SERVER'
     }
   }
 }

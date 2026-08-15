@@ -138,6 +138,46 @@ AIRFLOW_OPTIONS = [
     TaxonomyOption(value="custom", label="自定义"),
 ]
 
+MEMORY_TYPE_OPTIONS = [
+    TaxonomyOption(value="ddr4", label="DDR4"),
+    TaxonomyOption(value="ddr5", label="DDR5"),
+    TaxonomyOption(value="other", label="其他"),
+]
+DISK_SIZE_OPTIONS = [
+    TaxonomyOption(value="2.5", label="2.5 寸"),
+    TaxonomyOption(value="3.5", label="3.5 寸"),
+]
+DISK_PROTO_OPTIONS = [
+    TaxonomyOption(value="sas_sata", label="SAS/SATA"),
+    TaxonomyOption(value="sas", label="SAS"),
+    TaxonomyOption(value="sata", label="SATA"),
+    TaxonomyOption(value="nvme", label="NVMe"),
+]
+SSD_IFACE_OPTIONS = [
+    TaxonomyOption(value="sata", label="SATA"),
+    TaxonomyOption(value="nvme", label="NVMe"),
+    TaxonomyOption(value="m.2", label="M.2"),
+    TaxonomyOption(value="u.2", label="U.2"),
+    TaxonomyOption(value="sas", label="SAS"),
+    TaxonomyOption(value="other", label="其他"),
+]
+SSD_TYPE_OPTIONS = [
+    TaxonomyOption(value="sata", label="SATA SSD"),
+    TaxonomyOption(value="nvme", label="NVMe SSD"),
+    TaxonomyOption(value="sas", label="SAS SSD"),
+    TaxonomyOption(value="mixed", label="混合"),
+    TaxonomyOption(value="other", label="其他"),
+]
+PSU_REDUNDANCY_OPTIONS = [
+    TaxonomyOption(value="1+1", label="1+1 冗余"),
+    TaxonomyOption(value="1+n", label="1+N 冗余"),
+    TaxonomyOption(value="other", label="其他"),
+]
+FLEX_SPEED_OPTIONS = [
+    TaxonomyOption(value="10ge", label="10GE 光口"),
+    TaxonomyOption(value="25ge", label="25GE 光口"),
+]
+
 
 def _clamp_int(value: Any, default: int, lo: int, hi: int) -> int:
     try:
@@ -375,8 +415,46 @@ def _normalize_switch_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
     return attrs
 
 
+def _as_int(v: Any, default: int, lo: int | None = None, hi: int | None = None) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = default
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
+def _normalize_pcie_slots(raw: Any, max_slots: int, flex_fallback: int) -> list[dict[str, Any]]:
+    """灵活 IO 光口按 PCIE 槽定义：0=挡板，2/4=光口。"""
+    n = max(0, min(16, int(max_slots or 0)))
+    if isinstance(raw, list) and raw:
+        slots: list[dict[str, Any]] = []
+        for i in range(n):
+            src = raw[i] if i < len(raw) and isinstance(raw[i], dict) else {}
+            slots.append(
+                {
+                    "index": i + 1,
+                    "flex_ports": _as_int(src.get("flex_ports"), 0, 0, 4),
+                }
+            )
+        return slots
+    remain = max(0, min(64, int(flex_fallback or 0)))
+    slots = []
+    per = 2
+    for i in range(n):
+        take = 0 if remain <= 0 else min(4, remain, per)
+        slots.append({"index": i + 1, "flex_ports": take})
+        remain -= take
+    if remain > 0 and slots:
+        slots[-1]["flex_ports"] = max(0, min(4, int(slots[-1]["flex_ports"]) + remain))
+    return slots
+
+
 def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
-    """slot_count 驱动 server_slots / slots[]；磁盘槽位按高度封顶。"""
+    """硬件规格 + 接口计数驱动 server_slots / 稳定端口 ID。"""
     try:
         form_u = int(attrs.get("form_factor_u") or 1)
     except (TypeError, ValueError):
@@ -393,14 +471,64 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
     attrs["form_factor_u"] = form_u
     attrs["disk_front_max"] = front_max
     attrs["disk_rear_max"] = 6
+    attrs["disk_front_count"] = _as_int(attrs.get("disk_front_count"), min(4, front_max), 0, front_max)
+    attrs["disk_rear_count"] = _as_int(attrs.get("disk_rear_count"), 0, 0, 6)
+    size = str(attrs.get("disk_front_size") or "3.5")
+    attrs["disk_front_size"] = "2.5" if size in ("2.5", "sff") else "3.5"
+    rsize = str(attrs.get("disk_rear_size") or "2.5")
+    attrs["disk_rear_size"] = "3.5" if rsize in ("3.5", "lff") else "2.5"
+    proto = str(attrs.get("disk_front_proto") or "sas_sata").lower()
+    attrs["disk_front_proto"] = proto if proto in ("sas", "sata", "nvme", "sas_sata") else "sas_sata"
+    rproto = str(attrs.get("disk_rear_proto") or "sas_sata").lower()
+    attrs["disk_rear_proto"] = rproto if rproto in ("sas", "sata", "nvme", "sas_sata") else "sas_sata"
+
+    mem_t = str(attrs.get("memory_type") or "ddr4").lower()
+    attrs["memory_type"] = mem_t if mem_t in ("ddr4", "ddr5", "other") else "ddr4"
+    attrs["cpu_sockets"] = _as_int(attrs.get("cpu_sockets"), 2, 1, 8)
+    attrs["cpu_cores_per_socket"] = _as_int(attrs.get("cpu_cores_per_socket"), 16, 1, 128)
+    attrs["memory_module_gb"] = _as_int(attrs.get("memory_module_gb"), 16, 1, 1024)
+    attrs["memory_modules"] = _as_int(attrs.get("memory_modules"), 8, 1, 64)
     try:
-        attrs["disk_front_count"] = max(0, min(front_max, int(attrs.get("disk_front_count") or 0)))
+        total = int(attrs.get("memory_gb") or 0)
     except (TypeError, ValueError):
-        attrs["disk_front_count"] = min(4, front_max)
-    try:
-        attrs["disk_rear_count"] = max(0, min(6, int(attrs.get("disk_rear_count") or 0)))
-    except (TypeError, ValueError):
-        attrs["disk_rear_count"] = 0
+        total = 0
+    if total <= 0:
+        total = int(attrs["memory_module_gb"]) * int(attrs["memory_modules"])
+    attrs["memory_gb"] = max(1, total)
+    default_pcie = 2 if form_u == 1 else 6 if form_u == 2 else 8
+    attrs["pcie_slot_max"] = _as_int(attrs.get("pcie_slot_max"), default_pcie, 0, 16)
+
+    attrs["ssd_internal_count"] = _as_int(attrs.get("ssd_internal_count"), 0, 0, 16)
+    ssd_if = str(attrs.get("ssd_internal_iface") or "sata").lower()
+    attrs["ssd_internal_iface"] = ssd_if if ssd_if in ("sata", "nvme", "sas", "m.2", "u.2", "other") else "sata"
+    attrs["ssd_max_count"] = _as_int(attrs.get("ssd_max_count"), max(2, int(attrs["ssd_internal_count"])), 0, 64)
+    ssd_ty = str(attrs.get("ssd_max_type") or "sata").lower()
+    attrs["ssd_max_type"] = ssd_ty if ssd_ty in ("sata", "nvme", "sas", "mixed", "other") else "sata"
+
+    red = str(attrs.get("psu_redundancy") or "1+1")
+    if red in ("1+n", "1+N"):
+        red = "1+n"
+    elif red != "other":
+        red = "1+1"
+    attrs["psu_redundancy"] = red
+    attrs["psu_watt"] = _as_int(attrs.get("psu_watt"), 800, 100, 5000)
+    attrs["psu_redundant_n"] = _as_int(attrs.get("psu_redundant_n"), 1, 1, 7)
+    if attrs.get("psu_count") is None:
+        attrs["psu_count"] = 1 + int(attrs["psu_redundant_n"]) if red == "1+n" else 2
+    attrs["psu_count"] = _as_int(attrs.get("psu_count"), 2, 0, 8)
+    attrs["psu_redundant"] = red != "other" and int(attrs["psu_count"]) >= 2
+    attrs["fan_count"] = _as_int(attrs.get("fan_count"), 4 if form_u == 1 else 6 if form_u == 2 else 8, 0, 16)
+
+    os_raw = attrs.get("os_support")
+    if isinstance(os_raw, list):
+        attrs["os_support"] = [str(x).strip() for x in os_raw if str(x).strip()]
+    elif isinstance(os_raw, str) and os_raw.strip():
+        attrs["os_support"] = [p.strip() for p in os_raw.replace("，", ",").split(",") if p.strip()]
+    else:
+        attrs["os_support"] = ["windows_server", "rhel"]
+    attrs["os_support_custom"] = str(attrs.get("os_support_custom") or "")
+
+    migrated = attrs.get("lom_1g_count") is not None or attrs.get("flex_io_count") is not None or attrs.get("vga_count") is not None
 
     raw_server = attrs.get("server_slots")
     server_slots: list[dict[str, Any]] = []
@@ -408,8 +536,6 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
         for item in raw_server:
             if isinstance(item, dict):
                 server_slots.append(dict(item))
-
-    # 若无 server_slots，从旧 slots 迁移
     if not server_slots:
         raw_slots = attrs.get("slots")
         if isinstance(raw_slots, list):
@@ -420,6 +546,7 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
                 pc = max(0, min(16, int(item.get("port_count") or 2)))
                 entry = {
                     "index": int(item.get("index") or len(server_slots) + 1),
+                    "bmc_count": 0,
                     "ipmi_count": 0,
                     "hdmi_count": 0,
                     "usb_count": 0,
@@ -432,59 +559,150 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
                     entry["ports_1g"] = 0
                 server_slots.append(entry)
 
-    count = attrs.get("slot_count")
-    if count is None:
-        count = len(server_slots) if server_slots else 3
-    count = max(1, min(16, int(count or 3)))
-    attrs["slot_count"] = count
+    onboard = next((s for s in server_slots if int(s.get("index") or 0) == 1), server_slots[0] if server_slots else {})
+    flex_slot = next((s for s in server_slots if int(s.get("index") or 0) == 2), None)
+    if not migrated:
+        bmc_legacy = onboard.get("bmc_count")
+        ipmi_legacy = onboard.get("ipmi_count")
+        if bmc_legacy is None:
+            attrs["bmc_ports"] = _as_int(ipmi_legacy, 1, 0, 4)
+            attrs["ipmi_iface_count"] = 0
+        else:
+            attrs["bmc_ports"] = _as_int(bmc_legacy, 1, 0, 4)
+            attrs["ipmi_iface_count"] = _as_int(ipmi_legacy, 0, 0, 4)
+        attrs["vga_count"] = _as_int(onboard.get("hdmi_count") or onboard.get("vga_count"), 1, 0, 4)
+        attrs["usb_count"] = _as_int(onboard.get("usb_count"), 2, 0, 8)
+        attrs["lom_1g_count"] = _as_int(onboard.get("ports_1g"), 2, 0, 8)
+        flex_n = (flex_slot or {}).get("ports_10g") or onboard.get("ports_10g") or 2
+        attrs["flex_io_count"] = _as_int(flex_n, 2, 0, 16)
 
-    while len(server_slots) < count:
-        idx = len(server_slots) + 1
-        server_slots.append(
+    attrs["bmc_ports"] = _as_int(attrs.get("bmc_ports"), 1, 0, 4)
+    attrs["ipmi_iface_count"] = _as_int(attrs.get("ipmi_iface_count"), 0, 0, 4)
+    attrs["vga_count"] = _as_int(attrs.get("vga_count") or attrs.get("hdmi_ports"), 1, 0, 4)
+    attrs["usb_count"] = _as_int(attrs.get("usb_count") or attrs.get("usb_ports"), 2, 0, 8)
+    attrs["usb_ports"] = attrs["usb_count"]
+    attrs["hdmi_ports"] = attrs["vga_count"]
+    attrs["lom_1g_count"] = _as_int(attrs.get("lom_1g_count"), 2, 0, 8)
+    flex_speed = str(attrs.get("flex_io_speed") or "10ge").lower()
+    attrs["flex_io_speed"] = "25ge" if flex_speed in ("25ge", "25g", "25") else "10ge"
+    pcie_slots = _normalize_pcie_slots(
+        attrs.get("pcie_slots"),
+        int(attrs["pcie_slot_max"]),
+        _as_int(attrs.get("flex_io_count"), 2, 0, 16),
+    )
+    attrs["pcie_slots"] = pcie_slots
+    attrs["flex_io_count"] = sum(int(s.get("flex_ports") or 0) for s in pcie_slots)
+
+    bmc = int(attrs["bmc_ports"])
+    ipmi = int(attrs["ipmi_iface_count"])
+    vga = int(attrs["vga_count"])
+    usb = int(attrs["usb_count"])
+    lom = int(attrs["lom_1g_count"])
+    flex = int(attrs["flex_io_count"])
+    count = 1 + len(pcie_slots)
+    attrs["slot_count"] = count
+    flex_type = "25g" if attrs["flex_io_speed"] == "25ge" else "10g"
+
+    def _ports(kind: str, n: int, ptype: str, code_prefix: str) -> list[dict[str, Any]]:
+        out = []
+        for i in range(n):
+            pid = f"{kind}-p{i}"
+            code = f"{code_prefix}{i + 1}"
+            out.append(
+                {
+                    "index": len(out) + 1,
+                    "port_type": ptype,
+                    "local_label": code,
+                    "local_info": pid,
+                    "peer_label": "",
+                    "peer_info": "",
+                    "id": pid,
+                    "code": code,
+                }
+            )
+        return out
+
+    def _pcie_ports(slot_index: int, n: int, ptype: str) -> list[dict[str, Any]]:
+        out = []
+        for i in range(n):
+            pid = f"pcie{slot_index}-p{i}"
+            code = f"S{slot_index}-{i + 1}"
+            out.append(
+                {
+                    "index": len(out) + 1,
+                    "port_type": ptype,
+                    "local_label": code,
+                    "local_info": pid,
+                    "peer_label": "",
+                    "peer_info": "",
+                    "id": pid,
+                    "code": code,
+                    "slot_index": slot_index,
+                }
+            )
+        return out
+
+    onboard_ifaces = (
+        _ports("bmc", bmc, "bmc", "BMC")
+        + _ports("ipmi", ipmi, "bmc", "IPMI")
+        + _ports("lom", lom, "1g", "LOM")
+        + _ports("vga", vga, "other", "VGA")
+        + _ports("usb", usb, "other", "USB")
+    )
+    normalized_server = [
+        {
+            "index": 1,
+            "kind": "onboard",
+            "bmc_count": bmc,
+            "ipmi_count": ipmi,
+            "hdmi_count": vga,
+            "usb_count": usb,
+            "ports_10g": 0,
+            "ports_1g": lom,
+            "port_start": 1,
+        }
+    ]
+    design_slots: list[dict[str, Any]] = [
+        {
+            "index": 1,
+            "type": "nic_1g" if lom else "blank",
+            "port_count": len(onboard_ifaces),
+            "interfaces": onboard_ifaces,
+        }
+    ]
+    if flex > 0:
+        normalized_server.append(
             {
-                "index": idx,
-                "ipmi_count": 1 if idx == 1 else 0,
-                "hdmi_count": 1 if idx == 1 else 0,
-                "usb_count": 2 if idx == 1 else 0,
-                "ports_10g": 2,
-                "ports_1g": 2,
+                "index": 2,
+                "kind": "expansion",
+                "bmc_count": 0,
+                "ipmi_count": 0,
+                "hdmi_count": 0,
+                "usb_count": 0,
+                "ports_10g": flex,
+                "ports_1g": 0,
                 "port_start": 1,
             }
         )
-    server_slots = server_slots[:count]
-    normalized_server: list[dict[str, Any]] = []
-    design_slots: list[dict[str, Any]] = []
-    for i, slot in enumerate(server_slots):
-        entry = {
-            "index": i + 1,
-            "ipmi_count": max(0, min(4, int(slot.get("ipmi_count") or 0))),
-            "hdmi_count": max(0, min(4, int(slot.get("hdmi_count") or 0))),
-            "usb_count": max(0, min(8, int(slot.get("usb_count") or 0))),
-            "ports_10g": max(0, min(16, int(slot.get("ports_10g") or 0))),
-            "ports_1g": max(0, min(16, int(slot.get("ports_1g") or 0))),
-            "port_start": 1,
-        }
-        normalized_server.append(entry)
-        n10 = int(entry["ports_10g"])
-        n1 = int(entry["ports_1g"])
-        if n10 <= 0 and n1 <= 0:
-            design_slots.append({"index": i + 1, "type": "blank", "port_count": 0, "interfaces": []})
-        elif n10 > 0:
-            design_slots.append({"index": i + 1, "type": "nic_10g", "port_count": n10})
-        else:
-            design_slots.append({"index": i + 1, "type": "nic_1g", "port_count": max(1, n1)})
+    for pcie in pcie_slots:
+        n = int(pcie.get("flex_ports") or 0)
+        ifaces = _pcie_ports(int(pcie["index"]), n, flex_type)
+        design_slots.append(
+            {
+                "index": len(design_slots) + 1,
+                "type": "nic_10g" if n else "blank",
+                "port_count": len(ifaces),
+                "interfaces": ifaces,
+            }
+        )
 
     attrs["server_slots"] = normalized_server
     attrs["slots"] = design_slots
-
-    try:
-        attrs["fan_count"] = max(0, min(16, int(attrs.get("fan_count") or 0)))
-    except (TypeError, ValueError):
-        attrs["fan_count"] = 4
-    try:
-        attrs["psu_count"] = max(0, min(8, int(attrs.get("psu_count") or 0)))
-    except (TypeError, ValueError):
-        attrs["psu_count"] = 2
+    attrs["server_ports"] = [
+        {k: it[k] for k in ("id", "code", "port_type", "local_label")}
+        for slot in design_slots
+        for it in slot.get("interfaces") or []
+    ]
 
     panel = attrs.get("panel_layout")
     if not isinstance(panel, dict) or "front" not in panel:
@@ -496,6 +714,8 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
             "rear": {"cols": 38, "rows": 16, "items": []},
         }
     attrs["panel_layout"] = panel
+    if attrs.get("panel_style_mode") not in ("custom", "generated"):
+        attrs["panel_style_mode"] = "custom" if attrs.get("panel_style_image") else "generated"
 
     custom = attrs.get("custom_attributes")
     if not isinstance(custom, list):
@@ -510,54 +730,42 @@ def _server_defaults(subtype: str) -> dict[str, Any]:
         "form_factor_u": form_u,
         "cpu_sockets": 2,
         "cpu_cores_per_socket": 16 if subtype != "hpc" else 32,
+        "memory_type": "ddr4",
         "memory_gb": 256 if subtype == "hpc" else 128,
         "memory_modules": 8,
         "memory_module_gb": 16 if subtype != "hpc" else 32,
-        "slot_count": 3,
-        "server_slots": [
-            {
-                "index": 1,
-                "ipmi_count": 1,
-                "hdmi_count": 1,
-                "usb_count": 2,
-                "ports_10g": 2,
-                "ports_1g": 2,
-                "port_start": 1,
-            },
-            {
-                "index": 2,
-                "ipmi_count": 0,
-                "hdmi_count": 0,
-                "usb_count": 0,
-                "ports_10g": 2,
-                "ports_1g": 2,
-                "port_start": 1,
-            },
-            {
-                "index": 3,
-                "ipmi_count": 0,
-                "hdmi_count": 0,
-                "usb_count": 0,
-                "ports_10g": 2,
-                "ports_1g": 2,
-                "port_start": 1,
-            },
-        ],
-        "slots": [
-            {"index": 1, "type": "nic_10g", "port_count": 2},
-            {"index": 2, "type": "nic_10g", "port_count": 2},
-            {"index": 3, "type": "nic_10g", "port_count": 2},
-        ],
+        "pcie_slot_max": 6 if form_u == 2 else 2,
+        "slot_count": 2,
         "psu_count": 2,
         "psu_watt": 800,
+        "psu_redundancy": "1+1",
         "psu_redundant": True,
+        "psu_redundant_n": 1,
         "fan_count": 4 if form_u == 1 else 6,
         "bmc_ports": 1,
-        "usb_ports": 2,
+        "ipmi_iface_count": 0,
+        "vga_count": 1,
+        "usb_count": 2,
+        "lom_1g_count": 2,
+        "flex_io_count": 2,
+        "flex_io_speed": "10ge",
         "disk_front_count": min(4, front_max) if subtype != "storage" else min(8, front_max),
-        "disk_rear_count": 2,
+        "disk_rear_count": 2 if form_u >= 2 else 0,
+        "disk_front_size": "3.5",
+        "disk_rear_size": "2.5",
+        "disk_front_proto": "sas_sata",
+        "disk_rear_proto": "sas_sata",
         "disk_front_max": front_max,
         "disk_rear_max": 6,
+        "ssd_internal_count": 0,
+        "ssd_internal_iface": "sata",
+        "ssd_max_count": 2,
+        "ssd_max_type": "sata",
+        "os_support": ["windows_server", "rhel"],
+        "os_support_custom": "",
+        "panel_style_image": None,
+        "panel_style_image_rear": None,
+        "panel_style_mode": "generated",
         "panel_layout": {
             "cols": 38,
             "rows": 16,
@@ -775,35 +983,35 @@ def attribute_schema(category: str) -> CategoryAttributeSchema:
     if category == "server":
         fields = [
             AttributeFieldDef(key="form_factor_u", label="机箱高度(U)", type="int", min=1, max=4, required=True),
-            AttributeFieldDef(key="cpu_sockets", label="CPU 路数", type="int", min=1, max=8, required=True),
-            AttributeFieldDef(key="cpu_cores_per_socket", label="单路核心数", type="int", min=1, max=128),
-            AttributeFieldDef(key="memory_gb", label="内存总容量(GB)", type="int", min=1, required=True),
-            AttributeFieldDef(key="memory_modules", label="内存条数", type="int", min=1, max=64, required=True),
+            AttributeFieldDef(key="cpu_sockets", label="处理器颗数", type="int", min=1, max=8, required=True),
+            AttributeFieldDef(key="cpu_cores_per_socket", label="每颗核数", type="int", min=1, max=128),
+            AttributeFieldDef(key="memory_type", label="内存类型", type="select", options=MEMORY_TYPE_OPTIONS),
             AttributeFieldDef(key="memory_module_gb", label="单条容量(GB)", type="int", min=1),
-            AttributeFieldDef(
-                key="slot_count",
-                label="扩展 Slot 数量",
-                type="int",
-                min=0,
-                max=16,
-                required=True,
-                description="每个 Slot 可单独选择千兆/万兆/RAID卡/磁盘插槽",
-            ),
+            AttributeFieldDef(key="memory_modules", label="内存条数", type="int", min=1, max=64, required=True),
+            AttributeFieldDef(key="memory_gb", label="内存总容量(GB)", type="int", min=1, required=True),
+            AttributeFieldDef(key="pcie_slot_max", label="PCIE最大插槽", type="int", min=0, max=16),
+            AttributeFieldDef(key="disk_front_count", label="前置盘位数", type="int", min=0, max=48),
+            AttributeFieldDef(key="disk_front_size", label="前置盘尺寸", type="select", options=DISK_SIZE_OPTIONS),
+            AttributeFieldDef(key="disk_front_proto", label="前置盘协议", type="select", options=DISK_PROTO_OPTIONS),
+            AttributeFieldDef(key="disk_rear_count", label="后置盘位数", type="int", min=0, max=6),
+            AttributeFieldDef(key="disk_rear_size", label="后置盘尺寸", type="select", options=DISK_SIZE_OPTIONS),
+            AttributeFieldDef(key="disk_rear_proto", label="后置盘协议", type="select", options=DISK_PROTO_OPTIONS),
+            AttributeFieldDef(key="ssd_internal_count", label="内置SSD个数", type="int", min=0, max=16),
+            AttributeFieldDef(key="ssd_internal_iface", label="内置SSD接口", type="select", options=SSD_IFACE_OPTIONS),
+            AttributeFieldDef(key="ssd_max_count", label="最大SSD个数", type="int", min=0, max=64),
+            AttributeFieldDef(key="ssd_max_type", label="SSD类型", type="select", options=SSD_TYPE_OPTIONS),
+            AttributeFieldDef(key="psu_watt", label="电源功率(W)", type="int", min=100),
             AttributeFieldDef(key="psu_count", label="电源数量", type="int", min=1, max=8, required=True),
-            AttributeFieldDef(key="psu_watt", label="单电源功率(W)", type="int", min=100),
-            AttributeFieldDef(key="psu_redundant", label="电源冗余", type="bool"),
-            AttributeFieldDef(key="fan_count", label="风扇个数", type="int", min=0, max=16),
-            AttributeFieldDef(key="bmc_ports", label="IPMI/BMC 口数", type="int", min=0, max=4),
-            AttributeFieldDef(key="usb_ports", label="USB 口数", type="int", min=0, max=8),
-            AttributeFieldDef(key="disk_front_count", label="前面板硬盘槽", type="int", min=0, max=48),
-            AttributeFieldDef(
-                key="disk_rear_count",
-                label="后面板硬盘槽",
-                type="int",
-                min=0,
-                max=4,
-                description="后面板最多 4 块硬盘插槽",
-            ),
+            AttributeFieldDef(key="psu_redundancy", label="电源冗余", type="select", options=PSU_REDUNDANCY_OPTIONS),
+            AttributeFieldDef(key="fan_count", label="风扇模组", type="int", min=0, max=16),
+            AttributeFieldDef(key="os_support", label="支持的操作系统", type="list"),
+            AttributeFieldDef(key="bmc_ports", label="BMC管理口", type="int", min=0, max=4),
+            AttributeFieldDef(key="ipmi_iface_count", label="IPMI接口", type="int", min=0, max=4),
+            AttributeFieldDef(key="vga_count", label="VGA接口", type="int", min=0, max=4),
+            AttributeFieldDef(key="usb_count", label="USB个数", type="int", min=0, max=8),
+            AttributeFieldDef(key="flex_io_speed", label="灵活IO速率", type="select", options=FLEX_SPEED_OPTIONS),
+            AttributeFieldDef(key="flex_io_count", label="灵活IO光口数", type="int", min=0, max=16),
+            AttributeFieldDef(key="lom_1g_count", label="板载LOM电口", type="int", min=0, max=8),
             *SIM_ATTRIBUTE_FIELDS,
         ]
         return CategoryAttributeSchema(
