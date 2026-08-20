@@ -57,11 +57,16 @@ class Floor(BaseModel):
 
 class Room(BaseModel):
     __tablename__ = "room"
-    __table_args__ = (UniqueConstraint("floor_id", "name", name="uk_room_floor_name"),)
+    __table_args__ = (
+        UniqueConstraint("floor_id", "name", name="uk_room_floor_name"),
+        UniqueConstraint("code", name="uk_room_code"),
+    )
 
     floor_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("floor.id"), nullable=False, index=True
     )
+    # 机房业务编号（全局唯一），与 UUID 主键并存，便于配置与定位
+    code: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     rack_rows: Mapped[int] = mapped_column(Integer, default=4, nullable=False)

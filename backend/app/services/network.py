@@ -727,21 +727,33 @@ class NetworkDesignService:
         rack_ids = [d.rack_id for d in devices if d.rack_id]
         racks = await self.rack_repo.list_by_ids(rack_ids)
         rack_map = {rack.id: rack for rack in racks}
-        rooms = await self.room_repo.list_by_ids([rack.room_id for rack in racks])
+        rooms = await self.room_repo.list_by_ids_with_hierarchy(
+            [rack.room_id for rack in racks]
+        )
         room_map = {room.id: room for room in rooms}
 
         result: dict[uuid.UUID, NetworkDeviceBrief] = {}
         for device in devices:
             rack_id = device.rack_id
             room_id = None
+            datacenter_id = None
             rack_code = None
+            rack_seq_no = None
             room_name = None
+            datacenter_name = None
             if device.rack_id and device.rack_id in rack_map:
                 rack = rack_map[device.rack_id]
                 rack_code = rack.code
+                rack_seq_no = getattr(rack, "seq_no", None)
                 room_id = rack.room_id
                 room = room_map.get(rack.room_id)
                 room_name = room.name if room else None
+                floor = getattr(room, "floor", None) if room else None
+                building = getattr(floor, "building", None) if floor else None
+                datacenter = getattr(building, "datacenter", None) if building else None
+                if datacenter is not None:
+                    datacenter_id = datacenter.id
+                    datacenter_name = datacenter.name
             device_type_name = device.device_type.name if device.device_type else None
             device_type_code = device.device_type.code if device.device_type else None
             model_name = device.model.name if getattr(device, "model", None) else None
@@ -752,8 +764,11 @@ class NetworkDesignService:
                 hostname=device.hostname,
                 rack_id=rack_id,
                 room_id=room_id,
+                datacenter_id=datacenter_id,
                 rack_code=rack_code,
+                rack_seq_no=rack_seq_no,
                 room_name=room_name,
+                datacenter_name=datacenter_name,
                 u_position=device.u_position,
                 ip_summary=system_ip,
                 bmc_ip=bmc_ip,

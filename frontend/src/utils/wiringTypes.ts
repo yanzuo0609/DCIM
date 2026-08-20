@@ -59,8 +59,9 @@ export type EndpointConnectStrategy =
   | 'SAME_NUMBER'
   | 'CROSS'
   | 'FULL_MESH'
+  | 'FIXED_PORT'
   | 'MANUAL'
-/** 端口分配模式：AUTO 场景配对；MANUAL 仅 pairs；HYBRID 先预览可改口 */
+/** 端口分配模式：AUTO 场景配对；MANUAL 手动定义规则后由系统自动配对（可选 pairs 覆盖）；HYBRID 先预览可改口 */
 export type AllocationMode = 'AUTO' | 'MANUAL' | 'HYBRID'
 /** 候选口排序/选取策略 */
 export type PortSelectPolicy = 'MIN_ASC' | 'MAX_DESC' | 'SAME_NUMBER' | 'SLOT_SPREAD'
@@ -323,7 +324,7 @@ export const PORT_POOL_OPTIONS: { value: PortPool; label: string }[] = [
 export const ALLOCATION_MODE_OPTIONS: { value: AllocationMode; label: string }[] = [
   { value: 'AUTO', label: '自动分配' },
   { value: 'HYBRID', label: '自动后可改' },
-  { value: 'MANUAL', label: '手动指定端口' },
+  { value: 'MANUAL', label: '手动定义规则' },
 ]
 
 export const INTERCONNECT_SCOPE_OPTIONS: {

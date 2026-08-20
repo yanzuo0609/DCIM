@@ -28,6 +28,11 @@ class DataCenterRepository(BaseRepository[DataCenter]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_codes(self) -> list[str]:
+        stmt = select(DataCenter.code).where(DataCenter.deleted_at.is_(None))
+        result = await self.session.execute(stmt)
+        return [str(c) for c in result.scalars().all() if c]
+
     async def get_by_location(self, location: str) -> DataCenter | None:
         stmt = select(DataCenter).where(
             DataCenter.location == location,
@@ -199,3 +204,16 @@ class RoomRepository(BaseRepository[Room]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_by_code(self, code: str) -> Room | None:
+        key = str(code or "").strip()
+        if not key:
+            return None
+        stmt = select(Room).where(Room.code == key, Room.deleted_at.is_(None))
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_codes(self) -> list[str]:
+        stmt = select(Room.code).where(Room.deleted_at.is_(None))
+        result = await self.session.execute(stmt)
+        return [str(c) for c in result.scalars().all() if c]

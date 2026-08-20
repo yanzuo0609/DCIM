@@ -103,10 +103,66 @@ async def _ensure_sqlite_room_columns(connection) -> None:
         ("pillar_layout", "ALTER TABLE room ADD COLUMN pillar_layout JSON"),
         ("purpose", "ALTER TABLE room ADD COLUMN purpose VARCHAR(50) DEFAULT 'production'"),
         ("importance", "ALTER TABLE room ADD COLUMN importance VARCHAR(20) DEFAULT 'medium'"),
+        ("code", "ALTER TABLE room ADD COLUMN code VARCHAR(50) NOT NULL DEFAULT ''"),
     ]
     for col, sql in alters:
         if col not in columns:
             await connection.exec_driver_sql(sql)
+            columns.add(col)
+    if "code" in columns:
+        await _backfill_sqlite_room_cr_codes(connection)
+        # Ensure unique index for room.code when possible
+        idx = await connection.exec_driver_sql("PRAGMA index_list(room)")
+        has_uk = False
+        for item in idx.fetchall():
+            if item[1] == "uk_room_code":
+                has_uk = True
+                break
+        if not has_uk:
+            try:
+                await connection.exec_driver_sql(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uk_room_code ON room (code)"
+                )
+            except Exception:
+                pass
+
+
+async def _backfill_sqlite_room_cr_codes(connection) -> None:
+    """Assign CR1、CR2… to rooms missing a CR* business code (empty / legacy RM-*)."""
+    import re
+
+    rows = await connection.exec_driver_sql(
+        "SELECT id, code FROM room WHERE deleted_at IS NULL ORDER BY created_at ASC, name ASC"
+    )
+    rooms = rows.fetchall()
+    if not rooms:
+        return
+
+    cr_re = re.compile(r"^CR(\d+)$", re.IGNORECASE)
+    used: set[str] = set()
+    max_n = 0
+    need_ids: list[str] = []
+    for rid, code in rooms:
+        raw = str(code or "").strip().upper()
+        m = cr_re.match(raw)
+        if m:
+            used.add(raw)
+            max_n = max(max_n, int(m.group(1)))
+        else:
+            # 空编号或旧版 RM-xxxx / 非 CR 编号，统一改成 CR 顺序号
+            need_ids.append(str(rid))
+
+    for rid in need_ids:
+        max_n += 1
+        code = f"CR{max_n}"
+        while code in used:
+            max_n += 1
+            code = f"CR{max_n}"
+        used.add(code)
+        await connection.exec_driver_sql(
+            "UPDATE room SET code = ? WHERE id = ?",
+            (code, rid),
+        )
 
 
 async def _ensure_sqlite_rack_columns(connection) -> None:
@@ -118,10 +174,37 @@ async def _ensure_sqlite_rack_columns(connection) -> None:
     alters = [
         ("app_usage", "ALTER TABLE rack ADD COLUMN app_usage VARCHAR(100)"),
         ("app_color", "ALTER TABLE rack ADD COLUMN app_color VARCHAR(20)"),
+        ("seq_no", "ALTER TABLE rack ADD COLUMN seq_no INTEGER"),
     ]
     for col, sql in alters:
         if col not in columns:
             await connection.exec_driver_sql(sql)
+            columns.add(col)
+    if "seq_no" in columns:
+        # Backfill sequential numbers per room by row/column order when missing
+        rooms = await connection.exec_driver_sql(
+            "SELECT DISTINCT room_id FROM rack WHERE deleted_at IS NULL"
+        )
+        for room_row in rooms.fetchall():
+            room_id = room_row[0]
+            racks = await connection.exec_driver_sql(
+                "SELECT id FROM rack WHERE room_id = ? AND deleted_at IS NULL "
+                "ORDER BY row_no ASC, column_no ASC, code ASC",
+                (room_id,),
+            )
+            seq = 0
+            for rack_row in racks.fetchall():
+                seq += 1
+                await connection.exec_driver_sql(
+                    "UPDATE rack SET seq_no = ? WHERE id = ? AND (seq_no IS NULL OR seq_no = 0)",
+                    (seq, rack_row[0]),
+                )
+        try:
+            await connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uk_rack_room_seq_no ON rack (room_id, seq_no)"
+            )
+        except Exception:
+            pass
 
 
 async def _ensure_sqlite_rack_code_unique_per_room(connection) -> None:

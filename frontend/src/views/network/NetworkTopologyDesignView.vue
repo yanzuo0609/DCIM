@@ -109,6 +109,9 @@ import {
   type NetworkLink,
   type NetworkNode,
 } from '@/api/network'
+import { listRooms, type Room } from '@/api/room'
+import { listRacks, type Rack } from '@/api/rack'
+import { batchMountDevices } from '@/api/device'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -434,9 +437,6 @@ const detectedWiringScenario = computed(() => {
   return previewWiringScenario(rule, nodes.value)
 })
 const modelMatchedPairPreview = computed(() => {
-  if (String(wiringForm.config.allocation_mode || 'AUTO').toUpperCase() === 'MANUAL') {
-    return { pairs: [] as ProposedPair[], issues: [] as Array<{ message: string }> }
-  }
   const rule = {
     id: wiringEditingId.value || 'model-match-preview',
     topology_id: currentId.value || '',
@@ -444,7 +444,8 @@ const modelMatchedPairPreview = computed(() => {
     mode: 'sequential',
     enabled: true,
     description: null,
-    config: wiringForm.config,
+    // 手动规则预览时清空 pairs，走自动配对引擎
+    config: { ...wiringForm.config, pairs: [] },
   } as NetworkWiringRule
   return previewWiringPairs(rule, nodes.value, links.value)
 })
@@ -633,9 +634,9 @@ function onAllocationModeChange() {
     wiringForm.config.target_roles = []
     wiringForm.config.source_device_types = []
     wiringForm.config.target_device_types = []
-    ensureManualPairs()
-    pruneManualPairsAgainstDevices()
-    if (!wiringForm.config.pairs!.length) addManualPairRow()
+    // 手动定义规则：只填参数，由系统自动配对；可选 pairs 作为覆盖
+    if (!Array.isArray(wiringForm.config.pairs)) wiringForm.config.pairs = []
+    void hydrateWiringLocationOptions()
   }
 }
 
@@ -750,6 +751,25 @@ function onSourcePurposeChange() {
 function onTargetPurposeChange() {
   if (!wiringForm.config.target_port_pool || wiringForm.config.target_port_pool === 'AUTO') {
     wiringForm.config.target_port_pool = poolFromPurpose(wiringForm.config.target_port_purpose)
+  }
+  if (String(wiringForm.config.target_port_purpose || '') === 'MGMT') {
+    wiringForm.config.speed = '1G'
+    wiringForm.config.port_speed = '1G'
+    wiringForm.config.link_count = 1
+    wiringForm.config.min_link_count = 1
+    wiringForm.config.max_link_count = 1
+    wiringForm.config.target_port_types = ['bmc']
+    wiringForm.config.target_connection_strategy = 'FIXED_PORT'
+    wiringForm.config.target_port_policy = 'MIN_ASC'
+    wiringForm.config.connection_type = 'BMC_ENDPOINT'
+    wiringForm.config.peer_link = false
+    onEndpointStrategyChange('target')
+  } else if (
+    Array.isArray(wiringForm.config.target_port_types)
+    && wiringForm.config.target_port_types.length === 1
+    && wiringForm.config.target_port_types[0] === 'bmc'
+  ) {
+    wiringForm.config.target_port_types = []
   }
 }
 
@@ -1013,8 +1033,20 @@ const endpointStrategyOptions = [
   { value: 'SAME_NUMBER', label: '最大接口同号互联' },
   { value: 'CROSS', label: '交叉互联' },
   { value: 'FULL_MESH', label: '口型互联/全互联' },
+  { value: 'FIXED_PORT', label: '固定端口' },
   { value: 'MANUAL', label: '手动选择' },
 ]
+
+const targetInterfaceLimitOptions = computed(() => {
+  if (String(wiringForm.config.target_port_purpose || '') === 'MGMT') {
+    return [{ label: 'BMC/IPMI', value: 1 }]
+  }
+  return [
+    { label: '单接口', value: 1 },
+    { label: '双接口', value: 2 },
+    { label: '四接口', value: 4 },
+  ]
+})
 
 const endpointScopeOptions = computed(() => [
   ...deviceGroupOptions.value.map((group) => ({
@@ -1057,26 +1089,265 @@ function endpointScopeModel(side: 'source' | 'target') {
 const sourceScopeSelection = endpointScopeModel('source')
 const targetScopeSelection = endpointScopeModel('target')
 
+const infraRooms = ref<Room[]>([])
+const infraRacks = ref<Rack[]>([])
+const infraCatalogLoaded = ref(false)
+const locationSyncing = ref(false)
+
+async function loadAllInfraPages<T>(
+  fetcher: (page: number, pageSize: number) => Promise<{ items?: T[]; pagination?: { pages?: number } }>,
+  pageSize = 500,
+): Promise<T[]> {
+  const first = await fetcher(1, pageSize)
+  const items = [...(first.items || [])]
+  const pages = Math.max(1, Number(first.pagination?.pages || 1))
+  for (let page = 2; page <= pages; page += 1) {
+    const data = await fetcher(page, pageSize)
+    items.push(...(data.items || []))
+  }
+  return items
+}
+
+async function ensureInfraRoomsLoaded() {
+  if (infraCatalogLoaded.value) return
+  infraRooms.value = await loadAllInfraPages<Room>((page, page_size) => listRooms({ page, page_size }))
+  infraCatalogLoaded.value = true
+}
+
+async function refreshInfraRacksForSelectedRooms(roomIdsOverride?: string[]) {
+  const roomIds = [...new Set(
+    (roomIdsOverride
+      || [
+        ...(wiringForm.config.source_room_ids || []),
+        ...(wiringForm.config.target_room_ids || []),
+      ]
+    ).map(String).filter(Boolean),
+  )]
+  if (!roomIds.length) {
+    infraRacks.value = []
+    return
+  }
+  const batches = await Promise.all(
+    roomIds.map((room_id) =>
+      loadAllInfraPages<Rack>((page, page_size) =>
+        listRacks({ room_id, page, page_size, sort: 'code', order: 'asc' }),
+      ),
+    ),
+  )
+  infraRacks.value = batches.flat()
+}
+
+async function hydrateWiringLocationOptions() {
+  try {
+    await ensureInfraRoomsLoaded()
+    await refreshInfraRacksForSelectedRooms()
+  } catch {
+    ElMessage.warning('同步机房/机柜列表失败，将回退为拓扑内已知位置')
+  }
+}
+
 const roomOptions = computed(() => {
   const seen = new Map<string, string>()
+  for (const room of infraRooms.value) {
+    const label = room.datacenter_name ? `${room.name}（${room.datacenter_name}）` : room.name
+    seen.set(room.id, label)
+  }
   for (const node of canvasNodes.value) {
     const value = String(node.device?.room_id || node.device?.room_name || '').trim()
-    if (value) seen.set(value, node.device?.room_name || value)
+    if (value && !seen.has(value)) seen.set(value, node.device?.room_name || value)
   }
   return [...seen].map(([value, label]) => ({ value, label }))
 })
 
-const rackOptions = computed(() => [...new Set(
-  canvasNodes.value.map((node) => String(node.device?.rack_code || '').trim()).filter(Boolean),
-)].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })))
+function rackOptionsForRooms(roomIds: string[]) {
+  const idSet = new Set(roomIds.map(String).filter(Boolean))
+  const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+  let racks = infraRacks.value
+  if (idSet.size) racks = racks.filter((r) => idSet.has(String(r.room_id)))
+  if (racks.length) {
+    return [...racks]
+      .sort((a, b) => {
+        const seqDiff = (Number(a.seq_no) || 0) - (Number(b.seq_no) || 0)
+        if (seqDiff) return seqDiff
+        return collator.compare(String(a.code || ''), String(b.code || ''))
+      })
+      .map((r) => {
+        const code = String(r.code || '').trim()
+        const seq = r.seq_no == null ? null : Number(r.seq_no)
+        return {
+          value: code,
+          label: seq != null && Number.isFinite(seq) ? `序${seq} · ${code}` : code,
+          seq,
+        }
+      })
+      .filter((o) => o.value)
+  }
+  return [...new Set(
+    canvasNodes.value.map((node) => String(node.device?.rack_code || '').trim()).filter(Boolean),
+  )]
+    .sort((a, b) => collator.compare(a, b))
+    .map((code) => ({ value: code, label: code, seq: null as number | null }))
+}
+
+const sourceRackOptions = computed(() => rackOptionsForRooms(wiringForm.config.source_room_ids || []))
+const targetRackOptions = computed(() => rackOptionsForRooms(wiringForm.config.target_room_ids || []))
+/** 兼容旧模板中的统一机柜选项名 */
+const rackOptions = computed(() => {
+  const map = new Map<string, string>()
+  for (const o of [...sourceRackOptions.value, ...targetRackOptions.value]) {
+    map.set(o.value, o.label)
+  }
+  return [...map.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'zh-CN', { numeric: true }))
+    .map(([value, label]) => ({ value, label }))
+})
+
+async function onLocationRoomChange(side: 'source' | 'target') {
+  await refreshInfraRacksForSelectedRooms()
+  const codes = new Set(
+    (side === 'source' ? sourceRackOptions.value : targetRackOptions.value).map((o) => o.value),
+  )
+  if (side === 'source') {
+    if (wiringForm.config.source_rack_start && !codes.has(wiringForm.config.source_rack_start)) {
+      wiringForm.config.source_rack_start = null
+    }
+    if (wiringForm.config.source_rack_end && !codes.has(wiringForm.config.source_rack_end)) {
+      wiringForm.config.source_rack_end = null
+    }
+  } else {
+    if (wiringForm.config.target_rack_start && !codes.has(wiringForm.config.target_rack_start)) {
+      wiringForm.config.target_rack_start = null
+    }
+    if (wiringForm.config.target_rack_end && !codes.has(wiringForm.config.target_rack_end)) {
+      wiringForm.config.target_rack_end = null
+    }
+  }
+  onDeviceMatchChange()
+}
+
+function filterRackIdsByCodeRange(roomId: string, start: string | null | undefined, end: string | null | undefined) {
+  const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+  const startCode = String(start || '').trim()
+  const endCode = String(end || '').trim()
+  return infraRacks.value
+    .filter((r) => String(r.room_id) === roomId)
+    .filter((r) => {
+      const code = String(r.code || '').trim()
+      if (!code) return false
+      if (startCode && collator.compare(code, startCode) < 0) return false
+      if (endCode && collator.compare(code, endCode) > 0) return false
+      return true
+    })
+    .sort((a, b) => collator.compare(String(a.code), String(b.code)))
+    .map((r) => r.id)
+}
+
+function deviceIdsFromNodes(list: NetworkNode[]) {
+  return [...new Set(
+    list
+      .map((n) => String(n.device_id || n.device?.device_id || '').trim())
+      .filter(Boolean),
+  )]
+}
+
+/** 按规则中的机房/机柜/U 位，将匹配设备同步上架到资源管理（可覆盖原位置） */
+async function syncMatchedDevicesToResourceLocation(cfg: WiringRuleConfig) {
+  await ensureInfraRoomsLoaded()
+  await refreshInfraRacksForSelectedRooms([
+    ...(cfg.source_room_ids || []),
+    ...(cfg.target_room_ids || []),
+  ])
+  const sourceDevices = matchWiringEndpoints(nodes.value, {
+    ids: cfg.source_node_ids,
+    role: cfg.source_roles?.length ? cfg.source_roles : cfg.source_role,
+    groups: resolveWiringGroups(cfg.source_groups, cfg.source_group),
+  })
+  let targetDevices = matchWiringEndpoints(nodes.value, {
+    ids: cfg.target_node_ids,
+    role: cfg.target_roles?.length ? cfg.target_roles : cfg.target_role,
+    groups: resolveWiringGroups(cfg.target_groups, cfg.target_group),
+  })
+  if (
+    (cfg.peer_link || isSwitchInterconnect(cfg.connection_type)) &&
+    (cfg.interconnect_scope || 'INTRA_GROUP') === 'INTRA_GROUP'
+  ) {
+    targetDevices = sourceDevices
+  }
+  const jobs: Array<Promise<unknown>> = []
+  const sides: Array<{
+    roomIds: string[]
+    rackStart: string | null | undefined
+    rackEnd: string | null | undefined
+    startU: number | null | undefined
+    interval: number | null | undefined
+    perRack: number | null | undefined
+    devices: NetworkNode[]
+  }> = [
+    {
+      roomIds: cfg.source_room_ids || [],
+      rackStart: cfg.source_rack_start,
+      rackEnd: cfg.source_rack_end,
+      startU: cfg.source_start_u,
+      interval: cfg.source_u_interval,
+      perRack: cfg.source_devices_per_rack,
+      devices: sourceDevices,
+    },
+    {
+      roomIds: cfg.target_room_ids || [],
+      rackStart: cfg.target_rack_start,
+      rackEnd: cfg.target_rack_end,
+      startU: cfg.target_start_u,
+      interval: cfg.target_u_interval,
+      perRack: cfg.target_devices_per_rack,
+      devices: targetDevices,
+    },
+  ]
+  for (const side of sides) {
+    if (!side.roomIds.length) continue
+    const deviceIds = deviceIdsFromNodes(side.devices)
+    if (!deviceIds.length) continue
+    const roomId = side.roomIds[0]
+    const rackIds = filterRackIdsByCodeRange(roomId, side.rackStart, side.rackEnd)
+    const interval = Math.max(1, Number(side.interval) || 1)
+    jobs.push(batchMountDevices({
+      room_id: roomId,
+      device_ids: deviceIds,
+      rack_ids: rackIds.length ? rackIds : undefined,
+      start_u: side.startU == null ? 1 : Math.max(1, Number(side.startU) || 1),
+      gap_u: Math.max(0, interval - 1),
+      per_rack_count: side.perRack == null ? undefined : Math.max(1, Number(side.perRack) || 1),
+    }))
+  }
+  if (!jobs.length) return 0
+  locationSyncing.value = true
+  try {
+    const results = await Promise.all(jobs)
+    let mounted = 0
+    for (const result of results) {
+      const data = result as { mounted?: number }
+      mounted += Number(data?.mounted || 0)
+    }
+    if (currentId.value) {
+      const detail = await getNetworkTopologyDetail(currentId.value)
+      nodes.value = detail.nodes || nodes.value
+    }
+    return mounted
+  } finally {
+    locationSyncing.value = false
+  }
+}
 
 function onEndpointStrategyChange(side: 'source' | 'target') {
   const strategy = side === 'source'
     ? wiringForm.config.source_connection_strategy
     : wiringForm.config.target_connection_strategy
   if (strategy === 'MANUAL') {
-    wiringForm.config.allocation_mode = 'MANUAL'
-    onAllocationModeChange()
+    // 仅表示端口选取偏手动预览，不强制填写 pairs
+    return
+  }
+  if (strategy === 'FIXED_PORT') {
+    if (side === 'source') wiringForm.config.source_port_policy = 'MIN_ASC'
+    else wiringForm.config.target_port_policy = 'MIN_ASC'
     return
   }
   if (strategy === 'SLOT_ROUND_ROBIN') {
@@ -1110,7 +1381,11 @@ function syncRuleConnectionTypeFromSheet() {
   ) {
     cfg.connection_type = 'SWITCH_INTERCONNECT'
     cfg.peer_link = true
-  } else if (cfg.rule_category === 'BMC_TO_SERVER' || sourcePurpose === 'MGMT') {
+  } else if (
+    cfg.rule_category === 'BMC_TO_SERVER' ||
+    sourcePurpose === 'MGMT' ||
+    targetPurpose === 'MGMT'
+  ) {
     cfg.connection_type = 'BMC_ENDPOINT'
     cfg.peer_link = false
   } else if (['CORE', 'AGG'].includes(String(cfg.source_role)) && cfg.target_role === 'ACCESS') {
@@ -1133,7 +1408,8 @@ function applyAutomaticRuleCategory() {
     cfg.target_roles = []
     cfg.source_device_types = []
     cfg.target_device_types = []
-    ensureManualPairs()
+    if (!Array.isArray(cfg.pairs)) cfg.pairs = []
+    void hydrateWiringLocationOptions()
     return
   }
   const patch = automaticCategoryPatches[category]
@@ -2936,10 +3212,10 @@ async function openWiringDrawer(createNew = true) {
   wiringDrawerVisible.value = true
   if (createNew) resetWiringForm()
   sideAccordion.value = 'rules'
-  await loadWiringRules()
+  await Promise.all([loadWiringRules(), hydrateWiringLocationOptions()])
 }
 
-function editWiringRule(rule: NetworkWiringRule) {
+async function editWiringRule(rule: NetworkWiringRule) {
   wiringEditingId.value = rule.id
   wiringForm.name = rule.name
   wiringForm.mode = (rule.mode as 'sequential' | 'manual') || 'sequential'
@@ -2947,6 +3223,7 @@ function editWiringRule(rule: NetworkWiringRule) {
   wiringForm.config = normalizeWiringConfig((rule.config || {}) as Record<string, unknown>)
   wiringDrawerVisible.value = true
   sideAccordion.value = 'rules'
+  await hydrateWiringLocationOptions()
 }
 
 function buildWiringConfigPayload(): WiringRuleConfig {
@@ -2975,11 +3252,21 @@ async function saveWiringRule() {
     ElMessage.warning(`${invalidRange[0]}格式错误，请输入单个数字或范围（例如 1-4）`)
     return
   }
-  if (cfg.allocation_mode !== 'MANUAL' && !cfg.speed) {
-    ElMessage.warning('自动/混合模式必须设置接口速率')
+  if (!cfg.speed) {
+    ElMessage.warning('请设置接口速率')
     return
   }
-  if (cfg.allocation_mode !== 'MANUAL') {
+  const hasCompleteManualPairs = (cfg.pairs || []).length > 0
+    && (cfg.pairs || []).every((p) => p.source_node_id && p.source_port_id && p.target_node_id && p.target_port_id)
+  // 手动定义规则：默认按参数自动配对；仅当用户显式填了完整 pairs 时才按 pairs 校验
+  if (cfg.allocation_mode === 'MANUAL' && hasCompleteManualPairs) {
+    const distributionIssues = validateManualUplinkDistribution(cfg, cfg.pairs || [], nodes.value)
+    if (distributionIssues.length) {
+      ElMessage.warning(distributionIssues[0])
+      return
+    }
+  } else {
+    if (cfg.allocation_mode === 'MANUAL') cfg.pairs = []
     if (!previewSourceNodes.value.length || !previewTargetNodes.value.length) {
       ElMessage.warning('当前拓扑没有匹配到本端或对端设备，请检查设备/组、类型和位置条件')
       return
@@ -2993,18 +3280,6 @@ async function saveWiringRule() {
       return
     }
     const distributionIssues = validateAutomaticUplinkDistribution(cfg, previewSourceNodes.value.length)
-    if (distributionIssues.length) {
-      ElMessage.warning(distributionIssues[0])
-      return
-    }
-  }
-  if (cfg.allocation_mode === 'MANUAL') {
-    const pairs = cfg.pairs || []
-    if (!pairs.length || pairs.some((p) => !p.source_node_id || !p.source_port_id || !p.target_node_id || !p.target_port_id)) {
-      ElMessage.warning('手动模式必须完整设置每一对源设备、源端口、目标设备和目标端口')
-      return
-    }
-    const distributionIssues = validateManualUplinkDistribution(cfg, pairs, nodes.value)
     if (distributionIssues.length) {
       ElMessage.warning(distributionIssues[0])
       return
@@ -3072,31 +3347,36 @@ function runWiringRule(rule: NetworkWiringRule) {
     const pairs = (cfg.pairs || []).filter(
       (p) => p.source_node_id && p.source_port_id && p.target_node_id && p.target_port_id,
     )
-    if (!pairs.length) {
-      ElMessage.warning('请先在规则中通过下拉菜单指定至少一对端口')
+    if (pairs.length) {
+      const srcIds = new Set(previewSourceNodes.value.map((n) => n.id))
+      const tgtIds = new Set(previewTargetNodes.value.map((n) => n.id))
+      const invalid = pairs.find(
+        (p) => !srcIds.has(p.source_node_id) || !tgtIds.has(p.target_node_id),
+      )
+      if (invalid) {
+        ElMessage.warning('端口对中的设备不在当前设备参数匹配范围内，请重新选择')
+        return
+      }
+      if (
+        peerSectionEnabled.value &&
+        isIntraInterconnect.value &&
+        pairs.some((p) => p.source_node_id === p.target_node_id)
+      ) {
+        ElMessage.warning('组内互联两端须为同组内的不同设备')
+        return
+      }
+      void applyWiringRuleWithLocationSync({
+        ...rule,
+        mode: 'manual',
+        config: { ...(rule.config || {}), allocation_mode: 'MANUAL', pairs },
+      })
       return
     }
-    const srcIds = new Set(previewSourceNodes.value.map((n) => n.id))
-    const tgtIds = new Set(previewTargetNodes.value.map((n) => n.id))
-    const invalid = pairs.find(
-      (p) => !srcIds.has(p.source_node_id) || !tgtIds.has(p.target_node_id),
-    )
-    if (invalid) {
-      ElMessage.warning('端口对中的设备不在当前设备参数匹配范围内，请重新选择')
-      return
-    }
-    if (
-      peerSectionEnabled.value &&
-      isIntraInterconnect.value &&
-      pairs.some((p) => p.source_node_id === p.target_node_id)
-    ) {
-      ElMessage.warning('组内互联两端须为同组内的不同设备')
-      return
-    }
-    commitWiringRuleApply({
+    // 无显式端口对：按手动定义的规则参数自动布线
+    void applyWiringRuleWithLocationSync({
       ...rule,
-      mode: 'manual',
-      config: { ...(rule.config || {}), allocation_mode: 'MANUAL', pairs },
+      mode: 'sequential',
+      config: { ...(rule.config || {}), allocation_mode: 'MANUAL', pairs: [] },
     })
     return
   }
@@ -3118,6 +3398,26 @@ function runWiringRule(rule: NetworkWiringRule) {
   }
 
   // AUTO
+  void applyWiringRuleWithLocationSync(rule)
+}
+
+async function applyWiringRuleWithLocationSync(rule: NetworkWiringRule) {
+  const cfg = normalizeWiringConfig((rule.config || {}) as Record<string, unknown>)
+  const needLocationSync = !!(
+    (cfg.source_room_ids?.length && (cfg.source_rack_start || cfg.source_rack_end || cfg.source_start_u != null))
+    || (cfg.target_room_ids?.length && (cfg.target_rack_start || cfg.target_rack_end || cfg.target_start_u != null))
+  )
+  if (needLocationSync) {
+    try {
+      const mounted = await syncMatchedDevicesToResourceLocation(cfg)
+      if (mounted > 0) {
+        ElMessage.success(`已同步 ${mounted} 台设备位置到资源管理（机房/机柜/U 位）`)
+      }
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message
+      ElMessage.warning(msg || '设备位置同步未完成，将继续按当前拓扑位置布线')
+    }
+  }
   commitWiringRuleApply(rule)
 }
 
@@ -4539,13 +4839,13 @@ function nodeNameById(id: string) {
               </tr>
             </tbody>
           </table>
-          <div class="location-caption">本设备位置（可选；与设备/组/角色条件取交集）</div>
+          <div class="location-caption">本端设备位置（可选；与设备/组/角色条件取交集；可同步资源管理）</div>
           <table class="rule-engine-table location-table">
             <tbody>
               <tr>
-                <th>机房</th><td><el-select v-model="wiringForm.config.source_room_ids" multiple clearable collapse-tags placeholder="全部机房"><el-option v-for="o in roomOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
-                <th>起始机柜</th><td><el-select v-model="wiringForm.config.source_rack_start" clearable filterable allow-create><el-option v-for="rack in rackOptions" :key="rack" :label="rack" :value="rack" /></el-select></td>
-                <th>终止机柜</th><td><el-select v-model="wiringForm.config.source_rack_end" clearable filterable allow-create><el-option v-for="rack in rackOptions" :key="rack" :label="rack" :value="rack" /></el-select></td>
+                <th>机房</th><td><el-select v-model="wiringForm.config.source_room_ids" multiple clearable collapse-tags filterable placeholder="全部机房" @change="onLocationRoomChange('source')"><el-option v-for="o in roomOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
+                <th>起始机柜</th><td><el-select v-model="wiringForm.config.source_rack_start" clearable filterable allow-create placeholder="编号或顺序号" @change="onDeviceMatchChange"><el-option v-for="o in sourceRackOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
+                <th>终止机柜</th><td><el-select v-model="wiringForm.config.source_rack_end" clearable filterable allow-create placeholder="编号或顺序号" @change="onDeviceMatchChange"><el-option v-for="o in sourceRackOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
               </tr>
               <tr>
                 <th>单机柜设备台数</th><td><el-input-number v-model="wiringForm.config.source_devices_per_rack" :min="1" :max="100" controls-position="right" /></td>
@@ -4572,7 +4872,7 @@ function nodeNameById(id: string) {
                 <th>对端接口速率</th>
                 <td><el-select v-model="wiringForm.config.speed" clearable @change="wiringForm.config.port_speed = wiringForm.config.speed"><el-option v-for="s in SPEED_OPTIONS" :key="s" :label="s" :value="s" /></el-select></td>
                 <th>对端接口限制</th>
-                <td><el-select v-model="wiringForm.config.link_count"><el-option label="单接口" :value="1" /><el-option label="双接口" :value="2" /><el-option label="四接口" :value="4" /></el-select></td>
+                <td><el-select v-model="wiringForm.config.link_count"><el-option v-for="o in targetInterfaceLimitOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
                 <th>对端接口连接方式</th>
                 <td><el-select v-model="wiringForm.config.target_connection_strategy" @change="onEndpointStrategyChange('target')"><el-option v-for="o in endpointStrategyOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
               </tr>
@@ -4583,13 +4883,13 @@ function nodeNameById(id: string) {
               </tr>
             </tbody>
           </table>
-          <div class="location-caption">对设备位置（可选；与设备/组/角色条件取交集）</div>
+          <div class="location-caption">对端设备位置（可选；与设备/组/角色条件取交集；可同步资源管理）</div>
           <table class="rule-engine-table location-table">
             <tbody>
               <tr>
-                <th>机房</th><td><el-select v-model="wiringForm.config.target_room_ids" multiple clearable collapse-tags placeholder="全部机房"><el-option v-for="o in roomOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
-                <th>起始机柜</th><td><el-select v-model="wiringForm.config.target_rack_start" clearable filterable allow-create><el-option v-for="rack in rackOptions" :key="rack" :label="rack" :value="rack" /></el-select></td>
-                <th>终止机柜</th><td><el-select v-model="wiringForm.config.target_rack_end" clearable filterable allow-create><el-option v-for="rack in rackOptions" :key="rack" :label="rack" :value="rack" /></el-select></td>
+                <th>机房</th><td><el-select v-model="wiringForm.config.target_room_ids" multiple clearable collapse-tags filterable placeholder="全部机房" @change="onLocationRoomChange('target')"><el-option v-for="o in roomOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
+                <th>起始机柜</th><td><el-select v-model="wiringForm.config.target_rack_start" clearable filterable allow-create placeholder="编号或顺序号" @change="onDeviceMatchChange"><el-option v-for="o in targetRackOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
+                <th>终止机柜</th><td><el-select v-model="wiringForm.config.target_rack_end" clearable filterable allow-create placeholder="编号或顺序号" @change="onDeviceMatchChange"><el-option v-for="o in targetRackOptions" :key="o.value" :label="o.label" :value="o.value" /></el-select></td>
               </tr>
               <tr>
                 <th>单机柜设备台数</th><td><el-input-number v-model="wiringForm.config.target_devices_per_rack" :min="1" :max="100" controls-position="right" /></td>
@@ -4604,11 +4904,12 @@ function nodeNameById(id: string) {
           <strong>模型参数匹配：</strong>
           本端 {{ previewSourceCount }} 台、{{ sourcePortCatalog.free }}/{{ sourcePortCatalog.total }} 个空闲接口；
           对端 {{ previewTargetCount }} 台、{{ targetPortCatalog.free }}/{{ targetPortCatalog.total }} 个空闲接口。
-          当前可生成 {{ modelMatchedPairPreview.pairs.length }} 条端口对；系统按 Purpose → Slot → 端口编号 → 速率 → 介质 → 空闲状态定位端口。
+          按当前手动规则可自动生成 {{ modelMatchedPairPreview.pairs.length }} 条端口对；执行规则时系统将自动完成布线（无需逐条指定接口）。
+          <span v-if="modelMatchedPairPreview.issues.length" class="auto-summary-warning">{{ modelMatchedPairPreview.issues[0]?.message }}</span>
         </div>
 
-        <div v-if="isManualAlloc" class="compact-manual-pairs">
-          <div class="location-caption">手动定义设备与端口对</div>
+        <div v-if="isManualAlloc && (wiringForm.config.pairs || []).length" class="compact-manual-pairs">
+          <div class="location-caption">端口对覆盖（可选；留空则完全按规则自动配对）</div>
           <el-table :data="wiringForm.config.pairs || []" size="small" border>
             <el-table-column label="本端设备" min-width="160"><template #default="{ row }"><el-select v-model="row.source_node_id" filterable @change="onManualSourceDeviceChange(row)"><el-option v-for="n in sourceDeviceOptions" :key="n.id" :label="n.name" :value="n.id" /></el-select></template></el-table-column>
             <el-table-column label="本端接口" min-width="180"><template #default="{ row }"><el-select v-model="row.source_port_id" filterable><el-option v-for="o in portsForNodeInForm(row.source_node_id)" :key="o.id" :label="o.label" :value="o.id" /></el-select></template></el-table-column>

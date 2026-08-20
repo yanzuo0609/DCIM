@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listDatacenters, type DataCenter } from '@/api/datacenter'
@@ -16,6 +16,14 @@ import {
 } from '@/api/rack'
 import { createRoomQuick, deleteRoom, getRoom, listRooms, updateRoom } from '@/api/room'
 import type { Room, RoomImportance } from '@/api/room'
+import {
+  getDevice,
+  listBmcProfiles,
+  listSystemProfiles,
+  type BmcProfile,
+  type Device,
+  type SystemProfile,
+} from '@/api/device'
 import { useAuthStore } from '@/stores/auth'
 import RackCabinet from '@/components/RackCabinet.vue'
 import {
@@ -32,6 +40,12 @@ import {
 const ATTR_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'internet', label: '互联网机房' },
   { value: 'private_network', label: '专网机房' },
+]
+
+const ATTR_SELECT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'internet', label: '互联网' },
+  { value: 'private_network', label: '专网' },
+  { value: 'other', label: '其他' },
 ]
 
 const IMPORTANCE_OPTIONS: Array<{ value: RoomImportance; label: string }> = [
@@ -66,10 +80,19 @@ const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const tableData = ref<Room[]>([])
+const selectedRows = ref<Room[]>([])
 const datacenters = ref<DataCenter[]>([])
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const keyword = ref('')
 const dialogVisible = ref(false)
+const detailVisible = ref(false)
+const detailRow = ref<Room | null>(null)
+const rackInfoVisible = ref(false)
+const rackInfoLoading = ref(false)
+const rackInfoRoom = ref<Room | null>(null)
+const rackInfoRows = ref<Rack[]>([])
+const rackInfoSelected = ref<Rack[]>([])
+const rackInfoPagination = reactive({ page: 1, page_size: 50, total: 0 })
 const createStep = ref(0)
 const customAttrInput = ref('')
 const editingId = ref<string | null>(null)
@@ -89,6 +112,20 @@ const rackZoomRack = ref<Rack | null>(null)
 const rackZoomSlots = ref<RackLayoutSlot[]>([])
 const rackZoomPower = ref(0)
 const pendingFocusRackId = ref<string | null>(null)
+
+const deviceDetailVisible = ref(false)
+const deviceDetailLoading = ref(false)
+const deviceDetail = ref<Device | null>(null)
+const deviceDetailApp = ref('—')
+const pendingDeviceApp = ref('—')
+const systemProfiles = ref<SystemProfile[]>([])
+const bmcProfiles = ref<BmcProfile[]>([])
+const deviceCtxMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  deviceId: '' as string,
+})
 
 const templates = ref<RackTemplate[]>([])
 const applyVisible = ref(false)
@@ -241,6 +278,7 @@ const form = reactive({
   datacenter_id: '',
   building_no: '',
   room_no: '',
+  code: '',
   attributes: [] as string[],
   importance: 'medium' as RoomImportance,
   outline_rows: 8,
@@ -370,6 +408,71 @@ function formatPower(watts?: number | null) {
   const w = Number(watts) || 0
   if (w >= 1000) return `${(w / 1000).toFixed(1)} kW`
   return `${Math.round(w)} W`
+}
+
+const RACK_STYLE_LABELS: Record<string, string> = {
+  classic: '经典立面',
+  schematic: '线框立面',
+  realistic: '正面面板',
+  grid: '表格占位',
+}
+
+function rackStyleLabel(value?: string | null) {
+  if (!value) return RACK_STYLE_LABELS.classic
+  return RACK_STYLE_LABELS[value] || value
+}
+
+function rackSeqLabel(rack: Rack) {
+  if (rack.seq_no != null && rack.seq_no > 0) return `EC${rack.seq_no}`
+  const code = String(rack.code || '').trim()
+  if (/^EC\d+/i.test(code)) return code.toUpperCase()
+  return code || '—'
+}
+
+function rackSlotCode(rack: Rack) {
+  const name = String(rack.name || '').trim()
+  if (name && !/^EC\d+/i.test(name)) return name
+  const code = String(rack.code || '').trim()
+  if (code && !/^EC\d+/i.test(code)) return code
+  return name || code || '—'
+}
+
+function rackInfoIndex(index: number) {
+  return (rackInfoPagination.page - 1) * rackInfoPagination.page_size + index + 1
+}
+
+async function loadRackInfoPage() {
+  if (!rackInfoRoom.value) return
+  rackInfoLoading.value = true
+  try {
+    const data = await listRacks({
+      room_id: rackInfoRoom.value.id,
+      page: rackInfoPagination.page,
+      page_size: rackInfoPagination.page_size,
+      sort: 'seq_no',
+      order: 'asc',
+    })
+    rackInfoRows.value = data.items || []
+    rackInfoPagination.total = data.pagination?.total ?? rackInfoRows.value.length
+  } catch (error: unknown) {
+    rackInfoRows.value = []
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '加载机柜信息失败')
+  } finally {
+    rackInfoLoading.value = false
+  }
+}
+
+async function openRackInfo(row: Room) {
+  rackInfoRoom.value = row
+  rackInfoSelected.value = []
+  rackInfoPagination.page = 1
+  rackInfoVisible.value = true
+  await loadRackInfoPage()
+}
+
+async function viewRackInterior(rack: Rack) {
+  await openRackZoom(rack)
 }
 
 function roomGridLabel(row: Room) {
@@ -605,22 +708,18 @@ function toggleSlotPillar(rowIdx: number, colIdx: number) {
   if (!form.slot_kinds[rowIdx]) return
   const next = form.slot_kinds.map((row) => [...row])
   const becomingPillar = next[rowIdx][colIdx] !== 'pillar'
-  next[rowIdx][colIdx] = becomingPillar ? 'pillar' : 'rack'
-  // 设立柱时在排尾补一个机柜格，保持该排机柜位数不变（空白框占位不挤占机柜）
+  // 同格转换：机柜 ↔ 立柱，不扩排、不补格；立柱不占编号，机柜号自动重排
   if (becomingPillar) {
-    if (next[rowIdx].length >= form.outline_cols) {
-      ElMessage.warning(
-        `该排已达轮廓长向上限 ${form.outline_cols} 格，无法再设立柱占位，请先删格或扩大轮廓`,
-      )
+    const rackLeft = next[rowIdx].filter((k, i) => i !== colIdx && k === 'rack').length
+    if (rackLeft < 1) {
+      ElMessage.warning('每排至少保留一个机柜编号位（立柱除外）')
       return
     }
-    next[rowIdx] = [...next[rowIdx], 'rack']
+    next[rowIdx][colIdx] = 'pillar'
+  } else {
+    next[rowIdx][colIdx] = 'rack'
   }
   form.slot_kinds = next
-  form.slot_codes = form.slot_kinds.map((kinds, ri) => {
-    const existing = form.slot_codes[ri] || []
-    return kinds.map((k, ci) => (k === 'pillar' ? '' : existing[ci] || ''))
-  })
   renumberSkippingPillars()
 }
 
@@ -790,6 +889,70 @@ function removeManualRow(index: number) {
   form.slot_kinds.splice(index, 1)
 }
 
+/** 编辑表单：机房属性单选（互联网 / 专网 / 其他） */
+const formAttrSelect = computed({
+  get() {
+    if (form.attributes.includes('internet')) return 'internet'
+    if (form.attributes.includes('private_network')) return 'private_network'
+    return 'other'
+  },
+  set(value: string) {
+    const custom = form.attributes.filter(
+      (a) => a !== 'internet' && a !== 'private_network',
+    )
+    if (value === 'internet' || value === 'private_network') {
+      form.attributes = [value, ...custom]
+    } else {
+      form.attributes = [...custom]
+    }
+  },
+})
+
+const editPreviewVisible = ref(false)
+
+function applyAutoNumbering() {
+  form.code_mode = 'auto'
+  if (!String(form.code_prefix || '').trim()) form.code_prefix = 'A'
+  form.layout_mode = 'auto'
+  syncAutoLayout()
+  form.slot_kinds = buildSlotKinds(activeLayout.value, false)
+  regenerateCodes(false)
+  ElMessage.success('已按前缀自动编号')
+}
+
+function applyManualNumbering() {
+  form.code_mode = 'custom'
+  if (!String(form.code_prefix || '').trim()) form.code_prefix = 'A'
+  if (!form.slot_kinds.length) {
+    form.slot_kinds = buildSlotKinds(activeLayout.value, true)
+  }
+  if (!form.slot_codes.length) {
+    form.slot_codes = buildSlotCodes(activeLayout.value, form.code_prefix, false)
+  }
+  ElMessage.success('已切换为手动编号，可逐位修改')
+}
+
+function resetNumbering() {
+  form.code_prefix = 'A'
+  form.code_mode = 'auto'
+  form.layout_mode = 'auto'
+  syncAutoLayout()
+  form.slot_kinds = buildSlotKinds(activeLayout.value, false)
+  regenerateCodes(false)
+  ElMessage.success('编号已重置')
+}
+
+function previewEditLayout() {
+  if (!String(form.code_prefix || '').trim()) {
+    ElMessage.warning('请先填写编号前缀')
+    return
+  }
+  if (form.code_mode === 'auto') {
+    regenerateCodes(false)
+  }
+  editPreviewVisible.value = true
+}
+
 async function loadDatacenters() {
   const data = await listDatacenters({ page_size: 100 })
   datacenters.value = data.items
@@ -797,6 +960,12 @@ async function loadDatacenters() {
 
 async function syncFilterFromRoute() {
   filterDcId.value = readRouteDatacenterId()
+  const kw = route.query.keyword
+  if (typeof kw === 'string' && kw) {
+    keyword.value = kw
+  } else if (Array.isArray(kw) && typeof kw[0] === 'string' && kw[0]) {
+    keyword.value = kw[0]
+  }
 }
 
 async function loadData() {
@@ -856,6 +1025,7 @@ function openCreate() {
   form.datacenter_id = filterDcId.value || datacenters.value[0]?.id || ''
   form.building_no = ''
   form.room_no = ''
+  form.code = ''
   form.attributes = []
   form.importance = 'medium'
   form.outline_rows = 8
@@ -880,6 +1050,7 @@ function openEdit(row: Room) {
   form.datacenter_id = row.datacenter_id || ''
   form.building_no = row.building_no || ''
   form.room_no = row.room_no || row.name
+  form.code = row.code || ''
   form.attributes = [...roomAttributes(row)]
   form.importance = (row.importance as RoomImportance) || 'medium'
   form.outline_rows = row.outline_rows || row.rack_rows || 8
@@ -1069,6 +1240,7 @@ async function handleSubmit() {
     if (editingId.value) {
       const updated = await updateRoom(editingId.value, {
         room_no: form.room_no,
+        code: form.code.trim() || undefined,
         description: form.description || null,
         ...metaPayload,
         ...layoutPayload,
@@ -1085,6 +1257,7 @@ async function handleSubmit() {
         datacenter_id: form.datacenter_id,
         building_no: form.building_no,
         room_no: form.room_no,
+        code: form.code.trim() || null,
         description: form.description || null,
         ...metaPayload,
         ...layoutPayload,
@@ -1115,6 +1288,58 @@ function roomTitle(row: Room) {
   return [row.datacenter_name || row.location, row.building_no, row.room_no || row.name]
     .filter(Boolean)
     .join('-')
+}
+
+function rowIndex(index: number) {
+  return (pagination.page - 1) * pagination.page_size + index + 1
+}
+
+async function openDetail(row: Room) {
+  detailRow.value = row
+  detailVisible.value = true
+  try {
+    const [latest, rackPage] = await Promise.all([
+      getRoom(row.id).catch(() => null),
+      listRacks({ room_id: row.id, page: 1, page_size: 500 }),
+    ])
+    const rackItems = rackPage?.items || []
+    const rackDeviceTotal = rackItems.reduce(
+      (sum, rack) => sum + (Number(rack.device_count) || 0),
+      0,
+    )
+    const base = latest || row
+    const apiCount = Number(base.device_count) || 0
+    detailRow.value = {
+      ...base,
+      // 打开详情时按机柜汇总已上架设备，保证与布局图一致
+      device_count: rackItems.length ? rackDeviceTotal : apiCount,
+    }
+    const idx = tableData.value.findIndex((r) => r.id === row.id)
+    if (idx >= 0) {
+      tableData.value[idx] = {
+        ...tableData.value[idx],
+        ...detailRow.value,
+      }
+    }
+  } catch {
+    /* 使用列表缓存数据 */
+  }
+}
+
+function roomDetailFields(row: Room) {
+  return [
+    { label: '机房', value: row.name || row.room_no || '—' },
+    { label: '机房编号', value: row.code || '—' },
+    { label: '机房ID(唯一)', value: row.id },
+    { label: '数据中心', value: row.datacenter_name || row.location || '—' },
+    { label: '门牌号', value: row.room_no || row.name || '—' },
+    { label: '机房属性', value: roomAttributes(row).map(attributeLabel).join('、') || '—' },
+    { label: '机柜总数', value: String(row.rack_count ?? 0) },
+    { label: '已分配使用', value: String(row.used_count ?? 0) },
+    { label: '空机柜数量', value: String(row.free_count ?? 0) },
+    { label: '设备总数', value: String(row.device_count ?? 0) },
+    { label: '设备总功率', value: formatPower(row.total_power) },
+  ]
 }
 
 function utilizationClass(rack: Rack | null) {
@@ -1608,6 +1833,80 @@ async function openRackZoom(rack: Rack) {
   }
 }
 
+function hideDeviceCtxMenu() {
+  deviceCtxMenu.visible = false
+  deviceCtxMenu.deviceId = ''
+}
+
+function onMountedDeviceContextMenu(
+  payload: { device: { device_id: string }; event: MouseEvent },
+  rack?: Rack | null,
+) {
+  const id = payload.device?.device_id
+  if (!id) return
+  deviceCtxMenu.deviceId = id
+  deviceCtxMenu.x = payload.event.clientX
+  deviceCtxMenu.y = payload.event.clientY
+  deviceCtxMenu.visible = true
+  pendingDeviceApp.value = rack?.app_usage || rackZoomRack.value?.app_usage || '—'
+}
+
+async function ensureProfilesLoaded() {
+  if (!systemProfiles.value.length) {
+    try {
+      systemProfiles.value = await listSystemProfiles()
+    } catch {
+      systemProfiles.value = []
+    }
+  }
+  if (!bmcProfiles.value.length) {
+    try {
+      bmcProfiles.value = await listBmcProfiles()
+    } catch {
+      bmcProfiles.value = []
+    }
+  }
+}
+
+function profileLabel(
+  profiles: Array<{ id: string; code: string; name: string }>,
+  id: string | null | undefined,
+) {
+  if (!id) return '—'
+  const hit = profiles.find((p) => p.id === id)
+  if (!hit) return id
+  return hit.name || hit.code || id
+}
+
+function contractLabel(d: Device) {
+  const parts = [d.contract_no, d.project_no].filter(Boolean)
+  return parts.length ? parts.join(' / ') : '—'
+}
+
+async function openMountedDeviceDetail(deviceId?: string) {
+  const id = deviceId || deviceCtxMenu.deviceId
+  hideDeviceCtxMenu()
+  if (!id) return
+  deviceDetailVisible.value = true
+  deviceDetailLoading.value = true
+  deviceDetail.value = null
+  deviceDetailApp.value = pendingDeviceApp.value || rackZoomRack.value?.app_usage || '—'
+  try {
+    await ensureProfilesLoaded()
+    deviceDetail.value = await getDevice(id)
+  } catch (error: unknown) {
+    deviceDetailVisible.value = false
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '加载设备详情失败')
+  } finally {
+    deviceDetailLoading.value = false
+  }
+}
+
+function onGlobalClickForCtxMenu() {
+  if (deviceCtxMenu.visible) hideDeviceCtxMenu()
+}
+
 async function consumeLayoutQuery() {
   const openLayoutId = typeof route.query.open_layout === 'string' ? route.query.open_layout : ''
   const rackId = typeof route.query.rack_id === 'string' ? route.query.rack_id : ''
@@ -1653,10 +1952,15 @@ async function handleDelete(row: Room) {
 }
 
 onMounted(async () => {
+  window.addEventListener('click', onGlobalClickForCtxMenu)
   await syncFilterFromRoute()
   await loadDatacenters()
   await Promise.all([loadData(), refreshTemplates()])
   await consumeLayoutQuery()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', onGlobalClickForCtxMenu)
 })
 
 watch(
@@ -1784,15 +2088,36 @@ watch(
         </div>
       </template>
 
-      <el-table v-loading="loading" :data="tableData" stripe class="room-table">
+      <el-table
+        v-loading="loading"
+        :data="tableData"
+        stripe
+        class="room-table"
+        row-key="id"
+        @selection-change="(rows: Room[]) => (selectedRows = rows)"
+      >
+        <el-table-column type="selection" width="48" />
+        <el-table-column label="序号" width="72" align="center">
+          <template #default="{ $index }">{{ rowIndex($index) }}</template>
+        </el-table-column>
+        <el-table-column label="机房" min-width="120">
+          <template #default="{ row }">{{ row.name || row.room_no || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="机房编号" min-width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ (row.code || '').trim() || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="机房ID(唯一)" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono-id">{{ row.id }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="数据中心" min-width="150">
           <template #default="{ row }">
             {{ row.datacenter_name || row.location || '—' }}
           </template>
         </el-table-column>
-        <el-table-column prop="building_no" label="机房楼号" min-width="100" />
         <el-table-column label="门牌号" min-width="100">
-          <template #default="{ row }">{{ row.room_no || row.name }}</template>
+          <template #default="{ row }">{{ row.room_no || row.name || '—' }}</template>
         </el-table-column>
         <el-table-column label="机房属性" min-width="180">
           <template #default="{ row }">
@@ -1807,63 +2132,17 @@ watch(
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="重要性" width="112" align="center">
-          <template #default="{ row }">
-            <el-select
-              v-if="canUpdate"
-              :model-value="row.importance || 'medium'"
-              size="small"
-              class="meta-select"
-              :class="`importance-${row.importance || 'medium'}`"
-              :loading="metaSavingIds.has(row.id)"
-              @change="(v: string | number) => onImportanceChange(row, String(v))"
-            >
-              <el-option
-                v-for="item in IMPORTANCE_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-            <span v-else class="tag-pill" :class="`importance-${row.importance || 'medium'}`">
-              {{ importanceLabel(row.importance) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="机柜数量" width="96" align="center">
-          <template #default="{ row }">
-            <span class="count-pill">{{ row.rack_count ?? 0 }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="使用" width="80" align="center">
-          <template #default="{ row }">{{ row.used_count ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="空余" width="80" align="center">
-          <template #default="{ row }">{{ row.free_count ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="总功耗" width="100" align="center">
-          <template #default="{ row }">{{ formatPower(row.total_power) }}</template>
-        </el-table-column>
-        <el-table-column label="容量" width="90" align="center">
-          <template #default="{ row }">
-            <span class="count-pill muted">{{ row.total_u ?? 0 }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="网格" min-width="120" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="grid-pill">{{ roomGridLabel(row) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="description" label="描述" min-width="120" show-overflow-tooltip />
         <el-table-column label="操作" width="88" fixed="right" align="center">
           <template #default="{ row }">
             <el-dropdown trigger="click">
               <el-button type="primary" link>操作</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item @click="openLayout(row)">布局图</el-dropdown-item>
-                  <el-dropdown-item @click="open3DSimulate(row)">3D</el-dropdown-item>
-                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
+                  <el-dropdown-item @click="openDetail(row)">查看详细信息</el-dropdown-item>
+                  <el-dropdown-item @click="openRackInfo(row)">查看机柜信息</el-dropdown-item>
+                  <el-dropdown-item @click="openLayout(row)">查看二维布局图</el-dropdown-item>
+                  <el-dropdown-item @click="open3DSimulate(row)">查看3D布局图</el-dropdown-item>
+                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">修改信息</el-dropdown-item>
                   <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">删除</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -1882,6 +2161,90 @@ watch(
         />
       </div>
     </el-card>
+
+    <el-dialog v-model="detailVisible" title="查看详细信息" width="560px">
+      <el-descriptions v-if="detailRow" :column="1" border>
+        <el-descriptions-item
+          v-for="item in roomDetailFields(detailRow)"
+          :key="item.label"
+          :label="item.label"
+        >
+          <span :class="{ 'mono-id': item.label === '机房ID(唯一)' }">{{ item.value }}</span>
+        </el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button type="primary" @click="detailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="rackInfoVisible"
+      :title="rackInfoRoom ? `机柜信息 - ${roomTitle(rackInfoRoom)}` : '机柜信息'"
+      width="1100px"
+      destroy-on-close
+      class="rack-info-dialog"
+    >
+      <el-table
+        v-loading="rackInfoLoading"
+        :data="rackInfoRows"
+        stripe
+        row-key="id"
+        max-height="560"
+        @selection-change="(rows: Rack[]) => (rackInfoSelected = rows)"
+      >
+        <el-table-column type="selection" width="48" />
+        <el-table-column label="序号" width="72" align="center">
+          <template #default="{ $index }">{{ rackInfoIndex($index) }}</template>
+        </el-table-column>
+        <el-table-column label="机柜序号" min-width="100" show-overflow-tooltip>
+          <template #default="{ row }">{{ rackSeqLabel(row) }}</template>
+        </el-table-column>
+        <el-table-column label="机柜编号" min-width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ rackSlotCode(row) }}</template>
+        </el-table-column>
+        <el-table-column label="机柜ID" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono-id">{{ row.id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="总U位" width="88" align="center">
+          <template #default="{ row }">{{ row.total_u }}</template>
+        </el-table-column>
+        <el-table-column label="已用U位" width="96" align="center">
+          <template #default="{ row }">{{ row.occupied_u ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="剩余U位" width="96" align="center">
+          <template #default="{ row }">{{ row.free_u ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="在线设备" width="96" align="center">
+          <template #default="{ row }">{{ row.device_count ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="总功率" width="100" align="center">
+          <template #default="{ row }">{{ formatPower(row.total_power) }}</template>
+        </el-table-column>
+        <el-table-column label="样式" width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ rackStyleLabel(row.visual_style) }}</template>
+        </el-table-column>
+        <el-table-column label="查看内部" width="100" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link @click="viewRackInterior(row)">查看内部</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="rack-info-pager">
+        <el-pagination
+          v-model:current-page="rackInfoPagination.page"
+          v-model:page-size="rackInfoPagination.page_size"
+          layout="total, prev, pager, next"
+          :total="rackInfoPagination.total"
+          :page-sizes="[50, 100, 200]"
+          @change="loadRackInfoPage"
+        />
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="rackInfoVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="layoutVisible"
@@ -2037,7 +2400,8 @@ watch(
                   @click="onSlotClick(slot)"
                   @dblclick="onSlotDblClick(slot)"
                 >
-                  <div class="rack-code">{{ slot.code || slot.rack?.code || '—' }}</div>
+                  <div class="rack-code">{{ slot.code || slot.rack?.name || slot.rack?.code || '—' }}</div>
+                  <div v-if="slot.rack?.seq_no != null" class="rack-seq">EC{{ slot.rack.seq_no }}</div>
                   <div class="rack-meta">
                     <template v-if="slot.rack">
                       <div v-if="slot.rack.app_usage" class="rack-usage">{{ slot.rack.app_usage }}</div>
@@ -2081,6 +2445,7 @@ watch(
                       :total-power="layoutDetails[slot.rack.id].totalPower"
                       :visual-style="(slot.rack.visual_style as any) || 'classic'"
                       compact
+                      @device-contextmenu="(p) => onMountedDeviceContextMenu(p, slot.rack)"
                     />
                     <div v-else class="rack-cell-loading">加载中…</div>
                   </template>
@@ -2128,11 +2493,79 @@ watch(
             :slots="rackZoomSlots"
             :total-power="rackZoomPower"
             :visual-style="(rackZoomRack.visual_style as any) || 'classic'"
+            @device-contextmenu="onMountedDeviceContextMenu"
           />
         </div>
       </div>
       <template #footer>
         <el-button type="primary" @click="rackZoomVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <teleport to="body">
+      <div
+        v-if="deviceCtxMenu.visible"
+        class="device-ctx-menu"
+        :style="{ left: `${deviceCtxMenu.x}px`, top: `${deviceCtxMenu.y}px` }"
+        @click.stop
+      >
+        <button type="button" class="device-ctx-item" @click="openMountedDeviceDetail()">
+          查看详细信息
+        </button>
+      </div>
+    </teleport>
+
+    <el-dialog
+      v-model="deviceDetailVisible"
+      title="设备详细信息"
+      width="720px"
+      destroy-on-close
+      append-to-body
+      class="device-detail-dialog"
+    >
+      <div v-loading="deviceDetailLoading" class="device-detail-body">
+        <table v-if="deviceDetail" class="device-detail-table">
+          <tbody>
+            <tr>
+              <th>设备名称</th>
+              <td>{{ deviceDetail.name || deviceDetail.hostname || '—' }}</td>
+              <th>设备编号</th>
+              <td>{{ deviceDetail.serial_number || '—' }}</td>
+            </tr>
+            <tr>
+              <th>所属应用</th>
+              <td>{{ deviceDetailApp }}</td>
+              <th>设备型号</th>
+              <td>{{ deviceDetail.device_model_name || '—' }}</td>
+            </tr>
+            <tr>
+              <th>业务IP</th>
+              <td>{{ deviceDetail.ip_summary || '—' }}</td>
+              <th>关联的系统用户档案</th>
+              <td>{{ profileLabel(systemProfiles, deviceDetail.system_profile_id) }}</td>
+            </tr>
+            <tr>
+              <th>BMC IP</th>
+              <td>{{ deviceDetail.bmc_ip || '—' }}</td>
+              <th>关联BMC档案</th>
+              <td>{{ profileLabel(bmcProfiles, deviceDetail.bmc_profile_id) }}</td>
+            </tr>
+            <tr>
+              <th>VIP</th>
+              <td colspan="3">{{ deviceDetail.vip || '—' }}</td>
+            </tr>
+            <tr>
+              <th>厂商</th>
+              <td>{{ deviceDetail.manufacturer_name || '—' }}</td>
+              <th>合同信息</th>
+              <td>{{ contractLabel(deviceDetail) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <el-empty v-else-if="!deviceDetailLoading" description="暂无设备信息" :image-size="72" />
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="deviceDetailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -2213,7 +2646,7 @@ watch(
     <el-dialog
       v-model="dialogVisible"
       :title="editingId ? '编辑机房' : '新建机房'"
-      width="920px"
+      :width="editingId ? '760px' : '920px'"
       class="room-form-dialog"
       destroy-on-close
     >
@@ -2227,16 +2660,218 @@ watch(
         <el-step v-for="item in CREATE_STEPS" :key="item.title" :title="item.title" />
       </el-steps>
 
-      <el-form label-width="118px" class="room-form">
-        <!-- Step 1 / Edit section: 基础信息 -->
-        <section v-show="editingId || createStep === 0" class="form-section">
-          <h4 v-if="editingId" class="section-title">基础信息</h4>
+      <!-- ========== 编辑机房（单页，按设计稿） ========== -->
+      <el-form v-if="editingId" label-width="108px" class="room-form edit-room-form">
+        <section class="edit-block">
+          <div class="edit-grid">
+            <el-form-item label="数据中心" required>
+              <el-select
+                v-model="form.datacenter_id"
+                placeholder="选择所属数据中心"
+                style="width: 100%"
+                disabled
+                filterable
+              >
+                <el-option
+                  v-for="dc in datacenters"
+                  :key="dc.id"
+                  :label="datacenterLabel(dc)"
+                  :value="dc.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="机房编号">
+              <el-input
+                v-model="form.code"
+                placeholder="空则自动生成 CR1、CR2…"
+                maxlength="50"
+              />
+            </el-form-item>
+            <el-form-item label="机房名称" required>
+              <el-input v-model="form.room_no" placeholder="机房名称" />
+            </el-form-item>
+            <el-form-item label="机房门牌号" required>
+              <el-input v-model="form.building_no" placeholder="门牌号或楼号，例如 A栋 / 303" />
+            </el-form-item>
+            <el-form-item label="机房属性">
+              <el-select v-model="formAttrSelect" style="width: 100%" placeholder="互联网/专网/其他">
+                <el-option
+                  v-for="item in ATTR_SELECT_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="机房ID">
+              <el-input :model-value="editingId || ''" disabled />
+            </el-form-item>
+          </div>
+        </section>
+
+        <section class="edit-block">
+          <div class="edit-block-title">机房大小（轮廓）</div>
+          <div class="edit-grid compact">
+            <el-form-item label="长（列）" required>
+              <el-input-number v-model="form.outline_cols" :min="1" :max="50" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="宽（排）" required>
+              <el-input-number v-model="form.outline_rows" :min="1" :max="50" style="width: 100%" />
+            </el-form-item>
+          </div>
+          <div class="edit-block-title">机柜编排</div>
+          <div class="edit-grid compact">
+            <el-form-item label="单排机柜数" required>
+              <el-input-number
+                v-model="form.rack_columns"
+                :min="1"
+                :max="form.outline_cols"
+                style="width: 100%"
+                @change="() => { form.layout_mode = 'auto'; syncAutoLayout() }"
+              />
+            </el-form-item>
+            <el-form-item label="机柜排数" required>
+              <el-input-number
+                v-model="form.rack_rows"
+                :min="1"
+                :max="form.outline_rows"
+                style="width: 100%"
+                @change="() => { form.layout_mode = 'auto'; syncAutoLayout() }"
+              />
+            </el-form-item>
+          </div>
+          <div class="edit-summary">{{ layoutSummary }}</div>
+        </section>
+
+        <section class="edit-block">
+          <div class="edit-block-head">
+            <div class="edit-block-title" style="margin: 0">机柜编号设置</div>
+            <el-button type="primary" plain @click="previewEditLayout">预览</el-button>
+          </div>
+          <el-form-item label="编号前缀" required>
+            <el-input
+              v-model="form.code_prefix"
+              placeholder="单个字母如 A，或范围如 A-D"
+              maxlength="20"
+              style="max-width: 280px"
+            />
+            <div class="field-hint">{{ rowPrefixHint }}</div>
+          </el-form-item>
+          <div class="edit-number-actions">
+            <el-button
+              type="primary"
+              :plain="form.code_mode !== 'auto'"
+              @click="applyAutoNumbering"
+            >
+              自动编号
+            </el-button>
+            <el-button
+              type="primary"
+              :plain="form.code_mode !== 'custom'"
+              @click="applyManualNumbering"
+            >
+              手动编号
+            </el-button>
+            <el-button @click="resetNumbering">重置编号</el-button>
+          </div>
+          <div class="field-hint" style="margin-top: 8px">
+            当前：{{ form.code_mode === 'custom' ? '手动编号' : '自动编号' }} · 预览 {{ codePreview }}
+          </div>
+
+          <div v-if="form.code_mode === 'custom'" class="slot-codes edit-slot-codes">
+            <div class="slot-codes-toolbar">
+              <el-button size="small" type="primary" plain @click="renumberSkippingPillars">
+                重排连续编号
+              </el-button>
+              <span class="field-hint" style="margin: 0">
+                可逐位改号；点「立柱」将该格转为立柱，机柜编号自动重排
+              </span>
+            </div>
+            <div v-for="(kinds, rowIdx) in form.slot_kinds" :key="rowIdx" class="slot-row">
+              <div class="slot-row-title">
+                第 {{ rowIdx + 1 }} 排
+                <span class="slot-row-meta">
+                  网格 {{ kinds.length }} · 机柜 {{ rowRackCount(rowIdx) }}
+                </span>
+                <el-button
+                  size="small"
+                  link
+                  type="primary"
+                  :disabled="kinds.length >= form.outline_cols"
+                  @click="addSlotCell(rowIdx)"
+                >
+                  添加格
+                </el-button>
+              </div>
+              <div class="slot-inputs">
+                <div
+                  v-for="(kind, colIdx) in kinds"
+                  :key="`${rowIdx}-${colIdx}`"
+                  class="slot-cell"
+                  :class="{ pillar: kind === 'pillar' }"
+                >
+                  <div
+                    v-if="kind === 'pillar'"
+                    class="slot-blank"
+                    title="立柱空白占位"
+                    @click="toggleSlotPillar(rowIdx, colIdx)"
+                  />
+                  <el-input
+                    v-else
+                    v-model="form.slot_codes[rowIdx][colIdx]"
+                    :placeholder="`列${colIdx + 1}`"
+                    size="small"
+                    style="width: 88px"
+                  />
+                  <div class="slot-cell-actions">
+                    <el-button
+                      size="small"
+                      link
+                      :type="kind === 'pillar' ? 'warning' : 'primary'"
+                      @click="toggleSlotPillar(rowIdx, colIdx)"
+                    >
+                      {{ kind === 'pillar' ? '改回机柜' : '立柱' }}
+                    </el-button>
+                    <el-button
+                      size="small"
+                      link
+                      type="danger"
+                      @click="deleteSlotCell(rowIdx, colIdx)"
+                    >
+                      删除
+                    </el-button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <el-form-item label="重要性">
+          <el-select v-model="form.importance" style="width: 220px">
+            <el-option
+              v-for="item in IMPORTANCE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="form.description" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+
+      <!-- ========== 新建机房（分步） ========== -->
+      <el-form v-else label-width="118px" class="room-form">
+        <!-- Step 1: 基础信息 -->
+        <section v-show="createStep === 0" class="form-section">
           <el-form-item label="数据中心" required>
             <el-select
               v-model="form.datacenter_id"
               placeholder="选择所属数据中心"
               style="width: 100%"
-              :disabled="!!editingId || hasDcFilter"
+              :disabled="hasDcFilter"
               filterable
             >
               <el-option
@@ -2253,10 +2888,17 @@ watch(
             </div>
           </el-form-item>
           <el-form-item label="机房楼号" required>
-            <el-input v-model="form.building_no" placeholder="例如：A栋" :disabled="!!editingId" />
+            <el-input v-model="form.building_no" placeholder="例如：A栋" />
           </el-form-item>
           <el-form-item label="机房门牌号" required>
             <el-input v-model="form.room_no" placeholder="例如：101" />
+          </el-form-item>
+          <el-form-item label="编号">
+            <el-input
+              v-model="form.code"
+              placeholder="空则自动生成 CR1、CR2…"
+              maxlength="50"
+            />
           </el-form-item>
           <el-form-item label="机房属性">
             <div class="attr-editor">
@@ -2308,8 +2950,7 @@ watch(
         </section>
 
         <!-- Step 2: 机房轮廓 -->
-        <section v-show="editingId || createStep === 1" class="form-section">
-          <h4 v-if="editingId" class="section-title">机房轮廓</h4>
+        <section v-show="createStep === 1" class="form-section">
           <el-form-item label="长（列网格）" required>
             <el-input-number v-model="form.outline_cols" :min="1" :max="50" style="width: 100%" />
           </el-form-item>
@@ -2339,8 +2980,7 @@ watch(
         </section>
 
         <!-- Step 3: 机柜编排 -->
-        <section v-show="editingId || createStep === 2" class="form-section">
-          <h4 v-if="editingId" class="section-title">机柜编排</h4>
+        <section v-show="createStep === 2" class="form-section">
           <el-form-item label="编排方式" required>
             <el-radio-group v-model="form.layout_mode">
               <el-radio value="auto">按排×列</el-radio>
@@ -2401,8 +3041,7 @@ watch(
         </section>
 
         <!-- Step 4: 编号 -->
-        <section v-show="editingId || createStep === 3" class="form-section">
-          <h4 v-if="editingId" class="section-title">编号设置</h4>
+        <section v-show="createStep === 3" class="form-section">
           <el-form-item label="编号前缀" required>
             <el-input
               v-model="form.code_prefix"
@@ -2429,7 +3068,7 @@ watch(
                   重排连续编号
                 </el-button>
                 <span class="field-hint" style="margin: 0">
-                  可增删机柜格；点「立柱」以空白框占位（自动在排尾补一机柜格）
+                  可增删机柜格；点「立柱」将该格转为立柱，机柜编号自动重排
                 </span>
               </div>
               <div v-for="(kinds, rowIdx) in form.slot_kinds" :key="rowIdx" class="slot-row">
@@ -2523,6 +3162,45 @@ watch(
           <el-button v-else type="primary" @click="handleSubmit">创建</el-button>
         </template>
         <el-button v-else type="primary" @click="handleSubmit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="editPreviewVisible" title="机柜编号预览" width="640px" append-to-body>
+      <div class="edit-preview-meta">{{ layoutSummary }}</div>
+      <div class="edit-preview-meta">编号前缀：{{ form.code_prefix || '—' }} · {{ codePreview }}</div>
+      <div class="outline-preview-wrap" style="margin-top: 12px">
+        <div class="outline-meta">轮廓 {{ form.outline_cols }} × {{ form.outline_rows }}</div>
+        <div class="outline-preview-frame">
+          <div
+            class="outline-grid"
+            :style="{
+              gridTemplateColumns: `repeat(${Math.max(form.outline_cols, 1)}, 1fr)`,
+              gridTemplateRows: `repeat(${Math.max(form.outline_rows, 1)}, 1fr)`,
+            }"
+          >
+            <div
+              v-for="idx in Math.max(form.outline_rows, 1) * Math.max(form.outline_cols, 1)"
+              :key="idx"
+              class="outline-cell"
+            />
+          </div>
+        </div>
+      </div>
+      <div v-if="form.slot_codes.length" class="edit-preview-codes">
+        <div v-for="(row, ri) in form.slot_codes" :key="ri" class="edit-preview-row">
+          <span class="row-label">第 {{ ri + 1 }} 排</span>
+          <span
+            v-for="(code, ci) in row"
+            :key="`${ri}-${ci}`"
+            class="code-chip"
+            :class="{ pillar: form.slot_kinds[ri]?.[ci] === 'pillar' }"
+          >
+            {{ form.slot_kinds[ri]?.[ci] === 'pillar' ? '立柱' : code || '—' }}
+          </span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="editPreviewVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -2820,6 +3498,12 @@ watch(
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+.rack-info-pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 @media (max-width: 1100px) {
@@ -3240,6 +3924,69 @@ watch(
   padding-bottom: 8px;
 }
 
+.device-ctx-menu {
+  position: fixed;
+  z-index: 4000;
+  min-width: 140px;
+  padding: 4px 0;
+  background: #fff;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+}
+
+.device-ctx-item {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  color: #303133;
+  cursor: pointer;
+}
+
+.device-ctx-item:hover {
+  background: #ecf5ff;
+  color: #409eff;
+}
+
+.device-detail-body {
+  min-height: 120px;
+}
+
+.device-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: #f5f8fb;
+  border: 1px solid #1f1f1f;
+}
+
+.device-detail-table th,
+.device-detail-table td {
+  border: 1px solid #1f1f1f;
+  padding: 10px 12px;
+  font-size: 13px;
+  vertical-align: middle;
+  word-break: break-all;
+}
+
+.device-detail-table th {
+  width: 18%;
+  font-weight: 600;
+  color: #303133;
+  background: #eef3f8;
+  white-space: nowrap;
+}
+
+.device-detail-table td {
+  width: 32%;
+  color: #303133;
+  background: #f8fafc;
+}
+
 .rack-code {
   font-weight: 600;
   font-size: 13px;
@@ -3247,9 +3994,21 @@ watch(
   word-break: break-all;
 }
 
+.rack-seq {
+  font-size: 11px;
+  color: #606266;
+  margin-top: 2px;
+}
+
 .rack-meta {
   font-size: 12px;
   color: #909399;
+}
+
+.mono-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #606266;
 }
 
 .floorplan-map-full {
@@ -3308,6 +4067,101 @@ watch(
   font-size: 14px;
   font-weight: 600;
   color: #334155;
+}
+
+.edit-room-form {
+  background: #f3f6f9;
+  margin: -8px -12px;
+  padding: 16px 18px 8px;
+  border-radius: 8px;
+}
+
+.edit-block {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid #d8e0e8;
+  border-radius: 6px;
+}
+
+.edit-block-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.edit-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+}
+
+.edit-grid.compact {
+  max-width: 520px;
+}
+
+.edit-summary {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #606266;
+}
+
+.edit-number-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.edit-slot-codes {
+  margin-top: 12px;
+}
+
+.edit-preview-meta {
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 6px;
+}
+
+.edit-preview-codes {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.edit-preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.code-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 48px;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #c0c4cc;
+  background: #f5f7fa;
+  font-size: 12px;
+}
+
+.code-chip.pillar {
+  background: #fafafa;
+  color: #909399;
+  border-style: dashed;
 }
 
 .attr-editor {

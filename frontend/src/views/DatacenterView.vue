@@ -9,17 +9,28 @@ import {
   updateDatacenter,
   type DataCenter,
 } from '@/api/datacenter'
-import { listRooms } from '@/api/room'
+import { listRooms, type Room } from '@/api/room'
 import { useAuthStore } from '@/stores/auth'
+
+const ATTR_LABELS: Record<string, string> = {
+  private_network: '专网',
+  internet: '互联网',
+}
 
 const auth = useAuthStore()
 const router = useRouter()
 const loading = ref(false)
 const tableData = ref<DataCenter[]>([])
+const selectedRows = ref<DataCenter[]>([])
 const roomCountByDc = ref<Record<string, number>>({})
+const roomsByDc = ref<Record<string, Room[]>>({})
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const keyword = ref('')
 const dialogVisible = ref(false)
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detailRow = ref<DataCenter | null>(null)
+const detailRooms = ref<Room[]>([])
 const editingId = ref<string | null>(null)
 
 const form = reactive({
@@ -33,18 +44,40 @@ const canCreate = auth.hasPermission('datacenter:create')
 const canUpdate = auth.hasPermission('datacenter:update')
 const canDelete = auth.hasPermission('datacenter:delete')
 
-async function loadRoomCounts() {
+function rowIndex(index: number) {
+  return (pagination.page - 1) * pagination.page_size + index + 1
+}
+
+function roomDisplayName(room: Room) {
+  return room.room_no || room.name || room.code || '—'
+}
+
+function roomTypeLabel(room: Room) {
+  const attrs = Array.isArray(room.attributes) ? room.attributes : []
+  if (!attrs.length) return '其他'
+  const labels = attrs.map((a) => ATTR_LABELS[a] || (a === '其他' ? '其他' : a))
+  const known = labels.filter((l) => l === '专网' || l === '互联网' || l === '其他')
+  if (known.length) return [...new Set(known)].join('、')
+  // 自定义属性归为「其他」并附带原文
+  return `其他（${labels.join('、')}）`
+}
+
+async function loadRoomIndex() {
   try {
     const res = await listRooms({ page: 1, page_size: 500 })
     const counts: Record<string, number> = {}
+    const grouped: Record<string, Room[]> = {}
     for (const room of res.items) {
       const id = room.datacenter_id
       if (!id) continue
       counts[id] = (counts[id] || 0) + 1
+      if (!grouped[id]) grouped[id] = []
+      grouped[id].push(room)
     }
     roomCountByDc.value = counts
+    roomsByDc.value = grouped
   } catch {
-    /* ignore count failures */
+    /* ignore */
   }
 }
 
@@ -58,7 +91,7 @@ async function loadData() {
     })
     tableData.value = data.items
     pagination.total = data.pagination.total
-    void loadRoomCounts()
+    void loadRoomIndex()
   } finally {
     loading.value = false
   }
@@ -82,35 +115,62 @@ function openEdit(row: DataCenter) {
   dialogVisible.value = true
 }
 
-function openRooms(row: DataCenter) {
+async function openDetail(row: DataCenter) {
+  detailRow.value = row
+  detailVisible.value = true
+  detailLoading.value = true
+  try {
+    const cached = roomsByDc.value[row.id]
+    if (cached) {
+      detailRooms.value = cached
+    } else {
+      const res = await listRooms({
+        page: 1,
+        page_size: 200,
+        datacenter_id: row.id,
+      })
+      detailRooms.value = res.items.filter((r) => r.datacenter_id === row.id)
+      roomsByDc.value = { ...roomsByDc.value, [row.id]: detailRooms.value }
+      roomCountByDc.value = {
+        ...roomCountByDc.value,
+        [row.id]: detailRooms.value.length,
+      }
+    }
+  } catch {
+    detailRooms.value = []
+    ElMessage.error('加载机房列表失败')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function goRoomList(dc: DataCenter, room?: Room) {
+  detailVisible.value = false
   void router.push({
     path: '/rooms/manage',
-    query: { datacenter_id: row.id },
+    query: {
+      datacenter_id: dc.id,
+      ...(room ? { keyword: room.code || room.room_no || room.name } : {}),
+    },
   })
 }
 
-function openSimulate(row: DataCenter) {
-  void router.push({ name: 'rooms-simulate', query: { datacenter_id: row.id } })
-}
-
 async function handleSubmit() {
-  if (!form.code || !form.name) {
-    ElMessage.warning('请填写编码和名称')
+  if (!form.name) {
+    ElMessage.warning('请填写数据中心名称')
     return
   }
 
   try {
     if (editingId.value) {
       await updateDatacenter(editingId.value, {
-        code: form.code,
         name: form.name,
         location: form.location || null,
-        description: form.description || null,
       })
-      ElMessage.success('更新成功')
+      ElMessage.success('修改成功')
     } else {
       await createDatacenter({
-        code: form.code,
+        code: form.code.trim() || null,
         name: form.name,
         location: form.location || null,
         description: form.description || null,
@@ -153,10 +213,11 @@ async function handleDelete(row: DataCenter) {
     await loadData()
   } catch (err: unknown) {
     if (err === 'cancel' || err === 'close') return
-    const ax = err as { response?: { status?: number; data?: { message?: string; details?: { room_count?: number } } } }
+    const ax = err as {
+      response?: { status?: number; data?: { message?: string; details?: { room_count?: number } } }
+    }
     const status = ax.response?.status
-    const details = ax.response?.data?.details
-    const serverRooms = details?.room_count
+    const serverRooms = ax.response?.data?.details?.room_count
     if (status === 409 && serverRooms && serverRooms > 0) {
       try {
         await ElMessageBox.confirm(
@@ -207,7 +268,7 @@ onMounted(loadData)
           <div class="actions">
             <el-input
               v-model="keyword"
-              placeholder="搜索编码/名称/位置"
+              placeholder="搜索编号/名称/地理位置"
               clearable
               style="width: 240px"
               @keyup.enter="loadData"
@@ -219,26 +280,39 @@ onMounted(loadData)
         </div>
       </template>
 
-      <el-table v-loading="loading" :data="tableData" stripe class="dc-table">
-        <el-table-column prop="code" label="编码" width="140" />
-        <el-table-column prop="name" label="名称" min-width="160" />
-        <el-table-column prop="location" label="位置" min-width="160" />
-        <el-table-column label="机房数" width="100" align="center">
+      <el-table
+        v-loading="loading"
+        :data="tableData"
+        stripe
+        class="dc-table"
+        row-key="id"
+        @selection-change="(rows: DataCenter[]) => (selectedRows = rows)"
+      >
+        <el-table-column type="selection" width="48" />
+        <el-table-column label="序号" width="72" align="center">
+          <template #default="{ $index }">{{ rowIndex($index) }}</template>
+        </el-table-column>
+        <el-table-column prop="name" label="数据中心名称" min-width="160" />
+        <el-table-column prop="code" label="数据中心编号" width="130" />
+        <el-table-column label="数据中心ID(唯一)" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
-            <span class="count-pill">{{ roomCountByDc[row.id] ?? '—' }}</span>
+            <span class="mono-id">{{ row.id }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="description" label="描述" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="location" label="地理位置" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.location || '—' }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="88" fixed="right" align="center">
           <template #default="{ row }">
             <el-dropdown trigger="click">
               <el-button type="primary" link>操作</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item @click="openRooms(row)">进入机房管理</el-dropdown-item>
-                  <el-dropdown-item @click="openSimulate(row)">3D 仿真</el-dropdown-item>
-                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
-                  <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">删除</el-dropdown-item>
+                  <el-dropdown-item @click="openDetail(row)">详细信息</el-dropdown-item>
+                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">修改信息</el-dropdown-item>
+                  <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">
+                    删除
+                  </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -259,26 +333,99 @@ onMounted(loadData)
 
     <el-dialog
       v-model="dialogVisible"
-      :title="editingId ? '编辑数据中心' : '新建数据中心'"
-      width="520px"
+      :title="editingId ? '修改信息' : '新建数据中心'"
+      width="480px"
     >
-      <el-form label-width="80px">
-        <el-form-item label="编码" required>
-          <el-input v-model="form.code" :disabled="!!editingId" />
-        </el-form-item>
-        <el-form-item label="名称" required>
-          <el-input v-model="form.name" />
-        </el-form-item>
-        <el-form-item label="位置">
-          <el-input v-model="form.location" />
-        </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" :rows="3" />
-        </el-form-item>
+      <el-form label-width="110px">
+        <template v-if="editingId">
+          <el-form-item label="数据中心名称" required>
+            <el-input v-model="form.name" placeholder="请输入数据中心名称" />
+          </el-form-item>
+          <el-form-item label="地理位置">
+            <el-input v-model="form.location" placeholder="请输入地理位置" />
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="数据中心编号">
+            <el-input v-model="form.code" placeholder="空则自动生成 DC1、DC2…" />
+          </el-form-item>
+          <el-form-item label="数据中心名称" required>
+            <el-input v-model="form.name" placeholder="请输入数据中心名称" />
+          </el-form-item>
+          <el-form-item label="地理位置">
+            <el-input v-model="form.location" placeholder="请输入地理位置" />
+          </el-form-item>
+          <el-form-item label="描述">
+            <el-input v-model="form.description" type="textarea" :rows="3" />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="handleSubmit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="detailVisible" title="详细信息" width="640px">
+      <div v-loading="detailLoading" class="detail-body">
+        <template v-if="detailRow">
+          <el-descriptions :column="1" border class="detail-meta">
+            <el-descriptions-item label="数据中心名称">{{ detailRow.name }}</el-descriptions-item>
+            <el-descriptions-item label="数据中心编号">{{ detailRow.code }}</el-descriptions-item>
+            <el-descriptions-item label="数据中心ID(唯一)">
+              <span class="mono-id">{{ detailRow.id }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="地理位置">
+              {{ detailRow.location || '—' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="机房总数">
+              {{ detailRooms.length }}
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <div class="room-block">
+            <div class="room-block-title">
+              机房列表
+              <el-button
+                v-if="detailRooms.length"
+                type="primary"
+                link
+                @click="goRoomList(detailRow)"
+              >
+                查看全部机房
+              </el-button>
+            </div>
+            <el-table
+              v-if="detailRooms.length"
+              :data="detailRooms"
+              size="small"
+              stripe
+              class="room-mini-table"
+            >
+              <el-table-column label="机房名称" min-width="120">
+                <template #default="{ row }">
+                  <el-button type="primary" link @click="goRoomList(detailRow!, row)">
+                    {{ roomDisplayName(row) }}
+                  </el-button>
+                </template>
+              </el-table-column>
+              <el-table-column label="编号" width="100">
+                <template #default="{ row }">{{ row.code || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="机房类型" min-width="120">
+                <template #default="{ row }">
+                  <span class="type-tag" :class="roomTypeLabel(row).includes('专网') ? 'private' : roomTypeLabel(row).includes('互联网') ? 'internet' : 'other'">
+                    {{ roomTypeLabel(row) }}
+                  </span>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else description="暂无下属机房" :image-size="72" />
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="detailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -289,6 +436,12 @@ onMounted(loadData)
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.mono-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #606266;
 }
 
 .hero {
@@ -307,24 +460,19 @@ onMounted(loadData)
 
 .hero-copy h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
   color: #1f2d3d;
 }
 
 .hero-copy p {
-  margin: 6px 0 0;
-  font-size: 13px;
-  color: #6b7c8f;
+  margin: 8px 0 0;
+  color: #5f6b7a;
 }
 
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.dc-card {
-  border-radius: 10px;
 }
 
 .card-header {
@@ -336,24 +484,56 @@ onMounted(loadData)
 
 .actions {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
-.count-pill {
-  display: inline-block;
-  min-width: 28px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #ecf5ff;
-  color: #409eff;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
 .pager {
+  margin-top: 16px;
   display: flex;
   justify-content: flex-end;
-  margin-top: 16px;
+}
+
+.detail-body {
+  min-height: 120px;
+}
+
+.detail-meta {
+  margin-bottom: 16px;
+}
+
+.room-block-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.room-mini-table {
+  width: 100%;
+}
+
+.type-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.type-tag.private {
+  background: #f0f5ff;
+  color: #2f54eb;
+}
+
+.type-tag.internet {
+  background: #f6ffed;
+  color: #389e0d;
+}
+
+.type-tag.other {
+  background: #f5f5f5;
+  color: #595959;
 }
 </style>

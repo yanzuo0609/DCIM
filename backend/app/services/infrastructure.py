@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -79,12 +80,77 @@ def _to_floor_response(entity: Floor) -> FloorResponse:
     )
 
 
+def _sanitize_room_code_part(raw: str, fallback: str = "R") -> str:
+    base = re.sub(r"\s+", "-", str(raw or "").strip())
+    base = re.sub(r"[^\w\-]", "", base, flags=re.UNICODE)
+    return (base or fallback)[:40]
+
+
+def _next_prefixed_code(existing: list[str], prefix: str) -> str:
+    """Generate PREFIX1, PREFIX2… from existing codes (case-insensitive)."""
+    p = str(prefix or "").strip().upper()
+    pattern = re.compile(rf"^{re.escape(p)}(\d+)$", re.IGNORECASE)
+    max_n = 0
+    for code in existing:
+        m = pattern.match(str(code or "").strip())
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"{p}{max_n + 1}"
+
+
+async def _allocate_room_code(
+    repo: RoomRepository,
+    *,
+    preferred: str | None,
+    datacenter_code: str | None = None,
+    room_no: str = "",
+    exclude_id: uuid.UUID | None = None,
+) -> str:
+    preferred_clean = str(preferred or "").strip().upper()
+    if preferred_clean:
+        existing = await repo.get_by_code(preferred_clean)
+        if existing is None or (exclude_id is not None and existing.id == exclude_id):
+            return preferred_clean
+        raise ConflictError("机房编号已存在", code=10002)
+    codes = await repo.list_codes()
+    for _ in range(1000):
+        code = _next_prefixed_code(codes, "CR")
+        hit = await repo.get_by_code(code)
+        if hit is None or (exclude_id is not None and hit.id == exclude_id):
+            return code
+        codes.append(code)
+    return f"CR{uuid.uuid4().hex[:6].upper()}"
+
+
+async def _allocate_datacenter_code(
+    repo: DataCenterRepository,
+    *,
+    preferred: str | None = None,
+    exclude_id: uuid.UUID | None = None,
+) -> str:
+    preferred_clean = str(preferred or "").strip().upper()
+    if preferred_clean:
+        existing = await repo.get_by_code(preferred_clean)
+        if existing is None or (exclude_id is not None and existing.id == exclude_id):
+            return preferred_clean
+        raise ConflictError("数据中心编号已存在", code=10002)
+    codes = await repo.list_codes()
+    for _ in range(1000):
+        code = _next_prefixed_code(codes, "DC")
+        hit = await repo.get_by_code(code)
+        if hit is None or (exclude_id is not None and hit.id == exclude_id):
+            return code
+        codes.append(code)
+    return f"DC{uuid.uuid4().hex[:6].upper()}"
+
+
 def _to_room_response(
     entity: Room,
     *,
     rack_count: int = 0,
     used_count: int = 0,
     free_count: int | None = None,
+    device_count: int = 0,
     total_u: int = 0,
     total_power: float = 0.0,
 ) -> RoomResponse:
@@ -120,6 +186,7 @@ def _to_room_response(
         id=str(entity.id),
         floor_id=str(entity.floor_id),
         name=entity.name,
+        code=str(getattr(entity, "code", None) or "").strip() or str(entity.id)[:8],
         datacenter_id=datacenter_id,
         datacenter_name=datacenter_name,
         location=location,
@@ -142,6 +209,7 @@ def _to_room_response(
         rack_count=max(0, int(rack_count)),
         used_count=used,
         free_count=free,
+        device_count=max(0, int(device_count)),
         total_u=max(0, int(total_u)),
         total_power=round(float(total_power or 0), 2),
         description=entity.description,
@@ -187,12 +255,10 @@ class DataCenterService:
     async def create(
         self, payload: DataCenterCreate, user_id: uuid.UUID | None = None
     ) -> DataCenterResponse:
-        existing = await self.repo.get_by_code(payload.code)
-        if existing:
-            raise ConflictError("Data center code already exists")
+        code = await _allocate_datacenter_code(self.repo, preferred=payload.code)
 
         entity = DataCenter(
-            code=payload.code,
+            code=code,
             name=payload.name,
             location=payload.location,
             description=payload.description,
@@ -471,6 +537,20 @@ class RoomService:
     async def _enrich_room_responses(self, rooms: list[Room]) -> list[RoomResponse]:
         if not rooms:
             return []
+        # 列表/详情时补齐缺失编号（CR1、CR2…）
+        dirty = False
+        for room in rooms:
+            if not str(getattr(room, "code", "") or "").strip():
+                room.code = await _allocate_room_code(
+                    self.repo,
+                    preferred=None,
+                    room_no=room.name,
+                    exclude_id=room.id,
+                )
+                dirty = True
+        if dirty:
+            await self.session.flush()
+
         stats_map = await self.rack_repo.room_stats_for_ids([r.id for r in rooms])
         result: list[RoomResponse] = []
         for room in rooms:
@@ -484,6 +564,7 @@ class RoomService:
                     rack_count=rack_count,
                     used_count=used_count,
                     free_count=free_count,
+                    device_count=int(stats.get("device_count", 0) or 0),
                     total_u=int(stats.get("total_u", 0) or 0),
                     total_power=float(stats.get("total_power", 0) or 0),
                 )
@@ -550,8 +631,14 @@ class RoomService:
             code_prefix=payload.code_prefix,
         )
         attributes = normalize_room_attributes(payload.attributes)
+        room_code = await _allocate_room_code(
+            self.repo,
+            preferred=None,
+            room_no=payload.name,
+        )
         entity = Room(
             floor_id=floor_id,
+            code=room_code,
             name=payload.name,
             description=payload.description,
             purpose=purpose_from_attributes(attributes) if attributes else (payload.purpose or "other"),
@@ -615,8 +702,14 @@ class RoomService:
         if existing:
             raise ConflictError("Room number already exists in this building")
 
+        room_code = await _allocate_room_code(
+            self.repo,
+            preferred=payload.code,
+            room_no=room_no,
+        )
         entity = Room(
             floor_id=floor.id,
+            code=room_code,
             name=room_no,
             description=payload.description,
             purpose=purpose_from_attributes(attributes) if attributes else (payload.purpose or "other"),
@@ -655,6 +748,27 @@ class RoomService:
             if existing:
                 raise ConflictError("Room name already exists on this floor")
             entity.name = new_name
+        if payload.code is not None:
+            next_code = str(payload.code or "").strip().upper()
+            if not next_code:
+                entity.code = await _allocate_room_code(
+                    self.repo,
+                    preferred=None,
+                    room_no=entity.name,
+                    exclude_id=entity.id,
+                )
+            else:
+                conflict = await self.repo.get_by_code(next_code)
+                if conflict is not None and conflict.id != entity.id:
+                    raise ConflictError("机房编号已存在", code=10002)
+                entity.code = next_code
+        elif not str(getattr(entity, "code", "") or "").strip():
+            entity.code = await _allocate_room_code(
+                self.repo,
+                preferred=None,
+                room_no=entity.name,
+                exclude_id=entity.id,
+            )
         if payload.description is not None:
             entity.description = payload.description
         if payload.importance is not None:
@@ -982,6 +1096,20 @@ class RoomService:
             conflict = await self.rack_repo.get_by_code_in_room(room_id, code)
             if conflict is None or conflict.id == rack.id:
                 rack.code = code
+
+        # 按机房有效机柜位顺序写入顺序编号与 EC 业务编号，不改变行列编排样式
+        pos_to_seq = {(r, c): idx + 1 for idx, (r, c, _code) in enumerate(slots)}
+        pos_to_slot = {(r, c): str(code or "").strip() for r, c, code in slots}
+        for rack in racks:
+            pos = (int(rack.row_no), int(rack.column_no))
+            seq = pos_to_seq.get(pos)
+            rack.seq_no = seq
+            if seq is None:
+                continue
+            rack.code = f"EC{seq}"
+            slot_code = pos_to_slot.get(pos)
+            if slot_code:
+                rack.name = slot_code
 
     async def delete(self, entity_id: uuid.UUID, user_id: uuid.UUID | None = None) -> None:
         entity = await self.repo.get_by_id(entity_id)

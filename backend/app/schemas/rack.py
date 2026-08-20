@@ -189,6 +189,7 @@ class RackResponse(BaseModel):
     rack_template_id: str | None
     code: str
     name: str
+    seq_no: int | None = None
     row_no: int
     column_no: int
     total_u: int
@@ -203,6 +204,7 @@ class RackResponse(BaseModel):
     free_u: int = 0
     utilization: float = 0.0
     device_count: int = 0
+    total_power: float = 0.0
     created_at: datetime
     updated_at: datetime
 

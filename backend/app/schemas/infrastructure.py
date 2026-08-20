@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DataCenterCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=50)
+    code: str | None = Field(default=None, max_length=50, description="编号；空则自动生成 DCn")
     name: str = Field(min_length=1, max_length=100)
     location: str | None = Field(default=None, max_length=200)
     description: str | None = None
@@ -335,6 +335,7 @@ class RoomQuickCreate(BaseModel):
     datacenter_id: str = Field(description="关联数据中心 ID")
     building_no: str = Field(min_length=1, max_length=100, description="机房楼号")
     room_no: str = Field(min_length=1, max_length=100, description="机房门牌号")
+    code: str | None = Field(default=None, max_length=50, description="机房唯一编号；空则自动生成")
     description: str | None = None
     purpose: Literal["production", "test", "backup", "network", "storage", "other"] | None = (
         "other"
@@ -382,6 +383,7 @@ class RoomQuickCreate(BaseModel):
 class RoomUpdate(BaseModel):
     room_no: str | None = Field(default=None, min_length=1, max_length=100)
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    code: str | None = Field(default=None, min_length=1, max_length=50, description="机房唯一编号")
     description: str | None = None
     purpose: Literal["production", "test", "backup", "network", "storage", "other"] | None = None
     importance: Literal["critical", "high", "medium", "low"] | None = None
@@ -404,6 +406,7 @@ class RoomResponse(BaseModel):
     id: str
     floor_id: str
     name: str
+    code: str = ""
     datacenter_id: str | None = None
     datacenter_name: str | None = None
     location: str | None = None
@@ -423,10 +426,11 @@ class RoomResponse(BaseModel):
     purpose: str | None = "production"
     importance: str | None = "medium"
     attributes: list[str] = Field(default_factory=list)
-    # 独立统计：已建机柜 / 使用中机柜 / 空余机柜(=已建−使用) / 容量(Σ模板U位) / 总功耗(W)
+    # 独立统计：已建机柜 / 使用中机柜 / 空余机柜(=已建−使用) / 设备数 / 容量(Σ模板U位) / 总功耗(W)
     rack_count: int = 0
     used_count: int = 0
     free_count: int = 0
+    device_count: int = 0
     total_u: int = 0
     total_power: float = 0.0
     description: str | None

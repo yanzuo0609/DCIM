@@ -9,6 +9,8 @@ export interface Rack {
   rack_template_id: string | null
   code: string
   name: string
+  /** 机房内顺序编号（1-based），便于划范围与定位 */
+  seq_no?: number | null
   row_no: number
   column_no: number
   total_u: number
@@ -23,6 +25,7 @@ export interface Rack {
   free_u: number
   utilization: number
   device_count: number
+  total_power?: number
   created_at: string
   updated_at: string
 }

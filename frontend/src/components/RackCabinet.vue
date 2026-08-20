@@ -44,11 +44,19 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   'select-u': [u: number]
+  'device-contextmenu': [payload: { device: RackLayoutDevice; slot: RackLayoutSlot; event: MouseEvent }]
 }>()
 
 function onSlotClick(slot: RackLayoutSlot) {
   if (!props.selectable || slot.occupied) return
   emit('select-u', slot.u_position)
+}
+
+function onDeviceContextMenu(event: MouseEvent, slot: RackLayoutSlot) {
+  if (!slot.device) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('device-contextmenu', { device: slot.device, slot, event })
 }
 
 const styleKey = computed<RackVisualStyle>(() => {
@@ -281,6 +289,7 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
             ]"
             :style="rowStyle(row.slot)"
             @click="onSlotClick(row.slot)"
+            @contextmenu="onDeviceContextMenu($event, row.slot)"
           >
             <td class="grid-u">{{ row.slot.u_position }}U</td>
             <!-- 无 IP / 功率列：仅合并设备名格（同经典立面 device rowspan） -->
@@ -288,6 +297,7 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
               v-if="row.showDevice"
               class="grid-cell"
               :rowspan="row.deviceRowspan"
+              @contextmenu="onDeviceContextMenu($event, row.slot)"
             >
               <template v-if="row.slot.device">
                 {{ row.slot.device.hostname || '设备' }}
@@ -319,6 +329,7 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
               :class="[rowState(slot), `panel-${panelKind(slot.device)}`, heightClass(slot.device)]"
               :style="rowStyle(slot)"
               @click="onSlotClick(slot)"
+              @contextmenu="onDeviceContextMenu($event, slot)"
             >
               <template v-if="slot.is_span_start && slot.device">
                 <div class="faceplate" :data-kind="panelKind(slot.device)">
@@ -374,12 +385,14 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
                 ]"
                 :style="rowStyle(row.slot, row.ipKind)"
                 @click="onSlotClick(row.slot)"
+                @contextmenu="onDeviceContextMenu($event, row.slot)"
               >
                 <td class="sch-cell-u">{{ row.slot.u_position }}</td>
                 <td
                   v-if="row.showDevice"
                   class="sch-cell-device"
                   :rowspan="row.deviceRowspan"
+                  @contextmenu="onDeviceContextMenu($event, row.slot)"
                 >
                     <template v-if="row.slot.device">
                       <div class="sch-device-inner">
@@ -469,12 +482,14 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
                   :class="[rowState(row.slot), heightClass(row.slot.device)]"
                   :style="rowStyle(row.slot, row.ipKind)"
                   @click="onSlotClick(row.slot)"
+                  @contextmenu="onDeviceContextMenu($event, row.slot)"
                 >
                   <td class="cell-u">U{{ row.slot.u_position }}</td>
                   <td
                     v-if="row.showDevice"
                     class="cell-device"
                     :rowspan="row.deviceRowspan"
+                    @contextmenu="onDeviceContextMenu($event, row.slot)"
                   >
                     <template v-if="row.slot.device">
                       <div class="device-inner">
@@ -1231,5 +1246,12 @@ function bmcIpText(device: RackLayoutDevice | null | undefined) {
   padding: 6px;
   background: #2f3542;
   border-top: 1px solid #3b4454;
+}
+
+.style-classic .u-row.occupied,
+.style-schematic .sch-row.occupied,
+.style-grid .grid-row.occupied,
+.style-realistic .face-row.occupied {
+  cursor: context-menu;
 }
 </style>

@@ -12,6 +12,8 @@ export interface Room {
   id: string
   floor_id: string
   name: string
+  /** 机房唯一业务编号 */
+  code?: string
   datacenter_id: string | null
   datacenter_name: string | null
   location: string | null
@@ -43,6 +45,8 @@ export interface Room {
   rack_count: number
   used_count: number
   free_count: number
+  /** 机房内已上架设备总数 */
+  device_count: number
   /** 容量：Σ(机柜应用模板的 U 位数)；等同于机柜数×对应模板 U 位 */
   total_u: number
   total_power: number
@@ -55,6 +59,8 @@ export interface RoomQuickPayload {
   datacenter_id: string
   building_no: string
   room_no: string
+  /** 机房唯一编号；空则后端按数据中心编码自动生成 */
+  code?: string | null
   description?: string | null
   purpose?: RoomPurpose | null
   importance?: RoomImportance | null
@@ -105,6 +111,7 @@ export async function updateRoom(
   id: string,
   payload: {
     room_no?: string
+    code?: string | null
     description?: string | null
     purpose?: RoomPurpose | null
     importance?: RoomImportance | null

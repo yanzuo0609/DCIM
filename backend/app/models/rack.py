@@ -34,6 +34,7 @@ class Rack(BaseModel):
     __table_args__ = (
         UniqueConstraint("room_id", "code", name="uk_rack_room_code"),
         UniqueConstraint("room_id", "name", name="uk_rack_room_name"),
+        UniqueConstraint("room_id", "seq_no", name="uk_rack_room_seq_no"),
     )
 
     room_id: Mapped[uuid.UUID] = mapped_column(
@@ -44,6 +45,8 @@ class Rack(BaseModel):
     )
     code: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 机房内顺序编号（1-based，跳过立柱），便于划范围与定位；编排样式仍以 code/行列为准
+    seq_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
     row_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     column_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     total_u: Mapped[int] = mapped_column(Integer, default=42, nullable=False)

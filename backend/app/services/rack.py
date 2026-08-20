@@ -94,6 +94,7 @@ def _to_rack_response(
     *,
     occupied_u: int | None = None,
     device_count: int | None = None,
+    total_power: float = 0.0,
 ) -> RackResponse:
     if occupied_u is None or device_count is None:
         occupied, free, utilization, dcount = _rack_stats(rack)
@@ -108,6 +109,7 @@ def _to_rack_response(
         rack_template_id=str(rack.rack_template_id) if rack.rack_template_id else None,
         code=rack.code,
         name=rack.name,
+        seq_no=getattr(rack, "seq_no", None),
         row_no=rack.row_no,
         column_no=rack.column_no,
         total_u=rack.total_u,
@@ -122,6 +124,7 @@ def _to_rack_response(
         free_u=free,
         utilization=utilization,
         device_count=dcount,
+        total_power=round(float(total_power or 0), 2),
         created_at=rack.created_at,
         updated_at=rack.updated_at,
     )
@@ -202,6 +205,29 @@ def _resolve_rack_position(
             return r, c
 
     raise ConflictError("No available rack slots in this room", code=10002)
+
+
+async def _sync_room_rack_seq_nos(room: Room, racks: list[Rack]) -> None:
+    """按机房有效机柜位顺序写入 seq_no，并将业务编号同步为 EC1、EC2…（布局展示仍用机房 slot 码）。"""
+    slots = room.get_rack_slots()
+    pos_to_seq = {(int(r), int(c)): idx + 1 for idx, (r, c, _code) in enumerate(slots)}
+    pos_to_slot = {(int(r), int(c)): str(code or "").strip() for r, c, code in slots}
+    used_codes: set[str] = set()
+    for rack in racks:
+        pos = (int(rack.row_no), int(rack.column_no))
+        seq = pos_to_seq.get(pos)
+        rack.seq_no = seq
+        if seq is None:
+            continue
+        ec_code = f"EC{seq}"
+        # 若同房已有冲突（极少），追加后缀
+        if ec_code.lower() in used_codes:
+            ec_code = f"EC{seq}-{rack.id.hex[:4]}"
+        used_codes.add(ec_code.lower())
+        rack.code = ec_code
+        slot_code = pos_to_slot.get(pos)
+        if slot_code:
+            rack.name = slot_code
 
 
 async def _free_soft_deleted_slot_identity(
@@ -478,6 +504,9 @@ class RackTemplateService:
                     result.errors.append(f"R{row_no}-C{col_no}: {exc}")
 
         await self.session.flush()
+        all_racks = await self.rack_repo.list_by_room(room_id)
+        await _sync_room_rack_seq_nos(room, all_racks)
+        await self.session.flush()
         return result
 
     async def unapply_from_room(
@@ -575,6 +604,24 @@ class RackService:
         self.device_repo = DeviceRepository(session)
         self.session = session
 
+    async def _power_by_rack_ids(self, rack_ids: list[uuid.UUID]) -> dict[uuid.UUID, float]:
+        from sqlalchemy import func
+
+        from app.models.device import Device
+
+        if not rack_ids:
+            return {}
+        stmt = (
+            select(Device.rack_id, func.coalesce(func.sum(Device.power), 0))
+            .where(
+                Device.rack_id.in_(rack_ids),
+                Device.deleted_at.is_(None),
+            )
+            .group_by(Device.rack_id)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return {rid: float(power or 0) for rid, power in rows if rid is not None}
+
     async def list(
         self, params: PaginationParams, room_id: uuid.UUID | None = None
     ) -> tuple[list[RackResponse], PaginationMeta]:
@@ -589,11 +636,13 @@ class RackService:
             search_fields=["code", "name"],
         )
         stats = await self.position_repo.stats_for_rack_ids([item.id for item in items])
+        power_map = await self._power_by_rack_ids([item.id for item in items])
         enriched = [
             _to_rack_response(
                 item,
                 occupied_u=stats.get(item.id, (0, 0))[0],
                 device_count=stats.get(item.id, (0, 0))[1],
+                total_power=power_map.get(item.id, 0.0),
             )
             for item in items
         ]
@@ -760,6 +809,9 @@ class RackService:
                 await _init_rack_positions(self.session, created, user_id)
                 result.created += 1
             await self.session.flush()
+            all_racks = await self.repo.list_by_room(room_id)
+            await _sync_room_rack_seq_nos(room, all_racks)
+            await self.session.flush()
             return result
 
         # Bulk: all / by_row / by_column
@@ -832,6 +884,9 @@ class RackService:
             result.created += 1
             existing_map[(row_no, col_no)] = created
 
+        await self.session.flush()
+        all_racks = await self.repo.list_by_room(room_id)
+        await _sync_room_rack_seq_nos(room, all_racks)
         await self.session.flush()
         return result
 
@@ -958,6 +1013,9 @@ class RackService:
         )
         created = await self.repo.create(entity)
         await _init_rack_positions(self.session, created, user_id)
+        all_racks = await self.repo.list_by_room(room_id)
+        await _sync_room_rack_seq_nos(room, all_racks)
+        await self.session.flush()
         rack = await self.repo.get_by_id_with_positions(created.id)
         assert rack is not None
         return _to_rack_response(rack)
@@ -1001,6 +1059,8 @@ class RackService:
                     raise ConflictError("Rack position already occupied", code=10002)
                 rack.row_no = new_row
                 rack.column_no = new_col
+                all_racks = await self.repo.list_by_room(rack.room_id)
+                await _sync_room_rack_seq_nos(room, all_racks)
         if payload.width is not None:
             rack.width = payload.width
         if payload.depth is not None:

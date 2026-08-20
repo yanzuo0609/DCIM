@@ -44,8 +44,19 @@ export function filterWiringNodesByLocation(
       if (!rooms.has(roomId) && !rooms.has(roomName)) return false
     }
     const rack = text(device?.rack_code)
-    if (rackStart && (!rack || collator.compare(rack, rackStart) < 0)) return false
-    if (rackEnd && (!rack || collator.compare(rack, rackEnd) > 0)) return false
+    const rackSeq = Number(device?.rack_seq_no)
+    const startAsSeq = Number(rackStart)
+    const endAsSeq = Number(rackEnd)
+    const startIsSeq = !!rackStart && Number.isFinite(startAsSeq) && String(startAsSeq) === rackStart
+    const endIsSeq = !!rackEnd && Number.isFinite(endAsSeq) && String(endAsSeq) === rackEnd
+    if (startIsSeq || endIsSeq) {
+      if (!Number.isFinite(rackSeq)) return false
+      if (startIsSeq && rackSeq < startAsSeq) return false
+      if (endIsSeq && rackSeq > endAsSeq) return false
+    } else {
+      if (rackStart && (!rack || collator.compare(rack, rackStart) < 0)) return false
+      if (rackEnd && (!rack || collator.compare(rack, rackEnd) > 0)) return false
+    }
     if (startU != null) {
       const u = Number(device?.u_position)
       const first = Number(startU)

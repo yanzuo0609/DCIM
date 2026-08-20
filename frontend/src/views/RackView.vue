@@ -97,6 +97,9 @@ const STYLE_THUMB_SLOTS = (() => {
 const auth = useAuthStore()
 const templates = ref<RackTemplate[]>([])
 const rooms = ref<Room[]>([])
+const selectedRows = ref<RackTemplate[]>([])
+const detailVisible = ref(false)
+const detailRow = ref<RackTemplate | null>(null)
 
 const canCreate = auth.hasPermission('rack:create')
 const canUpdate = auth.hasPermission('rack:update')
@@ -387,7 +390,7 @@ function openEditTemplate(row: RackTemplate) {
 
 async function submitTemplate() {
   if (!templateForm.code || !templateForm.name) {
-    ElMessage.warning('请填写编码和名称')
+    ElMessage.warning('请填写编号和名称')
     return
   }
   if (!templateForm.total_u || templateForm.total_u < 1) {
@@ -432,6 +435,31 @@ async function handleDeleteTemplate(row: RackTemplate) {
   await refreshTemplates()
 }
 
+function rowIndex(index: number) {
+  return index + 1
+}
+
+function openDetail(row: RackTemplate) {
+  detailRow.value = row
+  detailVisible.value = true
+}
+
+function templateDetailFields(row: RackTemplate) {
+  return [
+    { label: '名称', value: row.name },
+    { label: '编号', value: row.code || '—' },
+    { label: '唯一 ID', value: row.id },
+    { label: 'U 位', value: String(row.total_u) },
+    { label: '视觉样式', value: visualStyleLabel(row.visual_style) },
+    { label: '尺寸', value: `${row.width}×${row.depth} mm` },
+    {
+      label: '已应用机房',
+      value: isTemplateApplied(row) ? appliedRoomsLabel(row) : '未应用',
+    },
+    { label: '描述', value: row.description || '—' },
+  ]
+}
+
 onMounted(() => {
   void Promise.all([refreshTemplates(), loadRooms()])
 })
@@ -453,9 +481,23 @@ onMounted(() => {
         </div>
       </template>
 
-      <el-table :data="templates" stripe>
-        <el-table-column prop="code" label="编码" width="140" />
+      <el-table
+        :data="templates"
+        stripe
+        row-key="id"
+        @selection-change="(rows: RackTemplate[]) => (selectedRows = rows)"
+      >
+        <el-table-column type="selection" width="48" />
+        <el-table-column label="序号" width="72" align="center">
+          <template #default="{ $index }">{{ rowIndex($index) }}</template>
+        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="140" />
+        <el-table-column prop="code" label="编号" width="140" />
+        <el-table-column label="唯一 ID" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono-id">{{ row.id }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="total_u" label="U 位" width="80" />
         <el-table-column label="视觉样式" width="110">
           <template #default="{ row }">{{ visualStyleLabel(row.visual_style) }}</template>
@@ -476,6 +518,7 @@ onMounted(() => {
               <el-button type="primary" link>操作</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item @click="openDetail(row)">查看详细信息</el-dropdown-item>
                   <el-dropdown-item v-if="canUpdate" @click="openApply(row.id)">应用到机房</el-dropdown-item>
                   <el-dropdown-item v-if="canUpdate" @click="openEditTemplate(row)">编辑</el-dropdown-item>
                   <el-dropdown-item v-if="canDelete" divided @click="handleDeleteTemplate(row)">
@@ -489,6 +532,21 @@ onMounted(() => {
       </el-table>
     </el-card>
 
+    <el-dialog v-model="detailVisible" title="模板详细信息" width="560px">
+      <el-descriptions v-if="detailRow" :column="1" border>
+        <el-descriptions-item
+          v-for="item in templateDetailFields(detailRow)"
+          :key="item.label"
+          :label="item.label"
+        >
+          <span :class="{ 'mono-id': item.label === '唯一 ID' }">{{ item.value }}</span>
+        </el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button type="primary" @click="detailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="templateDialogVisible"
       :title="editingTemplateId ? '编辑机柜样式模板' : '新建机柜样式模板'"
@@ -498,7 +556,7 @@ onMounted(() => {
       <div class="create-layout">
         <div class="create-form">
           <el-form label-width="90px">
-            <el-form-item label="编码" required>
+            <el-form-item label="编号" required>
               <el-input v-model="templateForm.code" :disabled="!!editingTemplateId" placeholder="如 STD-42U" />
             </el-form-item>
             <el-form-item label="名称" required>
@@ -674,6 +732,12 @@ onMounted(() => {
   font-size: 12px;
   color: #909399;
   font-weight: normal;
+}
+
+.mono-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #606266;
 }
 
 .muted {

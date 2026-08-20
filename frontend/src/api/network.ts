@@ -31,8 +31,11 @@ export interface NetworkDeviceBrief {
   hostname: string
   rack_id?: string | null
   room_id?: string | null
+  datacenter_id?: string | null
   rack_code: string | null
+  rack_seq_no?: number | null
   room_name: string | null
+  datacenter_name?: string | null
   u_position: number | null
   ip_summary: string | null
   bmc_ip: string | null

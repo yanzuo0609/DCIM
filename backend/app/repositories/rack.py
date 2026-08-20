@@ -230,7 +230,7 @@ class RackRepository(BaseRepository[Rack]):
     async def room_stats_for_ids(
         self, room_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, dict[str, float | int]]:
-        """Per-room: rack_count, total_u (= Σ 模板U位), used_count, total_power (W).
+        """Per-room: rack_count, total_u (= Σ 模板U位), used_count, device_count, total_power (W).
 
         容量 total_u：每个已建机柜按其应用模板的 U 位数累计
         （无模板时回退为机柜自身 total_u）。
@@ -256,7 +256,13 @@ class RackRepository(BaseRepository[Rack]):
         )
         rack_rows = (await self.session.execute(rack_stmt)).all()
         stats: dict[uuid.UUID, dict[str, float | int]] = {
-            rid: {"rack_count": 0, "total_u": 0, "used_count": 0, "total_power": 0.0}
+            rid: {
+                "rack_count": 0,
+                "total_u": 0,
+                "used_count": 0,
+                "device_count": 0,
+                "total_power": 0.0,
+            }
             for rid in room_ids
         }
         for room_id, count, total_u in rack_rows:
@@ -278,18 +284,25 @@ class RackRepository(BaseRepository[Rack]):
         for room_id, count in (await self.session.execute(used_stmt)).all():
             stats[room_id]["used_count"] = int(count)
 
-        power_stmt = (
-            select(Rack.room_id, func.coalesce(func.sum(Device.power), 0))
+        # 机房内已上架设备总数：Device.rack_id 归属本机房机柜（与「已分配使用」同源）
+        device_stmt = (
+            select(
+                Rack.room_id,
+                func.count(Device.id),
+                func.coalesce(func.sum(Device.power), 0),
+            )
             .select_from(Device)
             .join(Rack, Rack.id == Device.rack_id)
             .where(
                 Rack.room_id.in_(room_ids),
                 Rack.deleted_at.is_(None),
                 Device.deleted_at.is_(None),
+                Device.rack_id.is_not(None),
             )
             .group_by(Rack.room_id)
         )
-        for room_id, power in (await self.session.execute(power_stmt)).all():
+        for room_id, devices, power in (await self.session.execute(device_stmt)).all():
+            stats[room_id]["device_count"] = int(devices or 0)
             stats[room_id]["total_power"] = float(power or 0)
 
         return stats

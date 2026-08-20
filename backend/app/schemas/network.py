@@ -138,8 +138,11 @@ class NetworkDeviceBrief(BaseModel):
     hostname: str
     rack_id: uuid.UUID | None = None
     room_id: uuid.UUID | None = None
+    datacenter_id: uuid.UUID | None = None
     rack_code: str | None
+    rack_seq_no: int | None = None
     room_name: str | None
+    datacenter_name: str | None = None
     u_position: int | None
     ip_summary: str | None
     bmc_ip: str | None

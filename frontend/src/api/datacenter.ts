@@ -12,7 +12,7 @@ export interface DataCenter {
 }
 
 export interface DataCenterPayload {
-  code: string
+  code?: string | null
   name: string
   location?: string | null
   description?: string | null

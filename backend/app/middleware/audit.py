@@ -1,15 +1,16 @@
-"""HTTP middleware that records mutating API calls into audit_log."""
+"""HTTP middleware that records mutating API calls into audit_log.
+
+Uses pure ASGI (not BaseHTTPMiddleware) so the request DB session commits and
+releases SQLite locks *before* audit writes — avoiding “database is locked”
+waits that exceed the frontend 30s timeout.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
 import uuid
-from typing import Callable
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.database import async_session_factory
 from app.core.security import verify_token
@@ -35,17 +36,20 @@ _UUID_RE = re.compile(
 )
 
 
-def _client_ip(request: Request) -> str | None:
-    forwarded = request.headers.get("x-forwarded-for")
+def _client_ip(scope: Scope) -> str | None:
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+    forwarded = headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip() or None
-    if request.client:
-        return request.client.host
+    client = scope.get("client")
+    if client:
+        return client[0]
     return None
 
 
-def _parse_identity(request: Request) -> tuple[uuid.UUID | None, str | None]:
-    auth = request.headers.get("authorization") or ""
+def _parse_identity(scope: Scope) -> tuple[uuid.UUID | None, str | None]:
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+    auth = headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
         return None, None
     token = auth[7:].strip()
@@ -103,41 +107,86 @@ def _resource_action(method: str, path: str) -> tuple[str, str, str | None]:
     return action, resource, resource_id
 
 
-class AuditLogMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        response = await call_next(request)
+def _should_audit(method: str, path: str) -> bool:
+    if method == "OPTIONS" or method not in _MUTATING:
+        return False
+    if any(path.startswith(p) for p in _SKIP_PREFIXES):
+        return False
+    if path in _SKIP_PATHS or path.startswith("/api/v1/svg/"):
+        return False
+    return True
 
-        method = request.method.upper()
-        path = request.url.path
 
-        if method == "OPTIONS" or method not in _MUTATING:
-            return response
-        if any(path.startswith(p) for p in _SKIP_PREFIXES):
-            return response
-        if path in _SKIP_PATHS or path.startswith("/api/v1/svg/"):
-            return response
+async def _write_audit(
+    *,
+    method: str,
+    path: str,
+    status_code: int,
+    user_id: uuid.UUID | None,
+    username: str | None,
+    ip_address: str | None,
+) -> None:
+    action, resource, resource_id = _resource_action(method, path)
+    detail = f"{method} {path} -> {status_code}"
+    async with async_session_factory() as session:
+        service = AuditService(session)
+        await service.log(
+            user_id=user_id,
+            username=username,
+            action=action,
+            resource=resource,
+            resource_id=resource_id,
+            method=method,
+            path=path[:255],
+            status_code=status_code,
+            detail=detail,
+            ip_address=ip_address,
+        )
+        await session.commit()
+
+
+class AuditLogMiddleware:
+    """Pure ASGI middleware — audit runs only after the inner app finishes."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = str(scope.get("method") or "").upper()
+        path = scope.get("path") or ""
+        audit = _should_audit(method, path)
+        status_code = 500
+        user_id: uuid.UUID | None = None
+        username: str | None = None
+        ip_address: str | None = None
+
+        if audit:
+            user_id, username = _parse_identity(scope)
+            ip_address = _client_ip(scope)
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message.get("status") or 500)
+            await send(message)
 
         try:
-            user_id, username = _parse_identity(request)
-            action, resource, resource_id = _resource_action(method, path)
-            # login has no bearer yet — keep username from path only
-            detail = f"{method} {path} -> {response.status_code}"
-            async with async_session_factory() as session:
-                service = AuditService(session)
-                await service.log(
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            if not audit:
+                return
+            try:
+                await _write_audit(
+                    method=method,
+                    path=path,
+                    status_code=status_code,
                     user_id=user_id,
                     username=username,
-                    action=action,
-                    resource=resource,
-                    resource_id=resource_id,
-                    method=method,
-                    path=path[:255],
-                    status_code=response.status_code,
-                    detail=detail,
-                    ip_address=_client_ip(request),
+                    ip_address=ip_address,
                 )
-                await session.commit()
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to write audit log for %s %s", method, path)
-
-        return response
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to write audit log for %s %s", method, path)

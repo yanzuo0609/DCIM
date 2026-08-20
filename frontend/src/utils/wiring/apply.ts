@@ -753,12 +753,7 @@ export function applyWiringRule(
     return { links: created, report }
   }
 
-  if (allocation === 'MANUAL' && !cfg.pairs?.length) {
-    pushIssue(report, 'error', 'ERR_NO_FREE_PORT', '手动分配模式请先指定端口对')
-    report.ok = false
-    return { links: created, report }
-  }
-
+  // MANUAL 无 pairs：按手动定义的角色/位置/策略走自动配对引擎
   const { sourceNodes, targetNodes } = resolveMatchedNodes(cfg, nodes, conn)
   alignAutomaticAccessRuleToHardware(cfg, sourceNodes)
   maxTotal = Math.max(

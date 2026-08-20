@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     debug: bool = True
     api_v1_prefix: str = "/api/v1"
 
-    database_url: str = "sqlite+aiosqlite:///./rackdcim.db"
+    database_url: str = f"sqlite+aiosqlite:///{(_BACKEND_ROOT / 'rackdcim.db').as_posix()}"
 
     secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
