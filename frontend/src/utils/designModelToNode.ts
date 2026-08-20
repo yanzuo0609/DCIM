@@ -56,6 +56,7 @@ import {
 } from '@/utils/serverModelAttrs'
 import {
   normalizeSecurityFormFactor,
+  normalizeSecurityDeviceType,
   readSecurityIfaceSlots,
   securitySlotsToZones,
   syncSecurityDerivedAttrs,
@@ -441,6 +442,7 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
   if (kind === 'security') {
     const heightSec = normalizeSecurityFormFactor(attrs.chassis_height_u ?? attrs.form_factor_u ?? heightU)
     const layout = defaultPortLayout('security', undefined, heightSec)
+    attrs.security_device_type = normalizeSecurityDeviceType(model.subtype || attrs.security_device_type)
     syncSecurityDerivedAttrs(attrs)
     const ifaceSlots = readSecurityIfaceSlots(attrs)
     let zones: SecurityZoneInput[]
@@ -573,17 +575,34 @@ function buildServerIfaceSlotDef(slot: ServerIfaceSlotAttr, _flexSpeed: ServerFl
 }
 
 function buildPcieSlotDef(slot: ServerPcieSlotAttr, flexSpeed: ServerFlexSpeed): LayoutSlotDef {
-  const n = Math.max(0, Number(slot.flex_ports) || 0)
-  const groups = n > 0 ? [namedGroup(flexSpeed === '25ge' ? '25g' : '10g', n, `pcie${slot.index}`, 'card')] : []
+  const n = Math.max(0, Number(slot.port_count ?? slot.flex_ports) || 0)
+  const speed = normalizeFlexSpeed(slot.speed || flexSpeed)
+  const portType: PortType = speed === '1ge' ? '1g' : speed === '10ge' ? '10g' : speed === '25ge' ? '25g' : '40_100g'
+  const isNic = slot.card_type === 'nic_copper' || slot.card_type === 'nic_optical'
+  const groups = isNic && n > 0 ? [namedGroup(portType, n, `pcie${slot.index}`, 'card')] : []
+  const kind: ServerSlotKind = slot.card_type === 'raid'
+    ? 'raid'
+    : isNic && n > 0
+      ? portType === '1g'
+        ? 'nic_1g'
+        : 'nic_10g'
+      : 'blank'
+  const cardLabel = slot.card_type === 'raid'
+    ? `RAID ${String(slot.raid_level || 'raid1').toUpperCase()}`
+    : slot.card_type === 'nic_copper'
+      ? `${speed.replace('ge', 'GE')} 电口×${n}`
+      : slot.card_type === 'nic_optical'
+        ? `${speed.replace('ge', 'GE')} 光口×${n}`
+        : '空挡板'
   return {
-    server_slot_kind: n > 0 ? 'nic_10g' : 'blank',
+    server_slot_kind: kind,
     orientation: 'vertical',
     groups,
     layout_x: null,
     layout_y: null,
     layout_w: null,
     layout_h: null,
-    zone_label: `PCIE${slot.index}`,
+    zone_label: `PCIe${slot.index} · ${cardLabel}`,
   }
 }
 
@@ -707,7 +726,7 @@ export function annotatePortPurposes(
       groupRole !== 'uplink'
     ) {
       const lab = String(p.label || '').toUpperCase()
-      if (!lab.includes('IPMI') && !lab.includes('BMC') && pt !== 'bmc') {
+      if (!lab.includes('IPMI') && !lab.includes('BMC')) {
         p.purpose = 'SERVER'
         continue
       }

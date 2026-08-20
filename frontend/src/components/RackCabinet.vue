@@ -140,7 +140,7 @@ const layoutTableRows = computed<LayoutTableRow[]>(() => {
     }
 
     // continuation
-    const offset = spanMeta ? spanMeta.offset + 1 : 0
+    const offset: number = spanMeta ? spanMeta.offset + 1 : 0
     if (spanMeta) spanMeta = { ...spanMeta, offset }
 
     let showIp = false
@@ -216,7 +216,7 @@ function formatPower(value: number | null | undefined) {
   return `${Math.round(value)}W`
 }
 
-function rowStyle(slot: RackLayoutSlot, ipKind?: IpCellKind) {
+function rowStyle(_slot: RackLayoutSlot, ipKind?: IpCellKind) {
   const base = unitPx.value
   // 1U 双行 IP 略增高，避免挤在一起
   const h = ipKind === 'both' ? Math.max(base, 36) : base

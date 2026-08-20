@@ -51,8 +51,11 @@ function toPortView(node: NetworkNode, port: FramePort, occupied: Set<string>): 
   }
   const keyId = `${node.id}:${port.id}`
   const keyLabel = port.label ? `${node.id}:${port.label}` : ''
+  // reserved 表示端口被预留给某种用途，并不等同于已经占用。
+  // 历史交换机模型曾把整块 DOWNLINK 板卡都写成 reserved=true；如果在
+  // 适配层直接排除，会把真实存在的 48 个业务口全部计算成 0。端口能否
+  // 参与当前规则由 purpose / reserved_for 的候选池过滤负责。
   const free =
-    !port.reserved &&
     !port.peer_node_id &&
     !occupied.has(keyId) &&
     !(keyLabel && occupied.has(keyLabel))
@@ -131,7 +134,7 @@ export function refreshFreeFlags(devices: RuleDeviceView[], occupied: Set<string
   for (const d of devices) {
     for (const p of d.ports) {
       const key = `${d.node.id}:${p.port.id}`
-      p.free = !p.port.reserved && !p.port.peer_node_id && !occupied.has(key)
+      p.free = !p.port.peer_node_id && !occupied.has(key)
     }
   }
 }

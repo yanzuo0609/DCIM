@@ -2,7 +2,7 @@
  * 场景 A1/A2/A3 — 接入 → 服务器/安全设备
  *
  * A2/A3 容量原则（按端口，不按设备数对齐）：
- * - 每台服务器的上联分别接到源组内每台交换机（默认每交换机 link_count 条）
+ * - link_count 表示每台目标设备的总链路数，链路在源交换机之间轮询分散
  * - 是否够接：看交换机下联空闲口总数 ≥ 服务器数 × 每台上联数
  * - 只要交换机还有空闲口就可继续接入；单台服务器口不够时跳过/部分接入并告警
  */
@@ -14,6 +14,7 @@ import {
   linkPair,
   listFilteredPorts,
   pickFilteredPort,
+  pickTargetPortsForSwitchGroup,
   serverNicPred,
 } from '@/utils/wiring/algorithms'
 import { pushIssue } from '@/utils/wiring/constraints'
@@ -25,7 +26,8 @@ function srcAccessSpeed(sources: RuleDeviceView[]): '10G' | '1G' {
 }
 
 function sortByName(list: RuleDeviceView[]): RuleDeviceView[] {
-  return [...list].sort((a, b) => a.node.name.localeCompare(b.node.name, 'zh-CN'))
+  const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+  return [...list].sort((a, b) => collator.compare(a.node.name, b.node.name))
 }
 
 function countSwitchDownlinks(
@@ -86,54 +88,48 @@ function wireServerToSwitchGroup(
   ctx: AlgoCtx,
   sources: RuleDeviceView[],
   tgt: RuleDeviceView,
-  rounds: number,
+  plannedLinks: number,
   speed: '10G' | '1G',
 ): number {
   const srcs = sortByName(sources)
   let total = 0
-  let linkedSwitches = 0
+  const linkedSourceIds = new Set<string>()
+  const desired = Math.max(1, plannedLinks)
+  const spreadPorts = pickTargetPortsForSwitchGroup(ctx, tgt, desired, speed)
 
-  for (let si = 0; si < srcs.length; si++) {
-    const src = srcs[si]
-    let madeToThis = 0
-    for (let r = 0; r < rounds; r++) {
-      const sp = pickFilteredPort(ctx, src, 'source', downlinkPred(speed))
-      if (!sp) {
-        if (!total && !madeToThis) {
-          pushIssue(
-            ctx.report,
-            'warning',
-            'ERR_NO_FREE_PORT',
-            `${src.node.name} 下联口已用尽，无法再接入 ${tgt.node.name}`,
-            src.node.id,
-          )
-        }
-        break
-      }
-      const tp = pickFilteredPort(ctx, tgt, 'target', serverNicPred(speed))
-      if (!tp) {
-        pushIssue(
-          ctx.report,
-          'warning',
-          'ERR_NO_MATCHING_INTERFACE',
-          `${tgt.node.name} 匹配 ${speed} 口不足，已接到 ${linkedSwitches}/${srcs.length} 台交换机`,
-          tgt.node.id,
-        )
-        return total
-      }
-      if (
-        linkPair(ctx, src, sp, tgt, tp, {
-          path: si % 2 === 0 ? 'A' : 'B',
-          lagGroup: `LAG-${tgt.node.name}`,
-        })
-      ) {
-        madeToThis += 1
-        total += 1
-      } else {
-        break
-      }
+  for (let linkIndex = 0; linkIndex < desired; linkIndex++) {
+    // 每条冗余链路选择不同的上联设备，并优先选择剩余口最多的设备，
+    // 使连续多台服务器在所有上联交换机之间自动均衡。
+    const selected = srcs
+      .map((src, sourceIndex) => ({
+        src,
+        sourceIndex,
+        freeCount: listFilteredPorts(ctx, src, 'source', downlinkPred(speed)).length,
+        port: pickFilteredPort(ctx, src, 'source', downlinkPred(speed)),
+      }))
+      .filter((item) => !linkedSourceIds.has(item.src.node.id) && item.port && item.freeCount > 0)
+      .sort((a, b) => b.freeCount - a.freeCount || a.sourceIndex - b.sourceIndex)[0] || null
+    if (!selected) break
+    const tp = spreadPorts?.[linkIndex] || pickFilteredPort(ctx, tgt, 'target', serverNicPred(speed))
+    if (!tp) {
+      pushIssue(
+        ctx.report,
+        'warning',
+        'ERR_NO_MATCHING_INTERFACE',
+        `${tgt.node.name} 匹配 ${speed} 口不足，计划 ${desired} 条、已生成 ${total} 条`,
+        tgt.node.id,
+      )
+      break
     }
-    if (madeToThis > 0) linkedSwitches += 1
+    if (
+      linkPair(ctx, selected.src, selected.port!, tgt, tp, {
+        path: selected.sourceIndex % 2 === 0 ? 'A' : 'B',
+        lagGroup: ctx.cfg.lag === false ? null : `LAG-${tgt.node.name}`,
+      })
+    ) {
+      linkedSourceIds.add(selected.src.node.id)
+      total += 1
+    }
   }
 
   if (!total) {
@@ -148,12 +144,12 @@ function wireServerToSwitchGroup(
         : `${tgt.node.name} 无可用 ${speed} 业务口（交换机仍有 ${swFree} 个下联空闲口；服务器剩余匹配口 ${nicFree}）`,
       tgt.node.id,
     )
-  } else if (linkedSwitches < srcs.length) {
+  } else if (ctx.cfg.device_diversity === 'REQUIRED' && srcs.length > 1 && linkedSourceIds.size < Math.min(srcs.length, desired)) {
     pushIssue(
       ctx.report,
       'warning',
       'ERR_INSUFFICIENT_PORTS',
-      `${tgt.node.name} 仅上联到 ${linkedSwitches}/${srcs.length} 台交换机（按端口尽力接入，不要求设备数对齐）`,
+      `${tgt.node.name} 计划跨 ${Math.min(srcs.length, desired)} 台交换机，实际仅使用 ${linkedSourceIds.size} 台，冗余域未完全满足`,
       tgt.node.id,
     )
   }
@@ -165,14 +161,14 @@ function runA2(ctx: AlgoCtx, sources: RuleDeviceView[], targets: RuleDeviceView[
   const tgt = targets[0]
   const speed = srcAccessSpeed(sources)
   const srcs = sortByName(sources)
-  const perServer = srcs.length * Math.max(1, rounds)
+  const perServer = Math.max(1, rounds)
   const swFree = countSwitchDownlinks(ctx, srcs, speed)
   if (swFree < perServer) {
     pushIssue(
       ctx.report,
       'warning',
       'ERR_INSUFFICIENT_PORTS',
-      `交换机下联空闲口 ${swFree} < 本服务器计划上联 ${perServer}（${srcs.length} 台×${Math.max(1, rounds)} 条），将按剩余端口尽力接入`,
+      `交换机下联空闲口 ${swFree} < 本服务器计划上联 ${perServer} 条，将按剩余端口尽力接入`,
     )
   }
   return wireServerToSwitchGroup(ctx, srcs, tgt, Math.max(1, rounds), speed)
@@ -187,7 +183,7 @@ function runA3(ctx: AlgoCtx, sources: RuleDeviceView[], targets: RuleDeviceView[
   const tgts = sortByName(targets)
   const speed = srcAccessSpeed(sources)
   const r = Math.max(1, rounds)
-  const perServer = srcs.length * r
+  const perServer = r
   const swFree = countSwitchDownlinks(ctx, srcs, speed)
   const needed = tgts.length * perServer
 

@@ -20,9 +20,10 @@ export type SwitchSlotCardType =
   | 'blank'
 
 /** 核心/汇聚业务接口板 */
-export type SwitchIfaceBoardKind = '10ge' | '25ge' | '40ge' | '100ge' | '400ge'
+export type SwitchIfaceBoardKind = '1ge' | '10ge' | '25ge' | '40ge' | '100ge' | '400ge'
 
 export const SWITCH_IFACE_BOARD_OPTIONS: { value: SwitchIfaceBoardKind; label: string }[] = [
+  { value: '1ge', label: '千兆以太网电接口板' },
   { value: '10ge', label: '万兆以太网光接口板' },
   { value: '25ge', label: '25GE 以太网光接口板' },
   { value: '40ge', label: '40GE 光接口板' },
@@ -60,15 +61,21 @@ export const CHASSIS_DEMO = {
   bayH: 14,
   topMin: 12,
   framePad: 5,
-  maxW: 420,
+  maxW: 860,
   psuW: 18,
   psuH: 26,
 }
 
 /** 千兆/万兆 1U 面板演示：正面与背面同宽同高 */
 export const ACCESS_DEMO = {
-  height: 86,
-  maxW: 640,
+  height: 79,
+  maxW: 860,
+}
+
+/** 19 英寸机架面板的真实宽高比：482.6mm 宽，每 U 44.45mm 高。 */
+export function rackPanelAspect(heightU: number): string {
+  const u = Math.max(1, Math.min(48, Math.trunc(heightU) || 1))
+  return `482.6 / ${44.45 * u}`
 }
 
 export function chassisDemoHeight(heightU: number, _expansionSlots?: number): number {
@@ -216,6 +223,7 @@ export function isCoreOrAggRole(role: string | null | undefined): boolean {
 }
 
 export function ifaceBoardToSlotCard(kind: SwitchIfaceBoardKind): SwitchSlotCardType {
+  if (kind === '1ge') return 'gigabit'
   if (kind === '25ge') return '25g'
   if (kind === '40ge') return '40g'
   if (kind === '100ge') return '100g'
@@ -224,6 +232,7 @@ export function ifaceBoardToSlotCard(kind: SwitchIfaceBoardKind): SwitchSlotCard
 }
 
 export function slotCardToIfaceBoard(card: SwitchSlotCardType): SwitchIfaceBoardKind {
+  if (card === 'gigabit') return '1ge'
   if (card === '25g') return '25ge'
   if (card === '40g') return '40ge'
   if (card === '100g') return '100ge'
@@ -266,11 +275,23 @@ export const SWITCH_SLOT_CARD_OPTIONS: { value: SwitchSlotCardType; label: strin
 ]
 
 export const SWITCH_SLOT_PURPOSE_OPTIONS: { value: SwitchSlotPurpose; label: string }[] = [
-  { value: 'DOWNLINK', label: 'DOWNLINK' },
-  { value: 'UPLINK', label: 'UPLINK' },
-  { value: 'DOWNLINK_UPLINK', label: 'DOWNLINK/UPLINK' },
+  { value: 'DOWNLINK', label: '业务接口 / 下联 / DOWNLINK' },
+  { value: 'UPLINK', label: '上联接口 / UPLINK' },
+  { value: 'DOWNLINK_UPLINK', label: '下联/上联 / DOWNLINK/UPLINK' },
   { value: 'BLANK', label: '空白' },
 ]
+
+export function normalizeSwitchSlotPurpose(value: unknown): SwitchSlotPurpose {
+  const raw = String(value || 'DOWNLINK').trim()
+  const upper = raw.toUpperCase()
+  const compact = upper.replace(/[\s_\-/]+/g, '')
+  if (upper === 'BLANK' || compact.includes('空白')) return 'BLANK'
+  const hasDown = upper.includes('DOWNLINK') || compact.includes('下联') || compact.includes('业务接口')
+  const hasUp = upper.includes('UPLINK') || compact.includes('上联') || compact.includes('上连接口')
+  if (upper === 'DOWNLINK_UPLINK' || (hasDown && hasUp)) return 'DOWNLINK_UPLINK'
+  if (hasUp) return 'UPLINK'
+  return 'DOWNLINK'
+}
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
@@ -530,6 +551,9 @@ export const SWITCH_PORT_FIBER_MODE_OPTIONS = [
 export function defaultPortSpecForKind(
   kind: SwitchIfaceBoardKind,
 ): Omit<SwitchBoardPortAttr, 'index' | 'id' | 'code'> {
+  if (kind === '1ge') {
+    return { iface_type: 'copper', speed: '1GE', module: 'RJ45', connector: 'RJ45', fiber_mode: 'na' }
+  }
   if (kind === '25ge') {
     return { iface_type: 'optical', speed: '25GE', module: 'SFP28', connector: 'LC', fiber_mode: 'mm' }
   }
@@ -547,7 +571,7 @@ export function defaultPortSpecForKind(
 
 export function suggestPortSpecBySpeed(speed: string): Partial<SwitchBoardPortAttr> {
   if (speed === '1GE') {
-    return { module: 'SFP', connector: 'LC', fiber_mode: 'mm', iface_type: 'optical' }
+    return { module: 'RJ45', connector: 'RJ45', fiber_mode: 'na', iface_type: 'copper' }
   }
   if (speed === '25GE') {
     return { module: 'SFP28', connector: 'LC', fiber_mode: 'mm', iface_type: 'optical' }
@@ -670,6 +694,7 @@ export function switchPortFieldLabel(
 }
 
 export const IFACE_BOARD_KIND_SHORT: Record<SwitchIfaceBoardKind, string> = {
+  '1ge': '1GE',
   '10ge': '10GE',
   '25ge': '25GE',
   '40ge': '40GE',
@@ -682,6 +707,7 @@ export function isIfaceBoardKind(v: string): v is SwitchIfaceBoardKind {
 }
 
 export function ifaceKindToPortType(kind: SwitchIfaceBoardKind): string {
+  if (kind === '1ge') return '1g'
   if (kind === '25ge') return '25g'
   if (kind === '40ge') return '40g'
   if (kind === '100ge') return '100g'
@@ -691,6 +717,7 @@ export function ifaceKindToPortType(kind: SwitchIfaceBoardKind): string {
 
 export function portTypeToIfaceKind(raw: string | null | undefined): SwitchIfaceBoardKind {
   const t = String(raw || '').toLowerCase()
+  if (t === '1g' || t === '1ge') return '1ge'
   if (t === '25g' || t === '25ge') return '25ge'
   if (t === '40g' || t === '40ge') return '40ge'
   if (t === '100g' || t === '40_100g' || t === '100ge') return '100ge'
@@ -708,11 +735,10 @@ export function normalizeIfaceBoards(raw: unknown, slotCount: number): SwitchIfa
     const src = item as Record<string, unknown>
     const slot = Math.trunc(Number(src.slot_index) || 0)
     if (slot < 1 || slot > n || used.has(slot)) continue
-    let kind = String(src.kind || '')
-    if (!isIfaceBoardKind(kind)) {
-      kind = slotCardToIfaceBoard(String(src.card_type || 'ten_gigabit') as SwitchSlotCardType)
-    }
-    if (!isIfaceBoardKind(kind)) kind = '10ge'
+    const rawKind = String(src.kind || '')
+    const kind: SwitchIfaceBoardKind = isIfaceBoardKind(rawKind)
+      ? rawKind
+      : slotCardToIfaceBoard(String(src.card_type || 'ten_gigabit') as SwitchSlotCardType)
     used.add(slot)
     const portCount = clamp(Number(src.port_count) || 48, 1, 128)
     out.push({
@@ -1051,8 +1077,7 @@ export function normalizeSwitchSlots(
     if (!['gigabit', 'ten_gigabit', '25g', '40g', '100g', '400g', 'blank'].includes(card)) {
       card = 'ten_gigabit'
     }
-    let purpose = String(src.purpose || 'DOWNLINK') as SwitchSlotPurpose
-    if (!['DOWNLINK', 'UPLINK', 'DOWNLINK_UPLINK', 'BLANK'].includes(purpose)) purpose = 'DOWNLINK'
+    let purpose = normalizeSwitchSlotPurpose(src.purpose)
     if (card === 'blank') purpose = 'BLANK'
     let portCount = Number(src.port_count) || 0
     let mpoCount = Number(src.mpo_count) || 0
@@ -1098,9 +1123,6 @@ export function defaultNetworkSwitchAttributes(role: SwitchSubtype = 'gigabit'):
   const slots = defaultSwitchSlots(role)
   const downlinkPorts = slots
     .filter((s) => s.purpose === 'DOWNLINK' || s.purpose === 'DOWNLINK_UPLINK')
-    .reduce((a, s) => a + effectivePortCount(s), 0)
-  const uplinkPorts = slots
-    .filter((s) => s.purpose === 'UPLINK')
     .reduce((a, s) => a + effectivePortCount(s), 0)
   const attrs: Record<string, unknown> = {
     switch_role: role === 'aggregation' ? 'aggregation' : role,
@@ -1308,7 +1330,7 @@ function flattenSlotPorts(slots: SwitchSlotAttr[], uplink: boolean): unknown[] {
     const ports = Array.isArray(s.ports) ? s.ports : []
     for (const p of ports) {
       if (!p || typeof p !== 'object') continue
-      out.push({ ...(p as Record<string, unknown>), index: out.length })
+      out.push({ ...(p as unknown as Record<string, unknown>), index: out.length })
     }
   }
   return out

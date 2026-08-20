@@ -184,6 +184,22 @@ class NetworkDesignService:
             updated_at=project.updated_at,
         )
 
+    async def _repair_model_root_folder(self, project: NetworkProject) -> bool:
+        """Clear a stale model-folder reference left behind by legacy soft deletes."""
+        if project.model_root_folder_id is None:
+            return False
+
+        from app.models.network_model_design import NetworkModelFolder
+
+        folder = await self.session.get(NetworkModelFolder, project.model_root_folder_id)
+        if folder is not None and folder.deleted_at is None:
+            return False
+
+        project.model_root_folder_id = None
+        await self.session.flush()
+        await self.session.refresh(project)
+        return True
+
     async def list_projects(
         self, params: PaginationParams
     ) -> tuple[list[NetworkProjectResponse], PaginationMeta]:
@@ -208,15 +224,21 @@ class NetworkDesignService:
             pages=math.ceil(total / params.page_size) if total else 0,
         )
         responses: list[NetworkProjectResponse] = []
+        repaired = False
         for item in items:
+            repaired = await self._repair_model_root_folder(item) or repaired
             topo = await self.project_repo.get_primary_topology(item.id)
             responses.append(self._to_project_response(item, topo.id if topo else None))
+        if repaired:
+            await self.session.commit()
         return responses, pagination
 
     async def get_project(self, project_id: uuid.UUID) -> NetworkProjectResponse:
         entity = await self.project_repo.get_by_id(project_id)
         if not entity:
             raise NotFoundError("Network project not found")
+        if await self._repair_model_root_folder(entity):
+            await self.session.commit()
         topo = await self.project_repo.get_primary_topology(project_id)
         return self._to_project_response(entity, topo.id if topo else None)
 

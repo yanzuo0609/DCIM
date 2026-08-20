@@ -97,6 +97,38 @@ export function purposeFromGroupRole(
   return null
 }
 
+/**
+ * 将模型、导入文件和人工输入中的中英文用途名称归一到规则引擎 Purpose。
+ * 接入交换机的“业务接口/下联/DOWNLINK”是同一接口板；“上联/UPLINK”同理。
+ */
+export function normalizePortPurposeAlias(
+  value: string | null | undefined,
+  kind?: NetworkNode['kind'] | null,
+): string | null {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+  const upper = raw.toUpperCase()
+  const compact = upper.replace(/[\s_\-/]+/g, '')
+  if (upper.includes('PEER') || upper.includes('堆叠')) return 'PEER'
+  if (upper.includes('DAD') || upper.includes('KEEPALIVE') || upper.includes('心跳')) return 'DAD'
+  if (
+    upper.includes('UPLINK') ||
+    compact.includes('上联') ||
+    compact.includes('上连接口')
+  ) return 'UPLINK'
+  if (
+    upper.includes('DOWNLINK') ||
+    compact.includes('下联') ||
+    compact.includes('业务接口') ||
+    compact === '业务'
+  ) {
+    return kind === 'server' || kind === 'security' ? 'SERVER' : 'DOWNLINK'
+  }
+  if (upper.includes('MGMT') || upper.includes('BMC') || compact.includes('管理')) return 'MGMT'
+  if (upper.includes('SERVER') || compact.includes('服务器')) return 'SERVER'
+  return upper
+}
+
 /** 端口 purpose：显式 > group.role > group_id/zone 启发式 */
 export function resolvePortPurpose(
   purpose: string | null | undefined,
@@ -105,14 +137,16 @@ export function resolvePortPurpose(
   groupRole?: InterfaceGroupRole | null,
   kind?: NetworkNode['kind'] | null,
 ): string | null {
-  if (purpose) return String(purpose).toUpperCase()
+  if (purpose) return normalizePortPurposeAlias(purpose, kind)
   const fromRole = purposeFromGroupRole(groupRole, kind)
   if (fromRole) return fromRole
   const hay = `${groupId || ''} ${zoneLabel || ''}`.toUpperCase()
   if (hay.includes('PEER') || hay.includes('PEER-LINK')) return 'PEER'
   if (hay.includes('DAD') || hay.includes('KEEPALIVE') || hay.includes('心跳')) return 'DAD'
-  if (hay.includes('UPLINK') || hay.includes('上联')) return 'UPLINK'
-  if (hay.includes('DOWNLINK') || hay.includes('下联')) return 'DOWNLINK'
+  if (hay.includes('UPLINK') || hay.includes('上联') || hay.includes('上连接口')) return 'UPLINK'
+  if (hay.includes('DOWNLINK') || hay.includes('下联') || hay.includes('业务接口')) {
+    return kind === 'server' || kind === 'security' ? 'SERVER' : 'DOWNLINK'
+  }
   if (hay.includes('MGMT') || hay.includes('管理')) return 'MGMT'
   if (hay.includes('SERVER') || hay.includes('业务') || hay.includes('DOWN')) return 'SERVER'
   return null

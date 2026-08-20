@@ -23,7 +23,6 @@ import {
 } from '@/api/network'
 import { layoutSwitchFrontPanel, normalizeGigabitUplinkCount, normalizeTenGigabitUplinkCount } from '@/utils/switchFrontPanel'
 import {
-  applyServerFormFactor,
   defaultServerSlotsDef,
   layoutServerRearPanel,
   newServerSlotDef,
@@ -303,10 +302,12 @@ function slotBandLabel(slot: LayoutSlotDef, idx: number): string {
   if (groups.length === 1 && groups[0].role === 'card') {
     return `板卡 ${idx + 1}`
   }
-  if (groups.length === 1 && groups[0].role === 'uplink') return '上联'
+  if (groups.length === 1 && groups[0].role === 'uplink') return '上联接口 / UPLINK'
   if (groups.every((g) => g.role === 'main' || g.role == null)) {
     if (groups.some((g) => g.role === 'main')) {
-      return groups[0]?.port_type === '1g' ? '电口' : '光口'
+      return groups[0]?.port_type === '1g'
+        ? '业务接口 / DOWNLINK（电口）'
+        : '业务接口 / DOWNLINK（光口）'
     }
   }
   if (groups.some((g) => g.role === 'uplink') && groups.some((g) => g.role === 'main')) return '接口区'
@@ -401,7 +402,7 @@ export function deviceFramePixels(rackWidthMm = RACK_WIDTH_MM, heightU = 1) {
   }
 }
 
-export function defaultSlotsDef(kind: NetworkNodeKind, slotCount?: number): LayoutSlotDef[] {
+export function defaultSlotsDef(kind: NetworkNodeKind, _slotCount?: number): LayoutSlotDef[] {
   if (kind === 'switch') {
     return buildSwitchSlotsDef({
       subtype: 'gigabit',

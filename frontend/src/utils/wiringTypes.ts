@@ -17,7 +17,23 @@ export type ConnectionType =
   | 'MGMT'
 export type SpeedMode = 'EXACT' | 'MIN'
 export type PairingMode = 'PER_SOURCE_TARGET' | 'POOL'
-export type PortPurpose = 'UPLINK' | 'DOWNLINK' | 'MGMT' | 'PEER' | 'DAD' | 'SERVER' | 'OTHER'
+export type PortPurpose =
+  | 'UPLINK'
+  | 'DOWNLINK'
+  | 'MGMT'
+  | 'PEER'
+  | 'DAD'
+  | 'SERVER'
+  | 'SERVICE'
+  | 'DATA'
+  | 'INSIDE'
+  | 'OUTSIDE'
+  | 'TRUST'
+  | 'UNTRUST'
+  | 'DMZ'
+  | 'HA'
+  | 'SYNC'
+  | 'OTHER'
 /** 端口池：关联模型板卡光口 / 40/100G 上联口 */
 export type PortPool = 'AUTO' | 'OPTICAL' | 'UPLINK'
 export type DiversityLevel = 'REQUIRED' | 'OPTIONAL' | 'OFF'
@@ -25,6 +41,25 @@ export type RedundancyMode = 'NONE' | 'A_B'
 export type LagMode = 'STATIC' | 'LACP'
 export type DistanceMode = 'AUTO' | 'FIXED'
 export type CableLengthMode = 'AUTO' | 'FIXED'
+export type RuleCategory =
+  | 'CORE_AGG_TO_10G'
+  | 'TEN_GIG_TO_GIG'
+  | 'TEN_GIG_TO_ENDPOINT'
+  | 'GIG_TO_ENDPOINT'
+  | 'BMC_TO_SERVER'
+  | 'SWITCH_STACK_PEER_DAD'
+  | 'CORE_AGG_INTERCONNECT'
+  | 'CUSTOM'
+export type EndpointConnectStrategy =
+  | 'ROUND_ROBIN_ASC'
+  | 'DEVICE_ASC'
+  | 'DEVICE_DESC'
+  | 'SLOT_ROUND_ROBIN'
+  | 'SAME_SLOT_ASC'
+  | 'SAME_NUMBER'
+  | 'CROSS'
+  | 'FULL_MESH'
+  | 'MANUAL'
 /** 端口分配模式：AUTO 场景配对；MANUAL 仅 pairs；HYBRID 先预览可改口 */
 export type AllocationMode = 'AUTO' | 'MANUAL' | 'HYBRID'
 /** 候选口排序/选取策略 */
@@ -33,6 +68,12 @@ export type PortSelectPolicy = 'MIN_ASC' | 'MAX_DESC' | 'SAME_NUMBER' | 'SLOT_SP
 export type PortMediaFilter = string
 export type MediaKind =
   | 'AUTO'
+  | 'MPO_MPO_OS2'
+  | 'MPO_MPO_OM34'
+  | 'LC_LC_OM34'
+  | 'LC_LC_OS2'
+  | 'MPO_LC_BREAKOUT'
+  | 'CUSTOM_SYNC'
   | 'DAC'
   | 'AOC'
   | 'FIBER_MM'
@@ -40,6 +81,19 @@ export type MediaKind =
   | 'MPO'
   | 'COPPER'
   | 'BREAKOUT_1X4'
+
+/** 面向真实综合布线场景的规则模板；CUSTOM 保留完全手工定义能力。 */
+export type WiringScenarioTemplate =
+  | 'CORE_TO_TEN_GIG'
+  | 'TEN_GIG_TO_GIG'
+  | 'TEN_GIG_TO_SERVER'
+  | 'GIG_TO_SERVER'
+  | 'SWITCH_TO_SECURITY'
+  | 'BMC_TO_SERVER'
+  | 'BMC_TO_SECURITY'
+  | 'SWITCH_PEER'
+  | 'CORE_INTERCONNECT'
+  | 'CUSTOM'
 
 export interface WiringPair {
   source_node_id: string
@@ -49,8 +103,17 @@ export interface WiringPair {
 }
 
 export interface WiringRuleConfig {
+  /** 规则表头分类，用于规则库检索和场景归类。 */
+  rule_category?: RuleCategory
+  /** 新版规则设计器选择的业务场景。 */
+  scenario_template?: WiringScenarioTemplate
   source_role?: FabricRole | null
   target_role?: FabricRole | null
+  source_roles?: FabricRole[]
+  target_roles?: FabricRole[]
+  /** 自动场景的实例硬件分类过滤，由模型属性推导。 */
+  source_device_types?: string[]
+  target_device_types?: string[]
   /** 源设备组（可多选） */
   source_groups?: string[]
   /** 目标设备组（可多选） */
@@ -61,6 +124,25 @@ export interface WiringRuleConfig {
   target_group?: string | null
   source_node_ids?: string[]
   target_node_ids?: string[]
+  /** 单台源交换机允许被本规则占用的最大 DOWNLINK 口数；UPLINK/Peer/DAD/MGMT 不计入。 */
+  source_port_limit_per_device?: number | null
+  /** 自动规则最多使用的本端交换机数量；空值表示使用全部匹配交换机。 */
+  max_source_devices?: number | null
+  source_connection_strategy?: EndpointConnectStrategy
+  target_connection_strategy?: EndpointConnectStrategy
+  /** 可选物理位置范围；与设备/组/角色条件取交集。 */
+  source_room_ids?: string[]
+  target_room_ids?: string[]
+  source_rack_start?: string | null
+  source_rack_end?: string | null
+  target_rack_start?: string | null
+  target_rack_end?: string | null
+  source_devices_per_rack?: number | null
+  target_devices_per_rack?: number | null
+  source_start_u?: number | null
+  target_start_u?: number | null
+  source_u_interval?: number | null
+  target_u_interval?: number | null
   connection_type?: ConnectionType
   required?: boolean
 
@@ -85,6 +167,12 @@ export interface WiringRuleConfig {
   target_port_types?: string[]
   source_port_ids?: string[]
   target_port_ids?: string[]
+  /** 物理槽位白名单；为空时使用全部槽位 */
+  source_slot_ids?: number[]
+  target_slot_ids?: number[]
+  /** 物理槽位范围，如 1-4；与 slot_ids 同时设置时取交集 */
+  source_slot_range?: string | null
+  target_slot_range?: string | null
   source_port_range?: string | null
   target_port_range?: string | null
   peer_port_range?: string | null
@@ -97,6 +185,8 @@ export interface WiringRuleConfig {
   /** 端口能力介质过滤（非线缆类型） */
   port_media?: PortMediaFilter | null
   port_priority?: number
+  /** true=规则条件无匹配时直接报错；false=允许兼容旧规则的软回退 */
+  strict_port_match?: boolean
 
   redundancy_mode?: RedundancyMode
   device_diversity?: DiversityLevel
@@ -137,8 +227,16 @@ export interface WiringRuleConfig {
   module?: string | null
   cable_length_mode?: CableLengthMode
   cable_length_m?: number | null
+  /** 自动估长时预留的机柜内走线长度。 */
+  route_extra_m?: number | null
+  /** 自动估长后的余量百分比。 */
+  cable_slack_percent?: number | null
 
   label_template?: string | null
+  /** 端子表两端标签，支持 source/target device/location/u/port 与 seq 占位符。 */
+  source_label_template?: string | null
+  target_label_template?: string | null
+  sync_media_color?: boolean
   cable_code_template?: string | null
   business_plane?: string | null
 
@@ -204,6 +302,16 @@ export const PORT_PURPOSE_OPTIONS: { value: PortPurpose; label: string }[] = [
   { value: 'PEER', label: 'PEER-LINK' },
   { value: 'DAD', label: 'DAD' },
   { value: 'SERVER', label: 'SERVER' },
+  { value: 'SERVICE', label: '业务 SERVICE' },
+  { value: 'DATA', label: '数据 DATA' },
+  { value: 'INSIDE', label: '安全域 INSIDE' },
+  { value: 'OUTSIDE', label: '安全域 OUTSIDE' },
+  { value: 'TRUST', label: '安全域 TRUST' },
+  { value: 'UNTRUST', label: '安全域 UNTRUST' },
+  { value: 'DMZ', label: '安全域 DMZ' },
+  { value: 'HA', label: '高可用 HA' },
+  { value: 'SYNC', label: '同步 SYNC' },
+  { value: 'OTHER', label: '其他 OTHER' },
 ]
 
 export const PORT_POOL_OPTIONS: { value: PortPool; label: string }[] = [
@@ -261,14 +369,13 @@ export function resolveEffectivePortPool(
 }
 
 export const MEDIA_OPTIONS: { value: MediaKind; label: string }[] = [
-  { value: 'AUTO', label: 'AUTO' },
-  { value: 'DAC', label: 'DAC' },
-  { value: 'AOC', label: 'AOC' },
-  { value: 'FIBER_MM', label: '多模光纤' },
-  { value: 'FIBER_SM', label: '单模光纤' },
-  { value: 'MPO', label: 'MPO' },
+  { value: 'MPO_MPO_OS2', label: 'MPO-MPO(OS2)' },
+  { value: 'MPO_MPO_OM34', label: 'MPO-MPO(OM3/OM4)' },
+  { value: 'LC_LC_OM34', label: 'LC-LC(OM3/OM4)' },
+  { value: 'LC_LC_OS2', label: 'LC-LC(OS2)' },
+  { value: 'MPO_LC_BREAKOUT', label: 'MPO-LC 分支跳线' },
   { value: 'COPPER', label: '网线' },
-  { value: 'BREAKOUT_1X4', label: '1分4光纤跳线' },
+  { value: 'CUSTOM_SYNC', label: '自定义类型（和本端介质同步）' },
 ]
 
 export const SPEED_OPTIONS = ['1G', '10G', '25G', '40G', '100G', '400G']
@@ -407,14 +514,36 @@ export function resolveWiringGroups(
 
 export function defaultWiringConfig(): WiringRuleConfig {
   return {
+    rule_category: 'CORE_AGG_TO_10G',
+    scenario_template: 'CORE_TO_TEN_GIG',
     source_role: 'CORE',
     target_role: 'ACCESS',
+    source_roles: ['CORE', 'AGG'],
+    target_roles: ['ACCESS'],
+    source_device_types: ['CORE_SWITCH', 'AGG_SWITCH'],
+    target_device_types: ['ACCESS_SWITCH_10G'],
     source_groups: [],
     target_groups: [],
     source_group: null,
     target_group: null,
     source_node_ids: [],
     target_node_ids: [],
+    source_port_limit_per_device: null,
+    max_source_devices: null,
+    source_connection_strategy: 'ROUND_ROBIN_ASC',
+    target_connection_strategy: 'SLOT_ROUND_ROBIN',
+    source_room_ids: [],
+    target_room_ids: [],
+    source_rack_start: null,
+    source_rack_end: null,
+    target_rack_start: null,
+    target_rack_end: null,
+    source_devices_per_rack: null,
+    target_devices_per_rack: null,
+    source_start_u: null,
+    target_start_u: null,
+    source_u_interval: 1,
+    target_u_interval: 1,
     connection_type: 'CORE_TO_ACCESS',
     required: true,
     link_count: 2,
@@ -432,6 +561,10 @@ export function defaultWiringConfig(): WiringRuleConfig {
     target_port_types: [],
     source_port_ids: [],
     target_port_ids: [],
+    source_slot_ids: [],
+    target_slot_ids: [],
+    source_slot_range: null,
+    target_slot_range: null,
     source_port_range: null,
     target_port_range: null,
     peer_port_range: null,
@@ -441,6 +574,7 @@ export function defaultWiringConfig(): WiringRuleConfig {
     target_port_policy: 'MIN_ASC',
     port_media: 'AUTO',
     port_priority: 100,
+    strict_port_match: true,
     redundancy_mode: 'A_B',
     device_diversity: 'OFF',
     path_diversity: 'OPTIONAL',
@@ -463,7 +597,7 @@ export function defaultWiringConfig(): WiringRuleConfig {
     lag: true,
     lag_count: 1,
     lag_mode: 'LACP',
-    media: 'AUTO',
+    media: 'CUSTOM_SYNC',
     fiber_type: 'OS2',
     connector: 'LC',
     distance_mode: 'AUTO',
@@ -471,7 +605,12 @@ export function defaultWiringConfig(): WiringRuleConfig {
     module: null,
     cable_length_mode: 'AUTO',
     cable_length_m: null,
+    route_extra_m: 1.5,
+    cable_slack_percent: 10,
     label_template: '{conn}-{seq:02d}',
+    source_label_template: 'F:{source_device}-{source_port}\nT:{target_device}-{target_location}-{target_u}-{target_port}',
+    target_label_template: 'F:{target_device}-{target_port}\nT:{source_device}-{source_location}-{source_u}-{source_port}',
+    sync_media_color: true,
     cable_code_template: null,
     validate_on_apply: true,
     pairs: [],
@@ -481,13 +620,43 @@ export function defaultWiringConfig(): WiringRuleConfig {
 export function normalizeWiringConfig(raw: Record<string, unknown> | null | undefined): WiringRuleConfig {
   const base = defaultWiringConfig()
   const data = { ...base, ...(raw || {}) } as WiringRuleConfig
+  // 历史规则没有场景模板标记，按自定义展示，避免误认为已套用新版核心上联模板。
+  if (!raw?.scenario_template) data.scenario_template = 'CUSTOM'
   const conn = migrateConnectionType(data.connection_type as string)
   data.connection_type = conn
+  const categoryMap: Record<string, RuleCategory> = {
+    UPLINK: 'CORE_AGG_TO_10G',
+    ACCESS: 'TEN_GIG_TO_ENDPOINT',
+    SECURITY: 'TEN_GIG_TO_ENDPOINT',
+    INTERCONNECT: 'SWITCH_STACK_PEER_DAD',
+    BMC: 'BMC_TO_SERVER',
+    CUSTOM: 'CUSTOM',
+  }
+  const rawCategory = String(raw?.rule_category || '')
+  if (categoryMap[rawCategory]) data.rule_category = categoryMap[rawCategory]
+  else if (!rawCategory) {
+    const legacySpeed = String(raw?.port_speed || raw?.speed || data.port_speed || data.speed || '')
+      .trim()
+      .toUpperCase()
+    data.rule_category = conn === 'BMC_ENDPOINT'
+      ? 'BMC_TO_SERVER'
+      : conn === 'SWITCH_INTERCONNECT'
+        ? 'SWITCH_STACK_PEER_DAD'
+        : conn === 'ACCESS_ENDPOINT'
+          // 旧后端曾删除 rule_category/source_device_types；此时必须按已保存
+          // 速率恢复千兆/万兆硬件分类，不能把全部 ACCESS 规则默认成万兆。
+          ? legacySpeed === '1G'
+            ? 'GIG_TO_ENDPOINT'
+            : 'TEN_GIG_TO_ENDPOINT'
+          : 'CORE_AGG_TO_10G'
+  }
 
   if (data.max_link_count == null && data.max_links != null) {
     data.max_link_count = Number(data.max_links)
   }
   data.link_count = Math.max(1, Number(data.link_count) || 2)
+  data.route_extra_m = Math.max(0, Number(data.route_extra_m) || 0)
+  data.cable_slack_percent = Math.min(100, Math.max(0, Number(data.cable_slack_percent) || 0))
   if (data.min_link_count == null) data.min_link_count = data.link_count
   if (data.max_link_count == null) data.max_link_count = Math.max(data.link_count, 4)
   data.min_link_count = Math.min(Number(data.min_link_count), data.link_count)
@@ -520,15 +689,73 @@ export function normalizeWiringConfig(raw: Record<string, unknown> | null | unde
       data.speed = data.peer_link_speed
       data.port_speed = data.peer_link_speed
     }
-    if (data.peer_media) data.media = data.peer_media
+    if (raw?.peer_media && data.peer_media) data.media = data.peer_media
   }
 
   data.source_node_ids = Array.isArray(data.source_node_ids) ? data.source_node_ids : []
   data.target_node_ids = Array.isArray(data.target_node_ids) ? data.target_node_ids : []
+  data.source_roles = Array.isArray(raw?.source_roles) ? data.source_roles : []
+  data.target_roles = Array.isArray(raw?.target_roles) ? data.target_roles : []
+  data.source_device_types = Array.isArray(raw?.source_device_types) ? (data.source_device_types || []).map(String) : []
+  data.target_device_types = Array.isArray(raw?.target_device_types) ? (data.target_device_types || []).map(String) : []
+  // 自动分类是设备硬件范围的权威来源。即使规则中残留了其它 ACCESS
+  // 子类型，也必须按所选分类覆盖，避免千兆规则落到万兆交换机（反之亦然）。
+  if (String(data.allocation_mode || 'AUTO').toUpperCase() === 'AUTO') {
+    if (data.rule_category === 'TEN_GIG_TO_ENDPOINT') {
+      data.source_device_types = ['ACCESS_SWITCH_10G']
+      data.target_device_types = ['SERVER', 'SECURITY_DEVICE']
+    } else if (data.rule_category === 'TEN_GIG_TO_GIG') {
+      data.source_device_types = ['ACCESS_SWITCH_10G']
+      data.target_device_types = ['ACCESS_SWITCH_1G']
+    } else if (data.rule_category === 'GIG_TO_ENDPOINT') {
+      data.source_device_types = ['ACCESS_SWITCH_1G']
+      data.target_device_types = ['SERVER', 'SECURITY_DEVICE']
+    } else if (data.rule_category === 'BMC_TO_SERVER') {
+      data.source_device_types = ['BMC_SWITCH']
+      data.target_device_types = ['SERVER']
+    } else if (data.rule_category === 'CORE_AGG_TO_10G') {
+      data.source_device_types = ['CORE_SWITCH', 'AGG_SWITCH']
+      data.target_device_types = ['ACCESS_SWITCH_10G']
+    } else if (data.rule_category === 'CORE_AGG_INTERCONNECT') {
+      data.source_device_types = ['CORE_SWITCH', 'AGG_SWITCH']
+      data.target_device_types = ['CORE_SWITCH', 'AGG_SWITCH']
+    }
+  }
+  data.source_room_ids = Array.isArray(data.source_room_ids) ? data.source_room_ids.map(String).filter(Boolean) : []
+  data.target_room_ids = Array.isArray(data.target_room_ids) ? data.target_room_ids.map(String).filter(Boolean) : []
+  data.source_port_limit_per_device = data.source_port_limit_per_device == null
+    ? null
+    : Math.max(1, Number(data.source_port_limit_per_device) || 1)
+  data.max_source_devices = data.max_source_devices == null
+    ? null
+    : Math.max(1, Number(data.max_source_devices) || 1)
+  data.source_devices_per_rack = data.source_devices_per_rack == null ? null : Math.max(1, Number(data.source_devices_per_rack) || 1)
+  data.target_devices_per_rack = data.target_devices_per_rack == null ? null : Math.max(1, Number(data.target_devices_per_rack) || 1)
+  data.source_u_interval = Math.max(1, Number(data.source_u_interval) || 1)
+  data.target_u_interval = Math.max(1, Number(data.target_u_interval) || 1)
+  const mediaMigration: Partial<Record<MediaKind, MediaKind>> = {
+    AUTO: 'CUSTOM_SYNC',
+    FIBER_SM: 'LC_LC_OS2',
+    FIBER_MM: 'LC_LC_OM34',
+    MPO: 'MPO_MPO_OM34',
+    BREAKOUT_1X4: 'MPO_LC_BREAKOUT',
+    DAC: 'CUSTOM_SYNC',
+    AOC: 'CUSTOM_SYNC',
+  }
+  data.media = mediaMigration[data.media || 'CUSTOM_SYNC'] || data.media || 'CUSTOM_SYNC'
   data.source_port_types = Array.isArray(data.source_port_types) ? data.source_port_types : []
   data.target_port_types = Array.isArray(data.target_port_types) ? data.target_port_types : []
   data.source_port_ids = Array.isArray(data.source_port_ids) ? data.source_port_ids : []
   data.target_port_ids = Array.isArray(data.target_port_ids) ? data.target_port_ids : []
+  data.source_slot_ids = Array.isArray(data.source_slot_ids)
+    ? data.source_slot_ids.map(Number).filter((v) => Number.isInteger(v) && v >= 0)
+    : []
+  data.target_slot_ids = Array.isArray(data.target_slot_ids)
+    ? data.target_slot_ids.map(Number).filter((v) => Number.isInteger(v) && v >= 0)
+    : []
+  data.source_slot_range = data.source_slot_range ? String(data.source_slot_range).trim() : null
+  data.target_slot_range = data.target_slot_range ? String(data.target_slot_range).trim() : null
+  data.strict_port_match = data.strict_port_match !== false
 
   // allocation_mode：兼容旧 port_allocation
   const modeRaw = String(data.allocation_mode || data.port_allocation || 'AUTO').toUpperCase()

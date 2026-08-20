@@ -2,7 +2,6 @@
 import { computed, reactive, watch } from 'vue'
 import {
   KPI_OPTIONS,
-  SCREEN_MODULE_DEFS,
   SCREEN_THEMES,
   type KpiKey,
   type ScreenLayoutConfig,

@@ -42,6 +42,17 @@ function portInRange(p: RulePortView, range: { min: number; max: number } | null
   return n >= range.min && n <= range.max
 }
 
+function slotMatches(
+  p: RulePortView,
+  ids: number[] | undefined,
+  range: { min: number; max: number } | null,
+): boolean {
+  if (!ids?.length && !range) return true
+  if (p.slotId == null) return false
+  if (ids?.length && !ids.includes(p.slotId)) return false
+  return !range || (p.slotId >= range.min && p.slotId <= range.max)
+}
+
 function matchesPurpose(p: RulePortView, purpose: string | null | undefined): boolean {
   if (!purpose) return true
   const want = String(purpose).toUpperCase()
@@ -165,7 +176,6 @@ function matchesPortMedia(p: RulePortView, filter: string | null | undefined): b
   }
 
   // 按中文标签软匹配（用户可能存了 label）
-  const hay2 = `${p.port.media_kind || ''} ${p.port.interface_type || ''} ${p.port.label || ''}`.toUpperCase()
   if (want.includes('MPO') || upper.includes('MPO')) {
     return mediaOf(p.port) === 'FIBER'
   }
@@ -205,11 +215,9 @@ function isAvailable(p: RulePortView): boolean {
   if (st === 'DISABLED' || st === 'FAULT' || st === 'NOT_SUPPORTED' || st === 'OCCUPIED') {
     return false
   }
-  // RESERVED：仅当未占用且场景需要 PEER/DAD 时由 purpose 放行；默认跳过
-  if (p.port.reserved && st !== 'AVAILABLE') {
-    const role = String(p.role || '').toUpperCase()
-    if (role !== 'PEER' && role !== 'DAD') return false
-  }
+  // RESERVED 是用途预留，不是 OCCUPIED。是否可用于当前规则继续由
+  // matchesPurpose / slot / type 条件决定；兼容历史模型将整块 DOWNLINK
+  // 板卡错误标记 reserved=true 的数据。
   return true
 }
 
@@ -284,6 +292,10 @@ export function buildCandidatePorts(
   const range = parsePortRange(
     side === 'source' ? cfg.source_port_range : cfg.target_port_range,
   )
+  const slotRange = parsePortRange(
+    side === 'source' ? cfg.source_slot_range : cfg.target_slot_range,
+  )
+  const slotIds = side === 'source' ? cfg.source_slot_ids : cfg.target_slot_ids
   const types = side === 'source' ? cfg.source_port_types : cfg.target_port_types
   const ids = side === 'source' ? cfg.source_port_ids : cfg.target_port_ids
   const policy =
@@ -297,6 +309,7 @@ export function buildCandidatePorts(
     if (!matchesPurpose(p, purpose)) return false
     if (!matchesPool(p, pool)) return false
     if (!matchesPortMedia(p, portMedia)) return false
+    if (!slotMatches(p, slotIds, slotRange)) return false
     if (!portInRange(p, range)) return false
     if (!matchesTypes(p, types)) return false
     if (!matchesIds(p, ids)) return false
@@ -310,6 +323,7 @@ export function buildCandidatePorts(
       if (!isAvailable(p)) return false
       if (!matchesPurpose(p, 'SERVER')) return false
       if (!matchesPortMedia(p, portMedia)) return false
+    if (!slotMatches(p, slotIds, slotRange)) return false
       if (!portInRange(p, range)) return false
       if (!matchesTypes(p, types)) return false
       if (!matchesIds(p, ids)) return false
@@ -319,16 +333,18 @@ export function buildCandidatePorts(
   }
 
   const withSpeed = list.filter((p) => matchesSpeed(p, speed, speedMode))
-  if (withSpeed.length) {
-    list = withSpeed
-  } else if (speed && String(speedMode || 'EXACT').toUpperCase() === 'EXACT') {
-    // EXACT：无匹配速率则尝试 MIN 软回退，避免规则残留 100G 把 10G 口滤空
-    const soft = list.filter((p) => matchesSpeed(p, speed, 'MIN'))
-    list = soft.length ? soft : []
-  }
-  // MIN 且无 ≥speed 口时软回退到未限速候选，避免 C 场景源板卡口被 100G 默认值清空
-  else if (speed && String(speedMode || '').toUpperCase() === 'MIN' && !withSpeed.length) {
-    // keep list as-is (unspeed-filtered)
+  if (speed) {
+    if (withSpeed.length) {
+      list = withSpeed
+    } else if (cfg.strict_port_match === false) {
+      const fallbackMode = String(speedMode || 'EXACT').toUpperCase() === 'EXACT' ? 'MIN' : null
+      const fallback = fallbackMode
+        ? list.filter((p) => matchesSpeed(p, speed, fallbackMode))
+        : list
+      list = fallback.length ? fallback : list
+    } else {
+      list = []
+    }
   }
 
   list = sortByPolicy(list, policy)

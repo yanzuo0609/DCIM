@@ -34,7 +34,22 @@ RedundancyMode = Literal["NONE", "A_B"]
 LagMode = Literal["STATIC", "LACP"]
 DistanceMode = Literal["AUTO", "FIXED"]
 CableLengthMode = Literal["AUTO", "FIXED"]
-MediaKind = Literal["AUTO", "DAC", "AOC", "FIBER_SM", "FIBER_MM", "MPO", "COPPER", "BREAKOUT_1X4"]
+MediaKind = Literal[
+    "AUTO",
+    "DAC",
+    "AOC",
+    "FIBER_SM",
+    "FIBER_MM",
+    "MPO",
+    "COPPER",
+    "BREAKOUT_1X4",
+    "MPO_MPO_OS2",
+    "MPO_MPO_OM34",
+    "LC_LC_OM34",
+    "LC_LC_OS2",
+    "MPO_LC_BREAKOUT",
+    "CUSTOM_SYNC",
+]
 
 
 class WiringPair(BaseModel):
@@ -45,9 +60,11 @@ class WiringPair(BaseModel):
 
 
 class WiringRuleConfig(BaseModel):
-    """Canonical config; unknown legacy keys are ignored via extra=ignore on normalize."""
+    """Canonical config; preserve forward-compatible rule-engine fields in JSON."""
 
-    model_config = {"extra": "ignore"}
+    # 规则引擎由前端持续扩展。后端负责规范核心字段，但不能静默删除
+    # rule_category/source_device_types/位置约束/接口上限等新版字段。
+    model_config = {"extra": "allow"}
 
     # 01 device
     source_role: FabricRole | None = None

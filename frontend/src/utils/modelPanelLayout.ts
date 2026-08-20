@@ -1,6 +1,6 @@
 import type { DesignSlotAttr } from '@/utils/designModelToNode'
 import { resolveDesignSwitchRole } from '@/utils/designModelToNode'
-import { readServerIfaceSlots, serverSlotNicPaletteLabel } from '@/utils/serverModelAttrs'
+import { readPcieSlots, readServerIfaceSlots, serverSlotNicPaletteLabel } from '@/utils/serverModelAttrs'
 import { readSecurityIfaceSlots } from '@/utils/securityModelAttrs'
 import {
   effectivePortCount,
@@ -96,10 +96,10 @@ const CARD_TYPE_SHORT: Record<string, string> = {
 }
 
 function switchSlotPurposeLabel(purpose: string): string {
-  if (purpose === 'UPLINK') return '上联'
-  if (purpose === 'DOWNLINK_UPLINK') return '下/上联'
+  if (purpose === 'UPLINK') return '上联 / UPLINK'
+  if (purpose === 'DOWNLINK_UPLINK') return '下联/上联 / DOWNLINK/UPLINK'
   if (purpose === 'BLANK') return '空白'
-  return '下联'
+  return '业务接口 / DOWNLINK'
 }
 
 function paletteFromSwitchSlots(slots: SwitchSlotAttr[]): PanelPaletteItem[] {
@@ -399,7 +399,7 @@ function buildServerPanelPalette(attrs: Record<string, unknown>): PanelPaletteIt
     })
   }
 
-  const ifaceSlots = readServerIfaceSlots(attrs)
+  const ifaceSlots = readServerIfaceSlots(attrs).filter((slot) => slot.kind === 'onboard' || slot.index === 1)
   for (const s of ifaceSlots) {
     const n10 = Math.max(0, Number(s.ports_10g) || 0)
     const n1 = Math.max(0, Number(s.ports_1g) || 0)
@@ -495,6 +495,24 @@ function buildServerPanelPalette(attrs: Record<string, unknown>): PanelPaletteIt
     }
   }
 
+  for (const card of readPcieSlots(attrs)) {
+    const isNic = card.card_type === 'nic_copper' || card.card_type === 'nic_optical'
+    const speed = card.speed.replace('ge', 'GE')
+    palette.push({
+      id: `pcie-card-${card.index}`,
+      kind: 'slot',
+      label: card.card_type === 'raid'
+        ? `PCIe${card.index}:RAID ${(card.raid_level || 'raid1').toUpperCase()}`
+        : isNic
+          ? `PCIe${card.index}:${speed}${card.card_type === 'nic_copper' ? '电口' : '光口'}×${card.port_count}`
+          : `PCIe${card.index}:空挡板`,
+      side: 'rear',
+      slot_index: card.index + 1,
+      port_count: isNic ? card.port_count : 0,
+      port_type: isNic ? (card.speed === '1ge' ? '1g' : card.speed === '10ge' ? '10g' : card.speed === '25ge' ? '25g' : '40_100g') : undefined,
+      blank: card.card_type === 'blank',
+    })
+  }
   pushFanAndPsu(palette, attrs, 'rear')
   const rearDisks = asCount(attrs.disk_rear_count, 6)
   for (let i = 1; i <= rearDisks; i++) {

@@ -27,6 +27,13 @@ export type PushLinkFn = (
   meta?: { path?: string | null; lagGroup?: string | null },
 ) => boolean
 
+const deviceSequenceCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+
+/** 按设备名称中的自然编号排序：H1,H2,H10 / W1,W2 / Q1,Q2 / SER1,SER2 */
+export function sortDevicesBySequence(list: RuleDeviceView[]): RuleDeviceView[] {
+  return [...list].sort((a, b) => deviceSequenceCollator.compare(a.node.name, b.node.name))
+}
+
 export interface AlgoCtx {
   occupied: Set<string>
   pushLink: PushLinkFn

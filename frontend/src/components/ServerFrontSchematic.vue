@@ -133,6 +133,7 @@ function onContext(id: string, ev: MouseEvent) {
 .srv-front {
   box-sizing: border-box;
   width: 100%;
+  max-width: 860px;
   height: auto;
   display: flex;
   background: linear-gradient(180deg, #c5c9d0 0%, #9aa1ab 55%, #8b929c 100%);
@@ -228,9 +229,12 @@ function onContext(id: string, ev: MouseEvent) {
 .bays {
   flex: 1 1 auto;
   display: grid;
-  gap: 2px;
+  gap: clamp(1px, 0.32vw, 3px);
   min-height: 0;
+  align-content: stretch;
 }
+.u4 .bays { grid-auto-columns: minmax(0, 1fr); }
+.u4 .bay { width: 100%; height: 100%; }
 .bay {
   position: relative;
   min-width: 0;

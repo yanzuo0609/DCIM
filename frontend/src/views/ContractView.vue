@@ -654,7 +654,7 @@ onMounted(() => {
                 :model-value="normalizeItemKind(item.item_kind)"
                 size="small"
                 class="pair-kind"
-                @update:model-value="(val) => setItemKind(item, val as ContractItemKind)"
+                @update:model-value="setItemKind(item, $event as ContractItemKind)"
               >
                 <el-radio-button value="hardware">硬</el-radio-button>
                 <el-radio-button value="software">软</el-radio-button>

@@ -1,18 +1,32 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { SwitchPortFace } from '@/utils/switchModelAttrs'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     kind: SwitchPortFace
     label?: string
     selected?: boolean
+    speed?: string
   }>(),
-  { kind: 'optical', label: '', selected: false },
+  { kind: 'optical', label: '', selected: false, speed: '' },
 )
+
+const normalizedSpeed = computed(() => String(props.speed || '').toLowerCase().replace(/\s+/g, ''))
+const speedClass = computed(() => {
+  const speed = normalizedSpeed.value
+  if (speed.includes('400')) return 'speed-400ge'
+  if (speed.includes('100')) return 'speed-100ge'
+  if (speed.includes('40')) return 'speed-40ge'
+  if (speed.includes('25')) return 'speed-25ge'
+  if (speed.includes('10')) return 'speed-10ge'
+  return 'speed-1ge'
+})
+const highDensity = computed(() => normalizedSpeed.value.includes('400'))
 </script>
 
 <template>
-  <span class="sq-port" :class="[`is-${kind}`, { selected }]">
+  <span class="sq-port" :class="[`is-${kind}`, speedClass, { selected }]">
     <svg class="sq-glyph" viewBox="0 0 24 24" aria-hidden="true">
       <rect class="sq-body" x="1.2" y="1.2" width="21.6" height="21.6" rx="1.4" />
       <!-- 电口 RJ45 -->
@@ -46,6 +60,8 @@ withDefaults(
         <g fill="#e8edf3">
           <circle v-for="i in 6" :key="`f${i}`" :cx="6.2 + (i - 1) * 1.7" cy="12" r="0.5" />
         </g>
+        <rect v-if="highDensity" x="5.1" y="9.1" width="9.8" height="1" rx=".25" fill="#d96b41" />
+        <rect v-if="highDensity" x="5.1" y="14" width="9.8" height="1" rx=".25" fill="#d96b41" />
         <circle cx="19.4" cy="8.4" r="1.15" fill="#2f8a3c" />
         <circle cx="19.4" cy="12" r="1.15" fill="#2f8a3c" />
         <circle cx="19.4" cy="15.6" r="1.15" fill="#c9a227" />
@@ -76,6 +92,15 @@ withDefaults(
 .sq-port.is-mpo {
   background: #5e6a78;
 }
+.sq-port.speed-10ge { background: #566a78; }
+.sq-port.speed-10ge .sq-body { fill: #263846; }
+.sq-port.speed-25ge { background: #4e7775; }
+.sq-port.speed-25ge .sq-body { fill: #1f4b4b; stroke: #79c9bf; }
+.sq-port.speed-40ge { background: #6f6682; }
+.sq-port.speed-100ge { background: #4a6784; }
+.sq-port.speed-100ge .sq-body { fill: #1d3855; stroke: #79aee0; }
+.sq-port.speed-400ge { background: #7a5548; }
+.sq-port.speed-400ge .sq-body { fill: #4e251d; stroke: #e28a65; }
 .sq-port.selected {
   outline: 1px solid #409eff;
   outline-offset: -1px;

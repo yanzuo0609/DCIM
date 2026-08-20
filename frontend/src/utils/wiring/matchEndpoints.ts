@@ -14,7 +14,7 @@ export function matchWiringEndpoints(
   nodes: NetworkNode[],
   opts: {
     ids?: string[] | null
-    role?: string | null
+    role?: string | string[] | null
     groups?: string[] | string | null
   },
 ): NetworkNode[] {
@@ -22,11 +22,14 @@ export function matchWiringEndpoints(
   const idList = (opts.ids || []).map((x) => String(x)).filter(Boolean)
   const idSet = idList.length ? new Set(idList) : null
   const groupList = resolveWiringGroups(opts.groups, null)
-  const role = (opts.role || '').trim() || null
+  const roles = (Array.isArray(opts.role) ? opts.role : [opts.role])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+  const roleSet = new Set(roles)
 
   const hasIds = !!idSet
   const hasGroups = groupList.length > 0
-  const hasRole = !!role
+  const hasRole = roleSet.size > 0
 
   if (!hasIds && !hasGroups && !hasRole) return []
 
@@ -37,6 +40,6 @@ export function matchWiringEndpoints(
       const byGroup = hasGroups && nodeMatchesAnyGroup(n, groupList)
       return !!(byId || byGroup)
     }
-    return resolveNodeFabricRole(n) === role
+    return roleSet.has(resolveNodeFabricRole(n))
   })
 }

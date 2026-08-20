@@ -62,6 +62,7 @@ export interface SecurityZoneInput {
   port_type: PortType
   count: number
   zone_layout?: SecurityZoneLayout
+  id_ns?: string
 }
 
 function newGroup(portType: PortType, count: number): SlotInterfaceGroup {
@@ -109,11 +110,17 @@ export function newSecurityZoneSlot(
   portType: PortType,
   count: number,
   zoneLayout: SecurityZoneLayout = 'auto',
+  idNs?: string,
 ): LayoutSlotDef {
+  const group = newGroup(portType, count)
+  if (idNs) {
+    group.id = idNs
+    group.id_ns = idNs
+  }
   return {
     zone_label: label,
     zone_layout: zoneLayout,
-    groups: [newGroup(portType, count)],
+    groups: [group],
     layout_x: null,
     layout_y: null,
     layout_w: null,
@@ -123,7 +130,7 @@ export function newSecurityZoneSlot(
 
 export function buildSecuritySlotsDef(zones: SecurityZoneInput[]): LayoutSlotDef[] {
   return zones.map((z) =>
-    newSecurityZoneSlot(z.label, z.port_type, z.count, z.zone_layout ?? 'auto'),
+    newSecurityZoneSlot(z.label, z.port_type, z.count, z.zone_layout ?? 'auto', z.id_ns),
   )
 }
 

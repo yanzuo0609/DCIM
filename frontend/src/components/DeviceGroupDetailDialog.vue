@@ -5,7 +5,7 @@ import type { NetworkLink, NetworkNode } from '@/api/network'
 import type { DeviceGroupMeta } from '@/components/DeviceGroupManageDialog.vue'
 import { FABRIC_ROLE_OPTIONS } from '@/utils/wiringTypes'
 import { listGroupMembers } from '@/utils/deviceGroups'
-import { migrateSlotsFromLegacy, summarizeSlots, totalSlotCount } from '@/utils/deviceGroupSlots'
+import { migrateSlotsFromLegacy, normalizeDeviceGroupId, syncGroupInstances } from '@/utils/deviceGroupSlots'
 import { DEVICE_GROUP_KIND_LABELS, resolveDeviceGroupKind } from '@/utils/deviceGroupVisual'
 
 const props = defineProps<{
@@ -41,23 +41,25 @@ const meta = computed(() => {
       port_pool: null,
     } as DeviceGroupMeta
   }
+  const slots = migrateSlotsFromLegacy(found)
   return {
     ...found,
-    slots: migrateSlotsFromLegacy(found),
+    slots,
+    instances: syncGroupInstances(found.name, slots, found.instances),
   }
 })
 
 const slots = computed(() => (meta.value ? migrateSlotsFromLegacy(meta.value) : []))
-const planned = computed(() => totalSlotCount(slots.value))
-const slotSummary = computed(() => summarizeSlots(slots.value, props.designModels))
 
-const members = computed(() => {
+const topologyMembers = computed(() => {
   const name = props.groupName
   if (!name) return []
   return listGroupMembers(props.nodes, name)
 })
 
-const memberIds = computed(() => new Set(members.value.map((m) => m.id)))
+const members = computed(() => meta.value?.instances || [])
+
+const memberIds = computed(() => new Set(topologyMembers.value.map((m) => m.id)))
 
 const nodeName = (id: string) => props.nodes.find((n) => n.id === id)?.name || id.slice(0, 8)
 
@@ -82,10 +84,10 @@ const roleLabel = computed(() => {
 })
 
 const visualKind = computed(() =>
-  resolveDeviceGroupKind({
+  meta.value?.group_type || resolveDeviceGroupKind({
     role: meta.value?.role,
     slotRoles: slots.value.map((s) => s.role),
-    members: members.value,
+    members: topologyMembers.value,
   }),
 )
 
@@ -132,37 +134,29 @@ const wiringPatternHint = computed(() => {
         </div>
       </div>
       <el-descriptions :column="2" size="small" border class="meta-block">
+        <el-descriptions-item label="组 ID">{{ normalizeDeviceGroupId(meta.id, meta.name) }}</el-descriptions-item>
+        <el-descriptions-item label="设备组类型">{{ DEVICE_GROUP_KIND_LABELS[visualKind] }}</el-descriptions-item>
         <el-descriptions-item label="组图标角色">{{ roleLabel }}</el-descriptions-item>
-        <el-descriptions-item label="规格合计">{{ planned || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="组内规格" :span="2">{{ slotSummary }}</el-descriptions-item>
-        <el-descriptions-item label="本拓扑实例">{{ members.length }}</el-descriptions-item>
+        <el-descriptions-item label="组内实例设备">{{ members.length }}</el-descriptions-item>
         <el-descriptions-item label="描述">{{ meta.description || '—' }}</el-descriptions-item>
         <el-descriptions-item label="布线方式" :span="2">{{ wiringPatternHint }}</el-descriptions-item>
+        <el-descriptions-item label="规则作用域" :span="2">{{ meta.wiring_scope === 'topology' ? '整个拓扑执行' : '仅组内执行' }}</el-descriptions-item>
       </el-descriptions>
 
-      <h4 class="section-title">子组规格（独立于画布）</h4>
-      <el-table :data="slots" size="small" border empty-text="未配置规格" max-height="160">
-        <el-table-column prop="label" label="名称" min-width="120" />
-        <el-table-column label="角色" width="100">
-          <template #default="{ row }">
-            {{ FABRIC_ROLE_OPTIONS.find((o) => o.value === row.role)?.label || row.role || '—' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="count" label="数量" width="72" align="center" />
-      </el-table>
-
-      <h4 class="section-title">本拓扑已实例设备</h4>
-      <el-table :data="members" size="small" border empty-text="本拓扑尚未放置，可拖组到画布或执行布线时自动补齐" max-height="180">
-        <el-table-column prop="name" label="设备" min-width="140" show-overflow-tooltip />
+      <h4 class="section-title">组内实例化设备</h4>
+      <el-table :data="members" size="small" border empty-text="组内尚未生成设备实例" max-height="220">
+        <el-table-column type="index" label="序号" width="64" align="center" />
+        <el-table-column prop="name" label="设备名称" min-width="150" show-overflow-tooltip />
         <el-table-column label="角色" width="100">
           <template #default="{ row }">
             {{
-              FABRIC_ROLE_OPTIONS.find((o) => o.value === row.network_role)?.label ||
-              row.network_role ||
+              FABRIC_ROLE_OPTIONS.find((o) => o.value === row.role)?.label ||
+              row.role ||
               '—'
             }}
           </template>
         </el-table-column>
+        <el-table-column prop="id" label="设备 ID" min-width="210" show-overflow-tooltip />
       </el-table>
 
       <h4 class="section-title">绑定规则</h4>

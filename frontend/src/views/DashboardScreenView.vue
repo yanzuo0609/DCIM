@@ -195,7 +195,6 @@ const typePieOption = computed<EChartsOption | null>(() => {
         type: 'pie',
         radius: ['42%', '68%'],
         center: ['50%', '50%'],
-        roseType: false,
         itemStyle: { borderColor: '#071018', borderWidth: 2 },
         label: {
           color: 'rgba(210,230,235,0.9)',
@@ -287,7 +286,7 @@ const powerRankOption = computed<EChartsOption | null>(() => {
           position: 'right',
           color: 'rgba(210,230,235,0.85)',
           fontSize: 11,
-          formatter: (p: { data: number }) => `${p.data}W`,
+          formatter: '{c}W',
         },
       },
     ],

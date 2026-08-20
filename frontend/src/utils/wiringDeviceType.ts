@@ -15,7 +15,7 @@ import type {
   SwitchSubtype,
 } from '@/api/network'
 import type { NetworkDesignModel } from '@/api/networkModelDesign'
-import { resolveNodeFabricRole } from '@/utils/fabricRole'
+import { normalizePortPurposeAlias, resolveNodeFabricRole } from '@/utils/fabricRole'
 import { nodeGroupList } from '@/utils/deviceGroups'
 
 export type WiringDeviceType =
@@ -79,6 +79,8 @@ export function annotatePortCapabilities(
   const downMedia = normalizeModelMedia(modelAttrs?.downlink_media ?? modelAttrs?.nic_media)
   const upMedia = normalizeModelMedia(modelAttrs?.uplink_media)
   for (const p of ports) {
+    const normalizedPurpose = normalizePortPurposeAlias(p.purpose)
+    if (normalizedPurpose) p.purpose = normalizedPurpose
     if (!p.media) {
       const purpose = String(p.purpose || '').toUpperCase()
       if (purpose === 'UPLINK' && upMedia) p.media = upMedia
@@ -153,8 +155,9 @@ export function annotatePortMediaAndInterface(
 
 /** 规则文档 PortRole ↔ 现有 purpose 归一 */
 export function normalizePortRole(purpose: string | null | undefined): string | null {
-  if (!purpose) return null
-  const u = String(purpose).toUpperCase()
+  const normalized = normalizePortPurposeAlias(purpose)
+  if (!normalized) return null
+  const u = normalized.toUpperCase()
   if (u === 'SERVER_NIC' || u === 'SERVER') return 'SERVER'
   if (u === 'BMC' || u === 'MGMT') return 'MGMT'
   if (u === 'PEER_LINK' || u === 'PEER') return 'PEER'

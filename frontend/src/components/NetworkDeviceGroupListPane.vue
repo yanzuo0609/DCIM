@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import TopologyGroupIcon from '@/components/TopologyGroupIcon.vue'
-import type { NetworkNode } from '@/api/network'
+import { NODE_KIND_LABELS, type NetworkNode } from '@/api/network'
 import type { DeviceGroupMeta } from '@/components/DeviceGroupManageDialog.vue'
 import { FABRIC_ROLE_OPTIONS } from '@/utils/wiringTypes'
 import { nodeInGroup } from '@/utils/deviceGroups'
@@ -14,17 +14,40 @@ const props = defineProps<{
   nodes: NetworkNode[]
   /** 可选：用于摘要显示模型名 */
   designModels?: Array<{ id: string; name: string }>
+  selectedNode?: string | null
   selectedGroup?: string | null
   disabled?: boolean
 }>()
 
 const emit = defineEmits<{
   select: [name: string]
+  selectDevice: [id: string]
+  detailDevice: [id: string]
   create: []
   edit: [name: string]
   detail: [name: string]
   manage: []
 }>()
+
+const activeTab = ref<'devices' | 'groups'>('groups')
+
+const modelNameMap = computed(() => new Map((props.designModels || []).map((model) => [model.id, model.name])))
+
+const deviceRows = computed(() =>
+  props.nodes
+    .filter((node) => node.on_canvas !== false && !!node.design_model_id)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
+    .map((node) => ({
+      ...node,
+      kindLabel: NODE_KIND_LABELS[node.kind] || node.kind,
+      modelName: modelNameMap.value.get(node.design_model_id || '') || '模型实例',
+      roleLabel:
+        FABRIC_ROLE_OPTIONS.find((option) => option.value === node.network_role)?.label ||
+        node.network_role ||
+        '未指定角色',
+    })),
+)
 
 const rows = computed(() =>
   props.catalog
@@ -33,10 +56,10 @@ const rows = computed(() =>
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
     .map((g) => {
       const slots = migrateSlotsFromLegacy(g)
-      const members = props.nodes.filter((n) => nodeInGroup(n, g.name))
+      const members = props.nodes.filter((n) => n.on_canvas !== false && nodeInGroup(n, g.name))
       const onTopo = members.length
       const planned = totalSlotCount(slots)
-      const kind = resolveDeviceGroupKind({
+      const kind = g.group_type || resolveDeviceGroupKind({
         role: g.role,
         slotRoles: slots.map((s) => s.role),
         members,
@@ -74,15 +97,48 @@ function onDragStart(event: DragEvent, name: string) {
 
 <template>
   <div class="group-pane">
-    <div class="pane-actions">
-      <el-button type="primary" link size="small" :disabled="disabled" @click="emit('create')">
-        新建
-      </el-button>
-      <el-button type="primary" link size="small" :disabled="disabled" @click="emit('manage')">
-        管理
-      </el-button>
+    <div class="pane-head">
+      <el-radio-group v-model="activeTab" size="small" class="mode-switch">
+        <el-radio-button value="devices">设备（{{ deviceRows.length }}）</el-radio-button>
+        <el-radio-button value="groups">设备组（{{ rows.length }}）</el-radio-button>
+      </el-radio-group>
+      <div v-if="activeTab === 'groups'" class="pane-actions">
+        <el-button type="primary" link size="small" :disabled="disabled" @click="emit('create')">
+          新建
+        </el-button>
+        <el-button type="primary" link size="small" :disabled="disabled" @click="emit('manage')">
+          管理
+        </el-button>
+      </div>
     </div>
-    <div v-if="!rows.length" class="empty-hint">
+
+    <template v-if="activeTab === 'devices'">
+      <div v-if="!deviceRows.length" class="empty-hint">
+        当前拓扑暂无通过模型生成并已放入画布的设备。右键设备可查看详细信息。
+      </div>
+      <div v-else class="group-list device-list">
+        <button
+          v-for="row in deviceRows"
+          :key="row.id"
+          type="button"
+          class="device-card"
+          :class="{ active: selectedNode === row.id }"
+          title="左键选中设备；右键查看详细信息"
+          @click="emit('selectDevice', row.id)"
+          @contextmenu.prevent="emit('detailDevice', row.id)"
+        >
+          <span class="device-kind">{{ row.kindLabel.slice(0, 2) }}</span>
+          <div class="meta">
+            <span class="name">{{ row.name }}</span>
+            <span class="sub">{{ row.modelName }} · {{ row.roleLabel }}</span>
+            <span class="desc">ID：{{ row.id }}</span>
+          </div>
+          <el-button type="primary" link size="small" @click.stop="emit('detailDevice', row.id)">详情</el-button>
+        </button>
+      </div>
+    </template>
+
+    <div v-else-if="!rows.length" class="empty-hint">
       暂无设备组。组与画布独立：配置类型与数量后，可拖到拓扑，也可作为布线源/目标。
     </div>
     <div v-else class="group-list">
@@ -129,10 +185,47 @@ function onDragStart(event: DragEvent, name: string) {
   flex-direction: column;
   gap: 8px;
 }
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mode-switch { flex-shrink: 0; }
 .pane-actions {
   display: flex;
   gap: 4px;
   justify-content: flex-end;
+}
+.device-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  text-align: left;
+  border: 1px solid #e4e7ed;
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+}
+.device-card:hover,
+.device-card.active {
+  border-color: #409eff;
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.16);
+}
+.device-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 8px;
+  background: linear-gradient(145deg, #3b82c4, #245b94);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
 }
 .empty-hint {
   font-size: 12px;

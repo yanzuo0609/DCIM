@@ -270,7 +270,7 @@ function clearCss2dLabels(root?: THREE.Object3D | null) {
   if (root) {
     root.traverse((child) => {
       const label = child as CSS2DObject
-      if (label.isCSS2DObject && label.element) {
+      if (child instanceof CSS2DObject && label.element) {
         label.element.remove()
       }
     })
@@ -2721,6 +2721,7 @@ defineExpose({
   placeLibraryItem,
   getHostEl,
 })
+void startInlineEdit
 </script>
 
 <template>

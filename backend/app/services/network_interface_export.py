@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -24,6 +25,23 @@ from app.services.network import NetworkDesignService
 
 class NetworkInterfaceExportService:
     EXPORT_HEADERS = [
+        "本端设备",
+        "设备名称",
+        "设备位置",
+        "U位",
+        "本端接口",
+        "对端设备",
+        "设备名称",
+        "对端位置",
+        "U位",
+        "对端接口",
+        "接口类型",
+        "线缆类型",
+        "本端标签",
+        "对端标签",
+    ]
+
+    IMPORT_HEADERS = [
         "场景",
         "连线类型",
         "连接类型",
@@ -165,60 +183,62 @@ class NetworkInterfaceExportService:
         nodes = self._node_map(detail)
         wb = Workbook()
         ws = wb.active
-        ws.title = "接口设计"
+        ws.title = "端子对照表"
         ws.append(self.EXPORT_HEADERS)
         for link in detail.links:
             source = nodes.get(str(link.source_node_id))
             target = nodes.get(str(link.target_node_id))
             s_loc, s_u = self._location(source) if source else ("", "")
             t_loc, t_u = self._location(target) if target else ("", "")
-            role = link.link_role or ""
-            ltype = getattr(link.link_type, "value", link.link_type)
             ws.append(
                 [
-                    self.ROLE_LABEL.get(role, role),
-                    self.TYPE_LABEL.get(str(ltype), str(ltype)),
-                    getattr(link, "connection_type", None) or "",
-                    getattr(link, "speed", None) or "",
-                    getattr(link, "lag_group", None) or "",
-                    getattr(link, "redundancy_path", None) or "",
-                    getattr(link, "media", None) or "",
-                    getattr(link, "module", None) or "",
-                    ""
-                    if getattr(link, "cable_length_m", None) is None
-                    else str(link.cable_length_m),
                     self._kind_label(source) if source else "",
                     source.name if source else "",
                     s_loc,
                     s_u,
-                    link.source_port,
                     self._port_label(source, link.source_port) if source else link.source_port,
                     self._kind_label(target) if target else "",
                     target.name if target else "",
                     t_loc,
                     t_u,
-                    link.target_port,
                     self._port_label(target, link.target_port) if target else link.target_port,
                     self.CLASS_LABEL.get(link.interface_class or "", link.interface_class or ""),
                     self.CABLE_LABEL.get(link.cable_type or "", link.cable_type or ""),
                     link.source_label or "",
                     link.target_label or "",
-                    link.label or "",
-                    str(getattr(link, "wiring_rule_id", None) or ""),
-                    str(link.source_node_id),
-                    str(link.target_node_id),
-                    str(link.id),
                 ]
             )
+        self._style_sheet(ws)
         buffer = io.BytesIO()
         wb.save(buffer)
         return buffer.getvalue()
+
+    def _style_sheet(self, ws) -> None:
+        header_fill = PatternFill("solid", fgColor="16324F")
+        header_font = Font(color="FFFFFF", bold=True)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        ws.row_dimensions[1].height = 26
+        widths = {
+            "A": 14, "B": 24, "C": 20, "D": 8, "E": 22,
+            "F": 14, "G": 24, "H": 20, "I": 8, "J": 22,
+            "K": 14, "L": 16, "M": 24, "N": 24,
+        }
+        for column, width in widths.items():
+            ws.column_dimensions[column].width = width
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="center")
 
     def template_excel(self) -> bytes:
         wb = Workbook()
         ws = wb.active
         ws.title = "接口设计"
-        ws.append(self.EXPORT_HEADERS)
+        ws.append(self.IMPORT_HEADERS)
         ws.append(
             [
                 "服务器接入",
@@ -253,6 +273,7 @@ class NetworkInterfaceExportService:
                 "",
             ]
         )
+        self._style_sheet(ws)
         buffer = io.BytesIO()
         wb.save(buffer)
         return buffer.getvalue()

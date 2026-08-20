@@ -6,6 +6,7 @@ import {
   applyDeviceModelPanel,
   listDevices,
   listPanelCandidates,
+  type Device,
   type DevicePanelCandidate,
 } from '@/api/device'
 import type { NetworkNode } from '@/api/network'
@@ -96,7 +97,7 @@ async function loadCandidatesFromInventoryFallback(name: string, _modelId: strin
   // 按采购汇总设备名称拉取并过滤（与后端 list_for_panel_apply 一致）
   const data = await listDevices({ page_size: 200, keyword: name || undefined })
   const key = name.trim().toLowerCase()
-  const items = (data.items || []).filter((d) => {
+  const items = ((data.items || []) as Device[]).filter((d) => {
     if (!key) return false
     const n = (d.name || '').trim().toLowerCase()
     const h = (d.hostname || '').trim().toLowerCase()

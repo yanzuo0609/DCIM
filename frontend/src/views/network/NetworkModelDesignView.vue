@@ -8,6 +8,8 @@ import AccessSwitchSchematic from '@/components/AccessSwitchSchematic.vue'
 import AccessSwitchRearSchematic from '@/components/AccessSwitchRearSchematic.vue'
 import ServerFrontSchematic from '@/components/ServerFrontSchematic.vue'
 import ServerRearSchematic from '@/components/ServerRearSchematic.vue'
+import SecurityDeviceSchematic from '@/components/SecurityDeviceSchematic.vue'
+import SecurityDeviceRearSchematic from '@/components/SecurityDeviceRearSchematic.vue'
 import TitleHintBang from '@/components/TitleHintBang.vue'
 import TopologyDeviceIcon from '@/components/TopologyDeviceIcon.vue'
 import {
@@ -70,7 +72,6 @@ import {
   moveBlankPanelRow,
   nudgeBlankPanelRow,
   normalizeBlankPanelRows,
-  renumberPortStarts,
   portTypeToIfaceKind,
   AIRFLOW_OPTIONS,
   SWITCH_IFACE_BOARD_OPTIONS,
@@ -86,12 +87,8 @@ import {
   SWITCH_PORT_MODULE_OPTIONS,
   SWITCH_PORT_CONNECTOR_OPTIONS,
   SWITCH_PORT_FIBER_MODE_OPTIONS,
-  SWITCH_SLOT_CARD_OPTIONS,
-  SWITCH_SLOT_PURPOSE_OPTIONS,
   SWITCH_STYLE_OPTIONS,
   syncSwitchDerivedCounts,
-  default100gPortCount,
-  sync100gPortFields,
   type SwitchIfaceBoardKind,
   type SwitchIfaceBoardPlacement,
   type SwitchBoardPortAttr,
@@ -99,8 +96,6 @@ import {
   type SwitchPortIfaceType,
   type SwitchSystemPortAttr,
   type SwitchSlotAttr,
-  type SwitchSlotCardType,
-  type SwitchSlotPurpose,
   type GigabitDownlinkMedia,
   type TenGigUplinkKind,
 } from '@/utils/switchModelAttrs'
@@ -111,10 +106,13 @@ import {
   diskRearMaxForU,
   groupServerPorts,
   listServerPorts,
-  PCIE_FLEX_PORT_OPTIONS,
+  PCIE_CARD_TYPE_OPTIONS,
+  PCIE_ORIENTATION_OPTIONS,
+  PCIE_PLACEMENT_OPTIONS,
+  PCIE_PORT_COUNT_OPTIONS,
+  pcieSlotMaxForU,
   readPcieSlots,
   normalizeDiskSize,
-  normalizeFlexSpeed,
   normalizeMemoryType,
   normalizeOsSupport,
   normalizePsuRedundancy,
@@ -130,22 +128,26 @@ import {
   SERVER_PSU_REDUNDANCY_OPTIONS,
   SERVER_SSD_IFACE_OPTIONS,
   SERVER_SSD_TYPE_OPTIONS,
+  SERVER_DEMO,
   serverIfaceSlotsToDesignSlots,
   serverPortKindLabel,
   serverSlotLabelFromInterfaces,
-  applyServerSlotNicType,
   isOnboardSlot,
   defaultExpansionSlot,
   syncServerDerivedAttrs,
   type ServerIfaceSlotAttr,
   type ServerPcieSlotAttr,
+  type ServerPcieCardType,
+  type ServerFlexSpeed,
   type ServerPortAttr,
-  type ServerSlotNicType,
 } from '@/utils/serverModelAttrs'
 import {
   defaultSecurityAttributes,
   normalizeSecurityFormFactor,
+  normalizeSecurityDeviceType,
+  securityDeviceProfile,
   readSecurityIfaceSlots,
+  MAX_SECURITY_IFACE_SLOTS,
   SECURITY_HEIGHT_OPTIONS,
   securitySlot10gRangeLabel,
   securitySlot1gRangeLabel,
@@ -172,7 +174,12 @@ import {
   type PanelSide,
 } from '@/utils/modelPanelLayout'
 import { designModelIconProps } from '@/utils/designModelIcon'
-import { ifaceBoardTwoRowLabels, normalizeGigabitUplinkCount, normalizeTenGigabitUplinkCount } from '@/utils/switchFrontPanel'
+import { ifaceBoardTwoRowLabels } from '@/utils/switchFrontPanel'
+import {
+  NETWORK_MODEL_PRESET_GROUPS,
+  buildNetworkModelPresetAttributes,
+  findNetworkModelPreset,
+} from '@/utils/networkModelPresets'
 
 const auth = useAuthStore()
 const canEdit = computed(() => auth.hasPermission('network:update'))
@@ -198,7 +205,9 @@ const folderForm = reactive({
 })
 
 const modelDialogVisible = ref(false)
+const applyingPreset = ref(false)
 const modelForm = reactive({
+  preset_id: null as string | null,
   code: '',
   name: '',
   category: 'network' as 'network' | 'server' | 'security',
@@ -216,8 +225,10 @@ const modelForm = reactive({
 const contractSummaries = ref<DeviceContractSummary[]>([])
 const selectedSummaryKey = ref<string | null>(null)
 const customPanelVisible = ref(false)
-const panelDemoZoom = ref<1 | 2>(1)
-const panelDemoCssZoom = computed(() => (panelDemoZoom.value === 1 ? 0.88 : 2))
+const securityInterfaceEditorVisible = ref(false)
+const panelDemoZoom = ref<0.5 | 1 | 2>(1)
+const panelDemoSide = ref<'front' | 'rear'>('front')
+const panelDemoCssZoom = computed(() => panelDemoZoom.value)
 const serverStyleFrontInput = ref<HTMLInputElement | null>(null)
 const serverStyleRearInput = ref<HTMLInputElement | null>(null)
 const serverPanelShowImage = ref(false)
@@ -256,15 +267,26 @@ const chassisPortDraftMeta = reactive({
 })
 
 const DEFAULT_SUBTYPE: Record<string, string> = {
-  network: 'switch',
+  network: 'gigabit',
   server: 'compute',
   security: 'firewall',
+}
+
+function switchRoleFromSubtype(value: unknown): SwitchSubtype {
+  const subtype = String(value || '')
+  return subtype === 'ten_gigabit' || subtype === 'aggregation' || subtype === 'core'
+    ? subtype
+    : 'gigabit'
 }
 
 const selectedFolder = computed(() => findFolder(tree.value, selectedFolderId.value))
 const selectedModel = computed(
   () => models.value.find((m) => m.id === selectedModelId.value) || null,
 )
+const createSubtypeOptions = computed(
+  () => taxonomy.value.find((item) => item.value === modelForm.category)?.subtypes || [],
+)
+const selectedCreatePreset = computed(() => findNetworkModelPreset(modelForm.preset_id))
 
 /** 规格字段（slot_count / slots / panel / custom 单独处理） */
 const schemaFields = computed(() =>
@@ -323,7 +345,7 @@ const schemaFields = computed(() =>
 )
 
 const isSwitchModel = computed(
-  () => selectedModel.value?.category === 'network' && selectedModel.value?.subtype === 'switch',
+  () => selectedModel.value?.category === 'network',
 )
 
 const isServerModel = computed(() => selectedModel.value?.category === 'server')
@@ -363,14 +385,8 @@ const blankPanelRows = computed<number[]>(() => {
 })
 
 /** 各区块说明（相同规则只写一次，挂在标题叹号） */
-const SERVER_SLOT_CONFIG_HINT =
-  '管理口与网络口均分配稳定 ID（如 bmc-p0）与编号（BMC1 / LOM1 / F10G1），供拓扑布线引用。IPMI 通常走 BMC 管理口，需要独立口时再填写个数。'
-
 const SERVER_PANEL_HINT =
   '按机箱 1U/2U/4U 与盘位自动生成前后面板仿真。可 1×/2× 缩放、自定义网格，或上传前后面板样式图片覆盖演示。左键选接口、右键查看 ID/编号。'
-
-const SECURITY_SLOT_CONFIG_HINT =
-  '默认 4 槽；每槽含 Control/HA/MGMT/USB、10G 光口与 1G 电口，编号分别为 slotx-10G-(n)、slotx-1G-(n)。'
 
 const switchSlotConfigHint = computed(() => {
   const role = switchRole.value
@@ -475,16 +491,12 @@ const serverPcieSlots = computed<ServerPcieSlotAttr[]>(() => {
   return readPcieSlots(m.attributes)
 })
 
+const serverPcieSlotMax = computed(() =>
+  pcieSlotMaxForU(selectedModel.value?.height_u ?? selectedModel.value?.attributes?.form_factor_u),
+)
+
 const serverStyleImageFront = computed(() => String(selectedModel.value?.attributes?.panel_style_image || ''))
 const serverStyleImageRear = computed(() => String(selectedModel.value?.attributes?.panel_style_image_rear || ''))
-
-const serverOnboardSlot = computed(() => serverIfaceSlots.value.find((s) => isOnboardSlot(s)) || null)
-
-const serverExpansionSlots = computed(() => serverIfaceSlots.value.filter((s) => !isOnboardSlot(s)))
-
-function serverSlotListIndex(slot: ServerIfaceSlotAttr): number {
-  return serverIfaceSlots.value.findIndex((s) => s.index === slot.index)
-}
 
 const serverSlots = computed<DesignSlotAttr[]>(() => {
   const m = selectedModel.value
@@ -493,8 +505,23 @@ const serverSlots = computed<DesignSlotAttr[]>(() => {
 })
 
 const serverDiskFrontMax = computed(() =>
-  diskFrontMaxForU(selectedModel.value?.height_u ?? selectedModel.value?.attributes?.form_factor_u),
+  diskFrontMaxForU(
+    selectedModel.value?.height_u ?? selectedModel.value?.attributes?.form_factor_u,
+    selectedModel.value?.attributes?.disk_front_size,
+  ),
 )
+
+const serverFrontDriveLayoutLabel = computed(() => {
+  const u = normalizeServerFormFactor(selectedModel.value?.height_u ?? selectedModel.value?.attributes?.form_factor_u)
+  const n = Number(selectedModel.value?.attributes?.disk_front_count || 0)
+  if (u === 2) return n > 12 ? '竖向 SFF（24位等宽）' : '横向托架（3 × 4）'
+  if (u === 1) {
+    return normalizeDiskSize(selectedModel.value?.attributes?.disk_front_size, '3.5') === '2.5'
+      ? '竖向 SFF（10位等宽）'
+      : '横向托架（1 × 4）'
+  }
+  return '按机箱容量等比排列'
+})
 
 const serverDiskRearMax = computed(() => diskRearMaxForU())
 
@@ -503,6 +530,10 @@ const securityIfaceSlots = computed<SecurityIfaceSlotAttr[]>(() => {
   if (!m || m.category !== 'security' || !m.attributes) return []
   return readSecurityIfaceSlots(m.attributes)
 })
+const securityDeviceType = computed(() =>
+  normalizeSecurityDeviceType(selectedModel.value?.subtype || selectedModel.value?.attributes?.security_device_type),
+)
+const securityProfile = computed(() => securityDeviceProfile(securityDeviceType.value))
 
 const panelLayout = computed<PanelLayoutConfig>({
   get() {
@@ -705,21 +736,24 @@ async function removeFolder() {
 }
 
 async function loadSchemaForForm() {
-  modelForm.subtype = DEFAULT_SUBTYPE[modelForm.category] || modelForm.subtype
+  const options = taxonomy.value.find((item) => item.value === modelForm.category)?.subtypes || []
+  if (!options.some((item) => item.value === modelForm.subtype)) {
+    modelForm.subtype = DEFAULT_SUBTYPE[modelForm.category] || options[0]?.value || modelForm.subtype
+  }
   const schema = await fetchAttributeSchema(modelForm.category, modelForm.subtype)
   attrSchema.value = schema
-  if (modelForm.category === 'network' && modelForm.subtype === 'switch') {
-    modelForm.attributes = defaultNetworkSwitchAttributes('gigabit')
+  if (modelForm.category === 'network') {
+    modelForm.attributes = defaultNetworkSwitchAttributes(switchRoleFromSubtype(modelForm.subtype))
     modelForm.height_u = asInt(modelForm.attributes.chassis_height_u, 1)
   } else if (modelForm.category === 'server') {
     modelForm.attributes = defaultServerAttributes(1)
-    modelForm.height_u = 1
+    modelForm.height_u = Number(modelForm.attributes.form_factor_u) || 1
   } else if (modelForm.category === 'security') {
-    modelForm.attributes = defaultSecurityAttributes(1)
-    modelForm.height_u = 1
+    modelForm.attributes = defaultSecurityAttributes(undefined, modelForm.subtype)
+    modelForm.height_u = Number(modelForm.attributes.form_factor_u) || 1
   } else {
     modelForm.attributes = { ...(schema?.default_attributes || {}) }
-    modelForm.height_u = 1
+    modelForm.height_u = Number(modelForm.attributes.form_factor_u) || 1
   }
 }
 
@@ -734,13 +768,14 @@ async function openCreateModel() {
     return
   }
   try {
+    modelForm.preset_id = null
     modelForm.code = `M${Date.now().toString().slice(-6)}`
     modelForm.name = ''
     modelForm.category = 'network'
-    modelForm.subtype = 'switch'
+    modelForm.subtype = 'gigabit'
     modelForm.manufacturer_name = ''
     modelForm.vendor_sku = ''
-    modelForm.height_u = 1
+    modelForm.height_u = Number(modelForm.attributes.form_factor_u) || 1
     modelForm.description = ''
     modelForm.createSummaryKey = null
     modelForm.device_model_id = null
@@ -762,10 +797,32 @@ async function openCreateModel() {
 watch(
   () => modelForm.category,
   async () => {
-    if (!modelDialogVisible.value) return
+    if (!modelDialogVisible.value || applyingPreset.value) return
     await loadSchemaForForm()
   },
 )
+
+async function onCreatePresetChange(id: string | null) {
+  const preset = findNetworkModelPreset(id)
+  modelForm.preset_id = id
+  if (!preset) return
+  applyingPreset.value = true
+  try {
+    modelForm.category = preset.category
+    modelForm.subtype = preset.subtype
+    modelForm.name = preset.name
+    modelForm.vendor_sku = preset.vendorSku
+    modelForm.height_u = preset.heightU
+    modelForm.description = preset.summary
+    modelForm.createSummaryKey = null
+    modelForm.device_model_id = null
+    modelForm.contract_device_name = preset.name
+    attrSchema.value = await fetchAttributeSchema(preset.category, preset.subtype)
+    modelForm.attributes = buildNetworkModelPresetAttributes(preset)
+  } finally {
+    applyingPreset.value = false
+  }
+}
 
 async function onCreateSummaryChange(key: string | null) {
   // allow-create 时可能直接传入自定义名称字符串
@@ -809,25 +866,26 @@ async function confirmCreateModel() {
   }
   saving.value = true
   try {
-    modelForm.subtype = DEFAULT_SUBTYPE[modelForm.category] || modelForm.subtype
+
     let attrs: Record<string, unknown> = { ...(modelForm.attributes || {}) }
     if (modelForm.category === 'network') {
-      modelForm.subtype = 'switch'
-      attrs = { ...defaultNetworkSwitchAttributes('gigabit'), ...attrs }
+      const role = switchRoleFromSubtype(modelForm.subtype)
+      attrs = { ...defaultNetworkSwitchAttributes(role), ...attrs, switch_role: role }
       syncSwitchDerivedCounts(attrs)
       modelForm.height_u = asInt(attrs.chassis_height_u, 1)
     } else if (modelForm.category === 'server') {
-      modelForm.subtype = 'compute'
+
       attrs = { ...defaultServerAttributes(normalizeServerFormFactor(modelForm.height_u || 1)), ...attrs }
       attrs.form_factor_u = normalizeServerFormFactor(modelForm.height_u || 1)
       syncServerDerivedAttrs(attrs)
       modelForm.height_u = asInt(attrs.form_factor_u, 1)
     } else if (modelForm.category === 'security') {
-      modelForm.subtype = 'firewall'
+
       attrs = {
-        ...defaultSecurityAttributes(normalizeSecurityFormFactor(modelForm.height_u || 1)),
+        ...defaultSecurityAttributes(normalizeSecurityFormFactor(modelForm.height_u || 1), modelForm.subtype),
         ...attrs,
       }
+      attrs.security_device_type = normalizeSecurityDeviceType(modelForm.subtype)
       syncSecurityDerivedAttrs(attrs)
       modelForm.height_u = normalizeSecurityFormFactor(attrs.chassis_height_u)
     }
@@ -846,7 +904,7 @@ async function confirmCreateModel() {
       device_model_id: modelForm.device_model_id,
       contract_device_name: modelForm.contract_device_name || modelForm.name.trim() || null,
       is_published: true,
-      description: null,
+      description: modelForm.description.trim() || null,
       created_at: '',
       updated_at: '',
     }
@@ -870,7 +928,7 @@ async function confirmCreateModel() {
       port_layout: layout,
       device_model_id: draft.device_model_id,
       contract_device_name: draft.contract_device_name,
-      description: null,
+      description: modelForm.description.trim() || null,
     })
     modelDialogVisible.value = false
     await refreshTree()
@@ -901,15 +959,15 @@ async function onSelectedCategoryChange() {
     m.subtype = cat.subtypes[0]?.value || m.subtype
   }
   attrSchema.value = await fetchAttributeSchema(m.category, m.subtype)
-  if (m.category === 'network' && m.subtype === 'switch') {
-    m.attributes = defaultNetworkSwitchAttributes('gigabit')
+  if (m.category === 'network') {
+    m.attributes = defaultNetworkSwitchAttributes(switchRoleFromSubtype(m.subtype))
     m.height_u = asInt(m.attributes.chassis_height_u, 1)
   } else if (m.category === 'server') {
     m.attributes = defaultServerAttributes(1)
     m.height_u = 1
   } else if (m.category === 'security') {
-    m.attributes = defaultSecurityAttributes(1)
-    m.height_u = 1
+    m.attributes = defaultSecurityAttributes(undefined, m.subtype)
+    m.height_u = Number(m.attributes.form_factor_u) || 1
   } else {
     m.attributes = { ...(attrSchema.value?.default_attributes || {}) }
   }
@@ -919,14 +977,14 @@ async function onSelectedSubtypeChange() {
   const m = selectedModel.value
   if (!m) return
   attrSchema.value = await fetchAttributeSchema(m.category, m.subtype)
-  if (m.category === 'network' && m.subtype === 'switch') {
-    m.attributes = defaultNetworkSwitchAttributes(
-      resolveDesignSwitchRole(m.attributes || {}) || 'gigabit',
-    )
+  if (m.category === 'network') {
+    m.attributes = defaultNetworkSwitchAttributes(switchRoleFromSubtype(m.subtype))
+    m.height_u = asInt(m.attributes.chassis_height_u, 1)
   } else if (m.category === 'server') {
     m.attributes = defaultServerAttributes(normalizeServerFormFactor(m.height_u))
   } else if (m.category === 'security') {
-    m.attributes = defaultSecurityAttributes(normalizeSecurityFormFactor(m.height_u))
+    m.attributes = defaultSecurityAttributes(undefined, m.subtype)
+    m.height_u = Number(m.attributes.form_factor_u) || 1
   } else {
     m.attributes = { ...(attrSchema.value?.default_attributes || {}) }
   }
@@ -950,9 +1008,11 @@ async function selectModel(row: NetworkDesignModel) {
     ensurePanelLayout(row.attributes, serverIfaceSlotsToDesignSlots(readServerIfaceSlots(row.attributes), row.attributes), false)
   }
   if (row.category === 'security' && row.attributes) {
+    row.attributes.security_device_type = normalizeSecurityDeviceType(row.subtype)
     if (!Array.isArray(row.attributes.security_slots) || !row.attributes.security_slots.length) {
       const seeded = defaultSecurityAttributes(
         normalizeSecurityFormFactor(row.attributes.chassis_height_u ?? row.height_u),
+        row.subtype,
       )
       row.attributes = { ...seeded, ...row.attributes, security_slots: seeded.security_slots }
     }
@@ -960,8 +1020,8 @@ async function selectModel(row: NetworkDesignModel) {
     row.height_u = normalizeSecurityFormFactor(row.attributes.chassis_height_u ?? row.height_u)
     ensurePanelLayout(row.attributes, [], false)
   }
-  if (row.category === 'network' && row.subtype === 'switch' && row.attributes) {
-    row.attributes.switch_role = resolveDesignSwitchRole(row.attributes)
+  if (row.category === 'network' && row.attributes) {
+    row.attributes.switch_role = row.subtype === 'switch' ? resolveDesignSwitchRole(row.attributes) : switchRoleFromSubtype(row.subtype)
     if (!Array.isArray(row.attributes.switch_slots) || !row.attributes.switch_slots.length) {
       const seeded = defaultNetworkSwitchAttributes(row.attributes.switch_role as SwitchSubtype)
       row.attributes = { ...seeded, ...row.attributes, switch_slots: seeded.switch_slots }
@@ -981,7 +1041,7 @@ async function selectModel(row: NetworkDesignModel) {
     row.category !== 'software' &&
     row.category !== 'server' &&
     row.category !== 'security' &&
-    !(row.category === 'network' && row.subtype === 'switch')
+    row.category !== 'network'
   ) {
     ensurePanelLayout(row.attributes, [], false)
   }
@@ -1002,14 +1062,15 @@ async function saveSelectedModel() {
       m.height_u = asInt(attrs.form_factor_u, 1)
     }
     if (m.category === 'security') {
+      attrs.security_device_type = normalizeSecurityDeviceType(m.subtype)
       syncSecurityDerivedAttrs(attrs)
       attrs.chassis_height_u = normalizeSecurityFormFactor(m.height_u)
       ensurePanelLayout(attrs, [], false)
       m.attributes = attrs
       m.height_u = normalizeSecurityFormFactor(attrs.chassis_height_u)
     }
-    if (m.category === 'network' && m.subtype === 'switch') {
-      attrs.switch_role = resolveDesignSwitchRole(attrs)
+    if (m.category === 'network') {
+      attrs.switch_role = m.subtype === 'switch' ? resolveDesignSwitchRole(attrs) : switchRoleFromSubtype(m.subtype)
       m.height_u = Math.max(1, asInt(attrs.chassis_height_u ?? m.height_u, m.height_u || 1))
       attrs.chassis_height_u = m.height_u
       syncSwitchDerivedCounts(attrs)
@@ -1074,6 +1135,11 @@ function setAttrField(key: string, value: unknown) {
   if (!m) return
   if (!m.attributes) m.attributes = {}
   m.attributes[key] = value
+  if (m.category === 'server' && key === 'flex_io_slot_count') {
+    m.attributes.pcie_slot_max = value
+  } else if (m.category === 'server' && key === 'pcie_slot_max') {
+    m.attributes.flex_io_slot_count = value
+  }
   if (key === 'eth_mgmt_ports') {
     m.attributes.mgmt_ports = value
   }
@@ -1106,6 +1172,7 @@ function setAttrField(key: string, value: unknown) {
       'ssd_internal_iface',
       'ssd_max_count',
       'ssd_max_type',
+      'flex_io_slot_count',
       'pcie_slot_max',
       'pcie_slots',
       'memory_type',
@@ -1136,6 +1203,7 @@ function setAttrField(key: string, value: unknown) {
         'lom_1g_count',
         'flex_io_count',
         'flex_io_speed',
+        'flex_io_slot_count',
         'pcie_slot_max',
         'pcie_slots',
       ].includes(key)
@@ -1159,7 +1227,6 @@ function setAttrField(key: string, value: unknown) {
   }
   if (
     m.category === 'network' &&
-    m.subtype === 'switch' &&
     [
       'switch_role',
       'switch_slots',
@@ -1234,18 +1301,6 @@ function refreshSwitchPanelLayout() {
   ensurePanelLayout(m.attributes, [], false)
 }
 
-function commitSwitchSlots(slots: SwitchSlotAttr[]) {
-  const m = selectedModel.value
-  if (!m?.attributes) return
-  const next = renumberPortStarts(slots, switchRole.value)
-  m.attributes.switch_slots = next
-  m.attributes.card_slot_count = next.length
-  syncSwitchDerivedCounts(m.attributes)
-  if (switchRole.value === 'core' || switchRole.value === 'aggregation') {
-    m.height_u = Math.max(1, asInt(m.attributes.chassis_height_u, next.length))
-  }
-  refreshSwitchPanelLayout()
-}
 
 function onSwitchRoleChange(role: SwitchSubtype) {
   const m = selectedModel.value
@@ -1262,6 +1317,7 @@ function onSwitchRoleChange(role: SwitchSubtype) {
     chassis_height_u: m.attributes.chassis_height_u,
     panel_style_image: m.attributes.panel_style_image,
   }
+  m.subtype = role
   Object.assign(m.attributes, applySwitchStyleDefaults(m.attributes, role))
   if (panel) m.attributes.panel_layout = panel
   if (isCoreOrAggRole(role)) {
@@ -1270,113 +1326,6 @@ function onSwitchRoleChange(role: SwitchSubtype) {
   syncSwitchDerivedCounts(m.attributes)
   m.height_u = Math.max(1, asInt(m.attributes.chassis_height_u, 1))
   refreshSwitchPanelLayout()
-}
-
-function onCardSlotCountChange(v: number | undefined) {
-  const m = selectedModel.value
-  if (!m?.attributes) return
-  const n = Math.max(1, Math.min(16, v ?? 1))
-  m.attributes.card_slot_count = n
-  const current = readSwitchSlots(m.attributes)
-  const next = current.slice(0, n)
-  while (next.length < n) {
-    next.push({
-      index: next.length + 1,
-      purpose: 'BLANK',
-      card_type: 'blank',
-      port_count: 0,
-      port_start: 0,
-    })
-  }
-  commitSwitchSlots(next)
-}
-
-function onSwitchSlotCardTypeChange(idx: number, cardType: SwitchSlotCardType) {
-  const slots = switchSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot) return
-  slot.card_type = cardType
-  if (cardType === 'blank') {
-    slot.purpose = 'BLANK'
-    slot.port_count = 0
-    slot.mpo_count = 0
-    slot.lc_count = 0
-  } else if (cardType === '100g') {
-    if (slot.purpose === 'BLANK') {
-      slot.purpose = switchRole.value === 'ten_gigabit' ? 'UPLINK' : 'DOWNLINK_UPLINK'
-    }
-    const def = default100gPortCount(switchRole.value)
-    const synced = sync100gPortFields(
-      { ...slot, lc_count: 0, mpo_count: def, port_count: def },
-      def,
-    )
-    Object.assign(slot, synced)
-  } else {
-    if (slot.purpose === 'BLANK') slot.purpose = 'DOWNLINK'
-    if (!slot.port_count) slot.port_count = cardType === 'gigabit' ? 48 : 24
-    slot.mpo_count = 0
-    slot.lc_count = 0
-  }
-  commitSwitchSlots(slots)
-}
-
-function onSwitchSlotPurposeChange(idx: number, purpose: SwitchSlotPurpose) {
-  const slots = switchSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot) return
-  slot.purpose = purpose
-  if (purpose === 'BLANK') {
-    slot.card_type = 'blank'
-    slot.port_count = 0
-    slot.mpo_count = 0
-    slot.lc_count = 0
-  } else if (slot.card_type === 'blank') {
-    slot.card_type = 'ten_gigabit'
-  }
-  commitSwitchSlots(slots)
-}
-
-function onSwitchSlotPortCountChange(idx: number, count: number | undefined) {
-  const slots = switchSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot || slot.card_type === 'blank') return
-  if (slot.card_type === '100g') {
-    const next = Math.max(0, Math.min(36, count ?? default100gPortCount(switchRole.value)))
-    Object.assign(slot, sync100gPortFields({ ...slot, lc_count: 0 }, next))
-    commitSwitchSlots(slots)
-    return
-  }
-  const max = slot.purpose === 'UPLINK' ? 8 : 48
-  let next = Math.max(0, Math.min(max, count ?? 0))
-  if (slot.purpose === 'UPLINK') {
-    next = Math.min(8, Math.max(0, next || 6))
-    if (switchRole.value === 'gigabit') next = normalizeGigabitUplinkCount(next)
-    else if (switchRole.value === 'ten_gigabit') next = normalizeTenGigabitUplinkCount(next)
-  }
-  slot.port_count = next
-  commitSwitchSlots(slots)
-}
-
-function onSwitchSlotMpoChange(idx: number, count: number | undefined) {
-  const slots = switchSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot || slot.card_type !== '100g') return
-  slot.mpo_count = Math.max(0, Math.min(36, count ?? 0))
-  const lc = Math.max(0, Math.min(36, Number(slot.lc_count) || 0))
-  slot.lc_count = lc
-  slot.port_count = Math.min(36, slot.mpo_count + lc)
-  commitSwitchSlots(slots)
-}
-
-function onSwitchSlotLcChange(idx: number, count: number | undefined) {
-  const slots = switchSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot || slot.card_type !== '100g') return
-  slot.lc_count = Math.max(0, Math.min(36, count ?? 0))
-  const mpo = Math.max(0, Math.min(36, Number(slot.mpo_count) || 0))
-  slot.mpo_count = mpo
-  slot.port_count = Math.min(36, mpo + slot.lc_count)
-  commitSwitchSlots(slots)
 }
 
 function onSwitchHeightChange(v: number | undefined) {
@@ -1534,8 +1483,8 @@ function chassisPortMeta(slotIndex: number, portIndex: number) {
   const labels = ifaceBoardTwoRowLabels(effectivePortCount(slot), Math.max(0, Number(slot.port_start) || 0))
   const boardLabel = isAccessSwitch.value
     ? slot.purpose === 'UPLINK'
-      ? `上联 ${accessUplinkLabel.value}`
-      : `业务接口 ${accessDownlinkLabel.value}`
+      ? `上联接口 / UPLINK · ${accessUplinkLabel.value}`
+      : `业务接口 / DOWNLINK · ${accessDownlinkLabel.value}`
     : `Slot ${slot.index} ${ifaceBoardKindLabel(kind)}`
   return {
     slot,
@@ -1601,17 +1550,18 @@ function systemPortMeta(portId: string) {
   }
   const srv = serverPorts.value.find((p) => p.id === portId)
   if (!srv) return null
+  const serverSpec: SwitchBoardPortAttr = {
+    index: srv.index,
+    id: srv.id,
+    code: srv.code,
+    iface_type: srv.iface_type === 'optical' ? 'optical' : 'copper',
+    speed: srv.speed,
+    module: srv.module,
+    connector: srv.connector,
+    fiber_mode: srv.fiber_mode === 'sm' || srv.fiber_mode === 'mm' ? srv.fiber_mode : 'na',
+  }
   return {
-    spec: {
-      index: srv.index,
-      id: srv.id,
-      code: srv.code,
-      iface_type: srv.iface_type === 'optical' ? 'optical' : 'copper',
-      speed: srv.speed,
-      module: srv.module,
-      connector: srv.connector,
-      fiber_mode: srv.fiber_mode === 'sm' || srv.fiber_mode === 'mm' ? srv.fiber_mode : 'na',
-    },
+    spec: serverSpec,
     boardLabel: serverPortKindLabel(srv.kind),
     ordinal: `第 ${srv.index + 1} 个`,
     portNo: srv.code,
@@ -1742,6 +1692,24 @@ function onMoveBlankPanel(fromRow: number, toRow: number) {
   moveBlankPanelRow(m.attributes, fromRow, toRow)
 }
 
+function onMoveSwitchSlot(fromSlot: number, toSlot: number) {
+  const m = selectedModel.value
+  if (!m?.attributes || !canEdit.value || fromSlot === toSlot) return
+  const boards = readCoreIfaceBoards(m.attributes)
+  const source = boards.find((board) => board.slot_index === fromSlot)
+  const target = boards.find((board) => board.slot_index === toSlot)
+  if (source) {
+    // updateCoreIfaceBoard 在目标已占用时会交换两块板的位置。
+    updateCoreIfaceBoard(m.attributes, fromSlot, { slot_index: toSlot })
+  } else if (target) {
+    // 从空槽拖向接口板时，将目标板移动到该空槽。
+    updateCoreIfaceBoard(m.attributes, toSlot, { slot_index: fromSlot })
+  } else {
+    return
+  }
+  commitCoreIfaceBoards()
+}
+
 function onNudgeBlankPanel(fromRow: number, dir: -1 | 1) {
   const m = selectedModel.value
   if (!m?.attributes || !canEdit.value) return
@@ -1782,7 +1750,8 @@ function onCustomPanelBoardChange(payload: { items: PanelLayoutItem[] }) {
   const m = selectedModel.value
   if (!m?.attributes || !canEdit.value) return
   if (!isCoreAggSwitch.value) return
-  const cap = Math.max(1, Number(m.attributes.modular_expansion_slots) || 6)
+  const attrs = m.attributes
+  const cap = Math.max(1, Number(attrs.modular_expansion_slots) || 6)
   const boards = payload.items
     .filter((item) => item.kind === 'line_card' && !item.blank)
     .slice()
@@ -1790,7 +1759,7 @@ function onCustomPanelBoardChange(payload: { items: PanelLayoutItem[] }) {
     .slice(0, cap)
     .map((item, idx) => {
       const slotIndex = Math.max(1, Math.min(cap, Number(item.slot_index) || idx + 1))
-      const prev = readCoreIfaceBoards(m.attributes).find((b) => b.slot_index === slotIndex)
+      const prev = readCoreIfaceBoards(attrs).find((b) => b.slot_index === slotIndex)
       return {
         slot_index: slotIndex,
         kind: portTypeToIfaceKind(item.port_type),
@@ -1808,20 +1777,12 @@ function onCustomPanelBoardChange(payload: { items: PanelLayoutItem[] }) {
     if (board.slot_index <= cap) used.add(board.slot_index)
   }
   persistCoreIfaceBoards(
-    m.attributes,
+    attrs,
     boards.filter((b) => b.slot_index >= 1 && b.slot_index <= cap),
   )
-  syncSwitchDerivedCounts(m.attributes)
+  syncSwitchDerivedCounts(attrs)
 }
 
-function slotPortRangeLabel(slot: SwitchSlotAttr): string {
-  const n = effectivePortCount(slot)
-  if (n <= 0) return '—'
-  const end = slot.port_start + n - 1
-  const first = resolveSlotPort(slot, 0)
-  const last = resolveSlotPort(slot, n - 1)
-  return `编号 ${first.code} ~ ${last.code}；ID ${first.id} ~ ${last.id}（slot${slot.index} ${slot.port_start}-${end}）`
-}
 
 
 function commitServerIfaceSlots(slots: ServerIfaceSlotAttr[]) {
@@ -1835,6 +1796,15 @@ function commitServerIfaceSlots(slots: ServerIfaceSlotAttr[]) {
   ensurePanelLayout(m.attributes, serverIfaceSlotsToDesignSlots(next, m.attributes), false)
 }
 
+function onFlexIoSlotCountChange(v: number | undefined) {
+  const requested = Math.max(0, v ?? 0)
+  const count = Math.min(serverPcieSlotMax.value, requested)
+  if (requested > serverPcieSlotMax.value) {
+    ElMessage.warning(`当前 ${normalizeServerFormFactor(selectedModel.value?.height_u ?? selectedModel.value?.attributes?.form_factor_u)}U 背板最多可安装 ${serverPcieSlotMax.value} 个 PCIe Slot`)
+  }
+  setAttrField('flex_io_slot_count', count)
+}
+
 function onServerHeightChange(v: number | string | undefined) {
   const m = selectedModel.value
   if (!m?.attributes) return
@@ -1846,53 +1816,6 @@ function onServerHeightChange(v: number | string | undefined) {
     serverIfaceSlotsToDesignSlots(readServerIfaceSlots(m.attributes), m.attributes),
     false,
   )
-}
-
-function onServerSlotCountChange(v: number | undefined) {
-  const m = selectedModel.value
-  if (!m?.attributes) return
-  const n = Math.max(1, Math.min(16, v ?? 3))
-  m.attributes.slot_count = n
-  const current = readServerIfaceSlots(m.attributes)
-  const next = current.slice(0, n)
-  while (next.length < n) {
-    next.push(defaultExpansionSlot(next.length + 1))
-  }
-  commitServerIfaceSlots(next)
-}
-
-function patchServerIfaceSlot(idx: number, patch: Partial<ServerIfaceSlotAttr>) {
-  const slots = serverIfaceSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot) return
-  Object.assign(slot, patch)
-  // 扩展槽：同槽网口互斥；板载允许 10G+1G 共存
-  if (!isOnboardSlot(slot)) {
-    if (patch.ports_10g != null && Number(patch.ports_10g) > 0) slot.ports_1g = 0
-    if (patch.ports_1g != null && Number(patch.ports_1g) > 0) slot.ports_10g = 0
-  }
-  commitServerIfaceSlots(slots)
-}
-
-function onServerSlotNicTypeChange(idx: number, type: ServerSlotNicType) {
-  const slots = serverIfaceSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot) return
-  slots[idx] = applyServerSlotNicType(slot, type)
-  commitServerIfaceSlots(slots)
-}
-
-function onServerSlotNicCountChange(idx: number, v: number | undefined) {
-  const slots = serverIfaceSlots.value.map((s) => ({ ...s }))
-  const slot = slots[idx]
-  if (!slot) return
-  const type = serverSlotNicType(slot)
-  if (type === 'none') {
-    slots[idx] = applyServerSlotNicType(slot, '10g', v ?? 2)
-  } else {
-    slots[idx] = applyServerSlotNicType(slot, type, v ?? 2)
-  }
-  commitServerIfaceSlots(slots)
 }
 
 function onServerMemoryModuleChange(v: number | undefined) {
@@ -1914,13 +1837,46 @@ function onServerDiskRearChange(v: number | undefined) {
   setAttrField('disk_rear_count', Math.max(0, Math.min(serverDiskRearMax.value, v ?? 0)))
 }
 
-function onPcieSlotFlexChange(slotIndex: number, count: number) {
+function pcieSpeedOptions(slot: ServerPcieSlotAttr) {
+  return slot.card_type === 'nic_copper'
+    ? SERVER_FLEX_SPEED_OPTIONS.filter((option) => option.value === '1ge' || option.value === '10ge')
+    : SERVER_FLEX_SPEED_OPTIONS.filter((option) => option.value !== '1ge')
+}
+
+function patchPcieSlot(slotIndex: number, patch: Partial<ServerPcieSlotAttr>) {
   const m = selectedModel.value
   if (!m?.attributes) return
-  const next = readPcieSlots(m.attributes).map((s) =>
-    s.index === slotIndex ? { ...s, flex_ports: Math.max(0, Math.min(4, count)) } : { ...s },
-  )
+  const normalizedPatch = normalizeServerFormFactor(m.height_u ?? m.attributes.form_factor_u) === 1
+    ? { ...patch, orientation: 'horizontal' as const }
+    : patch
+  const next = readPcieSlots(m.attributes).map((slot) => {
+    if (slot.index !== slotIndex) return { ...slot }
+    const merged = { ...slot, ...normalizedPatch }
+    const isNic = merged.card_type === 'nic_copper' || merged.card_type === 'nic_optical'
+    const portCount = (isNic ? (merged.port_count === 4 ? 4 : 2) : 0) as 0 | 2 | 4
+    const allowedSpeeds = pcieSpeedOptions(merged).map((option) => option.value)
+    const speed = allowedSpeeds.includes(merged.speed) ? merged.speed : allowedSpeeds[0] || '10ge'
+    return {
+      ...merged,
+      port_count: portCount,
+      flex_ports: portCount,
+      speed,
+      raid_level: merged.card_type === 'raid' ? merged.raid_level || 'raid1' : undefined,
+    }
+  })
   setAttrField('pcie_slots', next)
+}
+
+function onPcieCardTypeChange(slotIndex: number, cardType: ServerPcieCardType) {
+  patchPcieSlot(slotIndex, { card_type: cardType, port_count: cardType.startsWith('nic_') ? 2 : 0 })
+}
+
+function onPciePortCountChange(slotIndex: number, count: number) {
+  patchPcieSlot(slotIndex, { port_count: count === 4 ? 4 : 2 })
+}
+
+function onPcieSpeedChange(slotIndex: number, speed: ServerFlexSpeed) {
+  patchPcieSlot(slotIndex, { speed })
 }
 
 function onServerMemoryModulesChange(v: number | undefined) {
@@ -1989,32 +1945,45 @@ function onSecurityHeightChange(v: number | string | undefined) {
   ensurePanelLayout(m.attributes, [], false)
 }
 
-function onSecuritySlotCountChange(v: number | undefined) {
-  const m = selectedModel.value
-  if (!m?.attributes) return
-  const n = Math.max(1, Math.min(16, v ?? 4))
-  m.attributes.slot_count = n
-  const current = readSecurityIfaceSlots(m.attributes)
-  const next = current.slice(0, n)
-  while (next.length < n) {
-    next.push({
-      index: next.length + 1,
-      control_count: 0,
-      ha_count: 0,
-      mgmt_count: 0,
-      usb_count: 0,
-      ports_10g: 4,
-      ports_1g: 2,
-    })
-  }
-  commitSecurityIfaceSlots(next)
-}
-
 function patchSecurityIfaceSlot(idx: number, patch: Partial<SecurityIfaceSlotAttr>) {
   const slots = securityIfaceSlots.value.map((s) => ({ ...s }))
   const slot = slots[idx]
   if (!slot) return
   Object.assign(slot, patch)
+  commitSecurityIfaceSlots(slots)
+}
+
+function addSecurityIfaceSlot() {
+  const slots = securityIfaceSlots.value.map((slot) => ({ ...slot }))
+  if (slots.length >= MAX_SECURITY_IFACE_SLOTS) {
+    ElMessage.warning('安全设备最多支持 8 个 Slot')
+    return
+  }
+  slots.push({
+    index: slots.length + 1,
+    control_count: 0,
+    ha_count: 0,
+    mgmt_count: 0,
+    usb_count: 0,
+    ports_10g: 4,
+    ports_1g: 2,
+  })
+  commitSecurityIfaceSlots(slots)
+}
+
+async function removeSecurityIfaceSlot(idx: number) {
+  const slots = securityIfaceSlots.value.map((slot) => ({ ...slot }))
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除 Slot ${idx + 1}？后续 Slot 与接口编号将自动顺延。`,
+      '删除 Slot',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  slots.splice(idx, 1)
   commitSecurityIfaceSlots(slots)
 }
 
@@ -2758,17 +2727,7 @@ onMounted(() => {
                   <span class="unit-lab">GB</span>
                 </div>
               </el-form-item>
-              <el-form-item label="PCIE插槽">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('pcie_slot_max') ?? 6)"
-                  :min="0"
-                  :max="16"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="(v: number | undefined) => setAttrField('pcie_slot_max', v ?? 0)"
-                />
-              </el-form-item>
+
               <el-form-item label="机箱高度">
                 <el-select
                   :model-value="normalizeServerFormFactor(selectedModel.height_u)"
@@ -2801,6 +2760,9 @@ onMounted(() => {
                 >
                   <el-option v-for="opt in SERVER_DISK_SIZE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
                 </el-select>
+              </el-form-item>
+              <el-form-item label="盘位方向">
+                <el-tag effect="plain">{{ serverFrontDriveLayoutLabel }}</el-tag>
               </el-form-item>
               <el-form-item label="前置协议">
                 <el-select
@@ -3009,32 +2971,53 @@ onMounted(() => {
                   @change="(v: number | undefined) => setAttrField('lom_1g_count', v ?? 0)"
                 />
               </el-form-item>
-              <el-form-item label="灵活IO速率">
-                <el-select
-                  :model-value="normalizeFlexSpeed(attrFieldValue('flex_io_speed'))"
-                  :disabled="!canEdit"
-                  @change="(v: string) => setAttrField('flex_io_speed', v)"
-                >
-                  <el-option v-for="opt in SERVER_FLEX_SPEED_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
-                </el-select>
+              <el-form-item label="灵活IO插槽数量">
+                <div class="unit-field">
+                  <el-input-number
+                    :model-value="Number(attrFieldValue('flex_io_slot_count') ?? attrFieldValue('pcie_slot_max') ?? 6)"
+                    :min="0"
+                    :max="serverPcieSlotMax"
+                    :controls="false"
+                    :disabled="!canEdit"
+                    class="num-compact"
+                    @change="onFlexIoSlotCountChange"
+                  />
+                  <span class="unit-lab">个 PCIe 槽位（最多 {{ serverPcieSlotMax }} 个）</span>
+                </div>
               </el-form-item>
-              <el-form-item label="PCIE光口" class="span-2">
-                <div class="pcie-slot-defs">
-                  <div v-for="slot in serverPcieSlots" :key="`pcie-def-${slot.index}`" class="pcie-slot-def">
-                    <span class="pcie-slot-lab">Slot{{ slot.index }}</span>
-                    <el-select
-                      :model-value="slot.flex_ports"
-                      size="small"
-                      :disabled="!canEdit"
-                      @change="(v: number) => onPcieSlotFlexChange(slot.index, v)"
-                    >
-                      <el-option
-                        v-for="opt in PCIE_FLEX_PORT_OPTIONS"
-                        :key="opt.value"
-                        :label="opt.label"
-                        :value="opt.value"
-                      />
+              <el-form-item label="PCIe 插槽" class="span-4">
+                <div class="pcie-slot-defs pcie-card-configs">
+                  <div v-for="slot in serverPcieSlots" :key="`pcie-def-${slot.index}`" class="pcie-slot-def pcie-card-config">
+                    <span class="pcie-slot-lab">PCIe {{ slot.index }}</span>
+                    <el-select :model-value="slot.card_type" size="small" :disabled="!canEdit" @change="(v: ServerPcieCardType) => onPcieCardTypeChange(slot.index, v)">
+                      <el-option v-for="opt in PCIE_CARD_TYPE_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
                     </el-select>
+                    <el-select v-if="slot.card_type === 'nic_copper' || slot.card_type === 'nic_optical'" :model-value="slot.port_count" size="small" :disabled="!canEdit" @change="(v: number) => onPciePortCountChange(slot.index, v)">
+                      <el-option v-for="opt in PCIE_PORT_COUNT_OPTIONS.filter((item) => item.value > 0)" :key="opt.value" :label="opt.label" :value="opt.value" />
+                    </el-select>
+                    <el-select v-if="slot.card_type === 'nic_copper' || slot.card_type === 'nic_optical'" :model-value="slot.speed" size="small" :disabled="!canEdit" @change="(v: ServerFlexSpeed) => onPcieSpeedChange(slot.index, v)">
+                      <el-option v-for="opt in pcieSpeedOptions(slot)" :key="opt.value" :label="opt.label" :value="opt.value" />
+                    </el-select>
+                    <el-select v-if="slot.card_type === 'raid'" :model-value="slot.raid_level || 'raid1'" size="small" :disabled="!canEdit" @change="(v: string) => patchPcieSlot(slot.index, { raid_level: v })">
+                      <el-option v-for="opt in DESIGN_RAID_LEVEL_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                    </el-select>
+                    <el-select :model-value="slot.orientation" size="small" :disabled="!canEdit || normalizeServerFormFactor(selectedModel.height_u ?? selectedModel.attributes?.form_factor_u) === 1" @change="(v: ServerPcieSlotAttr['orientation']) => patchPcieSlot(slot.index, { orientation: v })">
+                      <el-option v-for="opt in PCIE_ORIENTATION_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+                    </el-select>
+                    <el-button-group class="pcie-placement-buttons" aria-label="PCIe 插槽位置">
+                      <el-button
+                        v-for="opt in PCIE_PLACEMENT_OPTIONS"
+                        :key="opt.value"
+                        size="small"
+                        :type="slot.placement === opt.value ? 'primary' : 'default'"
+                        :plain="slot.placement !== opt.value"
+                        :disabled="!canEdit"
+                        :aria-pressed="slot.placement === opt.value"
+                        @click="patchPcieSlot(slot.index, { placement: opt.value })"
+                      >
+                        {{ opt.label }}
+                      </el-button>
+                    </el-button-group>
                   </div>
                 </div>
               </el-form-item>
@@ -3063,8 +3046,13 @@ onMounted(() => {
                 <TitleHintBang title="说明" :content="SERVER_PANEL_HINT" :width="360" />
               </span>
               <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                <el-radio-button :value="0.5">0.5×</el-radio-button>
                 <el-radio-button :value="1">1×</el-radio-button>
                 <el-radio-button :value="2">2×</el-radio-button>
+              </el-radio-group>
+              <el-radio-group v-model="panelDemoSide" size="small" class="panel-side-toggles">
+                <el-radio-button value="front">正面</el-radio-button>
+                <el-radio-button value="rear">背面</el-radio-button>
               </el-radio-group>
               <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">自定义面板</el-button>
               <el-button v-if="canEdit" size="small" @click="serverStyleFrontInput?.click()">上传前面板</el-button>
@@ -3094,7 +3082,7 @@ onMounted(() => {
               />
             </div>
             <div class="chassis-demo-pair server-demo-pair" :style="{ zoom: panelDemoCssZoom }">
-              <div class="chassis-demo-col">
+              <div v-if="panelDemoSide === 'front'" class="chassis-demo-col">
                 <div class="chassis-demo-lab">
                   正面
                   <el-button
@@ -3112,6 +3100,7 @@ onMounted(() => {
                   class="style-preview"
                   :src="serverStyleImageFront"
                   alt="前面板样式"
+                  :style="{ aspectRatio: SERVER_DEMO.aspect(normalizeServerFormFactor(selectedModel.height_u)) }"
                 />
                 <ServerFrontSchematic
                   v-else
@@ -3126,7 +3115,7 @@ onMounted(() => {
                   @inspect-port="onSystemPortInspect"
                 />
               </div>
-              <div class="chassis-demo-col">
+              <div v-else class="chassis-demo-col">
                 <div class="chassis-demo-lab">
                   背面
                   <el-button
@@ -3144,6 +3133,7 @@ onMounted(() => {
                   class="style-preview"
                   :src="serverStyleImageRear"
                   alt="后面板样式"
+                  :style="{ aspectRatio: SERVER_DEMO.aspect(normalizeServerFormFactor(selectedModel.height_u)) }"
                 />
                 <ServerRearSchematic
                   v-else
@@ -3166,122 +3156,90 @@ onMounted(() => {
           </template>
 
           <template v-else-if="isSecurityModel">
-            <div class="sec-title">接口属性</div>
-            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form">
+            <div class="sec-title-row">
+              <span class="sec-title">{{ securityProfile.label }} · {{ securityProfile.hardwareTitle }}</span>
+              <el-tag size="small" effect="dark" :color="securityProfile.accent">{{ securityProfile.shortLabel }}</el-tag>
+            </div>
+            <el-form label-position="left" label-width="7em" size="small" class="attr-grid-form hw-attr-form">
               <el-form-item label="设备高度">
-                <el-select
-                  :model-value="normalizeSecurityFormFactor(selectedModel.height_u)"
-                  :disabled="!canEdit"
-                  style="width: 140px"
-                  @change="onSecurityHeightChange"
-                >
-                  <el-option
-                    v-for="opt in SECURITY_HEIGHT_OPTIONS"
-                    :key="opt.value"
-                    :label="opt.label"
-                    :value="opt.value"
-                  />
+                <el-select :model-value="normalizeSecurityFormFactor(selectedModel.height_u)" :disabled="!canEdit" @change="onSecurityHeightChange">
+                  <el-option v-for="opt in SECURITY_HEIGHT_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="板卡插槽数">
-                <el-input-number
-                  :model-value="Number(attrFieldValue('slot_count') ?? securityIfaceSlots.length)"
-                  :min="1"
-                  :max="16"
-                  :controls="false"
-                  :disabled="!canEdit"
-                  class="num-compact"
-                  @change="onSecuritySlotCountChange"
-                />
-              </el-form-item>
+              <el-form-item label="部署方式"><el-input :model-value="String(attrFieldValue('deployment_mode') || securityProfile.deploymentMode)" :disabled="!canEdit" @update:model-value="(v: string) => setAttrField('deployment_mode', v)" /></el-form-item>
+              <el-form-item :label="securityProfile.processorLabel"><el-input-number :model-value="Number(attrFieldValue('cpu_cores') ?? securityProfile.cpuCores)" :min="1" :max="128" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('cpu_cores', v ?? securityProfile.cpuCores)" /></el-form-item>
+              <el-form-item label="内存 GB"><el-input-number :model-value="Number(attrFieldValue('memory_gb') ?? securityProfile.memoryGb)" :min="1" :max="2048" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('memory_gb', v ?? securityProfile.memoryGb)" /></el-form-item>
+              <el-form-item label="磁盘数量"><el-input-number :model-value="Number(attrFieldValue('disk_count') ?? securityProfile.diskCount)" :min="0" :max="24" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('disk_count', v ?? securityProfile.diskCount)" /></el-form-item>
+              <el-form-item :label="securityProfile.storageLabel"><el-input-number :model-value="Number(attrFieldValue('disk_gb') ?? securityProfile.diskGb)" :min="0" :max="100000" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('disk_gb', v ?? securityProfile.diskGb)" /></el-form-item>
+              <el-form-item :label="securityProfile.throughputLabel"><el-input-number :model-value="Number(attrFieldValue('throughput_gbps') ?? securityProfile.throughputGbps)" :min="0" :max="6400" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('throughput_gbps', v ?? securityProfile.throughputGbps)" /></el-form-item>
+              <el-form-item label="日志留存天数"><el-input-number :model-value="Number(attrFieldValue('retention_days') ?? securityProfile.retentionDays)" :min="1" :max="3650" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('retention_days', v ?? securityProfile.retentionDays)" /></el-form-item>
+              <el-form-item :label="securityProfile.metricLabel"><el-input-number :model-value="Number(attrFieldValue(securityProfile.metricKey) ?? securityProfile.metricDefault)" :min="0" :max="100000000" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField(securityProfile.metricKey, v ?? securityProfile.metricDefault)" /></el-form-item>
+              <el-form-item label="电源数量"><el-input-number :model-value="Number(attrFieldValue('psu_count') ?? 2)" :min="1" :max="8" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('psu_count', v ?? 2)" /></el-form-item>
+              <el-form-item label="风扇模组"><el-input-number :model-value="Number(attrFieldValue('fan_count') ?? 2)" :min="0" :max="16" :controls="false" :disabled="!canEdit" @change="(v: number | undefined) => setAttrField('fan_count', v ?? 2)" /></el-form-item>
             </el-form>
 
             <div class="sec-title-row">
-              <span class="sec-title with-hint">
-                Slot 配置（共 {{ securityIfaceSlots.length }} 槽）
-                <TitleHintBang title="说明" :content="SECURITY_SLOT_CONFIG_HINT" />
-              </span>
+              <span class="sec-title">面板演示</span>
+              <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                <el-radio-button :value="0.5">0.5×</el-radio-button>
+                <el-radio-button :value="1">1×</el-radio-button>
+                <el-radio-button :value="2">2×</el-radio-button>
+              </el-radio-group>
+              <el-radio-group v-model="panelDemoSide" size="small" class="panel-side-toggles">
+                <el-radio-button value="front">正面</el-radio-button>
+                <el-radio-button value="rear">背面</el-radio-button>
+              </el-radio-group>
+              <el-button size="small" @click="securityInterfaceEditorVisible = !securityInterfaceEditorVisible">{{ securityInterfaceEditorVisible ? '收起接口参数' : '接口参数' }}</el-button>
+              <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">自定义面板</el-button>
             </div>
-            <div class="slot-grid">
-              <div
-                v-for="(slot, idx) in securityIfaceSlots"
-                :key="`sec-${slot.index}`"
-                class="slot-card switch-slot-card"
-              >
-                <span class="slot-idx-wrap with-hint">
-                  <span class="slot-idx">Slot {{ slot.index }}</span>
-                  <TitleHintBang title="接口编号" :content="securitySlotRangeHint(slot)" :width="280" />
-                </span>
-                <span class="slot-lab">Control</span>
-                <el-input-number
-                  :model-value="slot.control_count"
-                  :min="0"
-                  :max="8"
-                  :controls="false"
-                  size="small"
-                  class="slot-num"
-                  :disabled="!canEdit"
-                  @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { control_count: v ?? 0 })"
-                />
-                <span class="slot-lab">HA</span>
-                <el-input-number
-                  :model-value="slot.ha_count"
-                  :min="0"
-                  :max="8"
-                  :controls="false"
-                  size="small"
-                  class="slot-num"
-                  :disabled="!canEdit"
-                  @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { ha_count: v ?? 0 })"
-                />
-                <span class="slot-lab">MGMT</span>
-                <el-input-number
-                  :model-value="slot.mgmt_count"
-                  :min="0"
-                  :max="8"
-                  :controls="false"
-                  size="small"
-                  class="slot-num"
-                  :disabled="!canEdit"
-                  @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { mgmt_count: v ?? 0 })"
-                />
-                <span class="slot-lab">USB</span>
-                <el-input-number
-                  :model-value="slot.usb_count"
-                  :min="0"
-                  :max="8"
-                  :controls="false"
-                  size="small"
-                  class="slot-num"
-                  :disabled="!canEdit"
-                  @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { usb_count: v ?? 0 })"
-                />
-                <span class="slot-lab">10G光口</span>
-                <el-input-number
-                  :model-value="slot.ports_10g"
-                  :min="0"
-                  :max="48"
-                  :controls="false"
-                  size="small"
-                  class="slot-num"
-                  :disabled="!canEdit"
-                  @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { ports_10g: v ?? 0 })"
-                />
-                <span class="slot-lab">1G电口</span>
-                <el-input-number
-                  :model-value="slot.ports_1g"
-                  :min="0"
-                  :max="48"
-                  :controls="false"
-                  size="small"
-                  class="slot-num"
-                  :disabled="!canEdit"
-                  @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { ports_1g: v ?? 0 })"
-                />
+            <SecurityDeviceSchematic
+              v-if="panelDemoSide === 'front'"
+              :style="{ zoom: panelDemoCssZoom }"
+              :subtype="securityDeviceType"
+              :height-u="selectedModel.height_u"
+              :slots="securityIfaceSlots"
+              :cpu-cores="Number(attrFieldValue('cpu_cores') ?? securityProfile.cpuCores)"
+              :memory-gb="Number(attrFieldValue('memory_gb') ?? securityProfile.memoryGb)"
+              :disk-count="Number(attrFieldValue('disk_count') ?? securityProfile.diskCount)"
+              :disk-gb="Number(attrFieldValue('disk_gb') ?? securityProfile.diskGb)"
+              :throughput-gbps="Number(attrFieldValue('throughput_gbps') ?? securityProfile.throughputGbps)"
+              :psu-count="Number(attrFieldValue('psu_count') ?? 2)"
+              @edit-slot="securityInterfaceEditorVisible = true"
+            />
+            <SecurityDeviceRearSchematic
+              v-else
+              :style="{ zoom: panelDemoCssZoom }"
+              :subtype="securityDeviceType"
+              :height-u="selectedModel.height_u"
+              :slots="securityIfaceSlots"
+              :fan-count="Number(attrFieldValue('fan_count') ?? securityProfile.fanCount)"
+              :psu-count="Number(attrFieldValue('psu_count') ?? 2)"
+              @edit-slot="securityInterfaceEditorVisible = true"
+            />
+            <div class="chassis-hint">通过正面/背面按钮切换模板；不同安全设备采用独立配色、背板散热、电源与接口分区，接口 ID 唯一可定位。</div>
+
+            <div v-if="securityInterfaceEditorVisible" class="security-interface-editor">
+              <div class="security-editor-head">
+                <div class="security-editor-title">
+                  <strong>接口参数</strong>
+                  <span>支持多个接口 Slot，修改后自动同步唯一端口编号与自定义面板组件</span>
+                </div>
+                <el-button v-if="canEdit" type="primary" plain size="small" :disabled="securityIfaceSlots.length >= MAX_SECURITY_IFACE_SLOTS" @click="addSecurityIfaceSlot">
+                  添加 Slot（{{ securityIfaceSlots.length }}/{{ MAX_SECURITY_IFACE_SLOTS }}）
+                </el-button>
+              </div>
+              <div v-for="(slot, idx) in securityIfaceSlots" :key="`sec-editor-${slot.index}`" class="security-editor-row">
+                <span class="slot-idx-wrap with-hint"><b>Slot {{ slot.index }}</b><TitleHintBang title="接口编号" :content="securitySlotRangeHint(slot)" :width="280" /></span>
+                <label>Control<el-input-number :model-value="slot.control_count" :min="0" :max="8" :controls="false" size="small" :disabled="!canEdit" @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { control_count: v ?? 0 })" /></label>
+                <label>HA<el-input-number :model-value="slot.ha_count" :min="0" :max="8" :controls="false" size="small" :disabled="!canEdit" @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { ha_count: v ?? 0 })" /></label>
+                <label>MGMT<el-input-number :model-value="slot.mgmt_count" :min="0" :max="8" :controls="false" size="small" :disabled="!canEdit" @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { mgmt_count: v ?? 0 })" /></label>
+                <label>USB<el-input-number :model-value="slot.usb_count" :min="0" :max="8" :controls="false" size="small" :disabled="!canEdit" @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { usb_count: v ?? 0 })" /></label>
+                <label>10G 光口<el-input-number :model-value="slot.ports_10g" :min="0" :max="48" :controls="false" size="small" :disabled="!canEdit" @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { ports_10g: v ?? 0 })" /></label>
+                <label>1G 电口<el-input-number :model-value="slot.ports_1g" :min="0" :max="48" :controls="false" size="small" :disabled="!canEdit" @change="(v: number | undefined) => patchSecurityIfaceSlot(idx, { ports_1g: v ?? 0 })" /></label>
+                <el-button v-if="canEdit" link type="danger" size="small" class="security-slot-delete" @click="removeSecurityIfaceSlot(idx)">删除 Slot</el-button>
               </div>
             </div>
           </template>
-
           <template v-else-if="isSwitchModel">
             <div class="sec-title">接口属性</div>
             <el-form
@@ -3616,15 +3574,20 @@ onMounted(() => {
                   <TitleHintBang title="说明" :content="switchSlotConfigHint" :width="360" />
                 </span>
                 <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                  <el-radio-button :value="0.5">0.5×</el-radio-button>
                   <el-radio-button :value="1">1×</el-radio-button>
                   <el-radio-button :value="2">2×</el-radio-button>
                 </el-radio-group>
+              <el-radio-group v-model="panelDemoSide" size="small" class="panel-side-toggles">
+                <el-radio-button value="front">正面</el-radio-button>
+                <el-radio-button value="rear">背面</el-radio-button>
+              </el-radio-group>
                 <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">
                   自定义面板
                 </el-button>
               </div>
               <div class="chassis-demo-pair" :style="{ zoom: panelDemoCssZoom }">
-                <div class="chassis-demo-col">
+                <div v-if="panelDemoSide === 'front'" class="chassis-demo-col">
                   <div class="chassis-demo-lab">正面</div>
                   <SwitchChassisSchematic
                     :height-u="chassisHeightU"
@@ -3633,6 +3596,7 @@ onMounted(() => {
                     :editable="canEdit"
                     :selected-port="selectedChassisPort"
                     @move-blank="onMoveBlankPanel"
+                    @move-slot="onMoveSwitchSlot"
                     @nudge-blank="onNudgeBlankPanel"
                     @select-port="onChassisPortSelect"
                     @inspect-port="onChassisPortInspect"
@@ -3659,11 +3623,11 @@ onMounted(() => {
                     </div>
                   </div>
                   <div v-if="canEdit" class="chassis-hint">
-                    左键点击接口编辑，右键查看接口信息（含管理口与堆叠/集群）
-                    <template v-if="blankPanelRows.length">；空白面板可拖拽或用 ↑↓ 调整位置</template>
+                    拖动接口板可交换或修改槽位；左键点击接口编辑，右键查看接口信息（含管理口与堆叠/集群）
+                    <template v-if="blankPanelRows.length">；机框空白面板可拖拽或用 ↑↓ 调整位置</template>
                   </div>
                 </div>
-                <div class="chassis-demo-col">
+                <div v-else class="chassis-demo-col">
                   <div class="chassis-demo-lab">背面</div>
                   <SwitchChassisRearSchematic
                     :height-u="chassisHeightU"
@@ -3680,15 +3644,20 @@ onMounted(() => {
                   <TitleHintBang title="说明" :content="switchSlotConfigHint" :width="360" />
                 </span>
                 <el-radio-group v-model="panelDemoZoom" size="small" class="panel-zoom-toggles">
+                  <el-radio-button :value="0.5">0.5×</el-radio-button>
                   <el-radio-button :value="1">1×</el-radio-button>
                   <el-radio-button :value="2">2×</el-radio-button>
                 </el-radio-group>
+              <el-radio-group v-model="panelDemoSide" size="small" class="panel-side-toggles">
+                <el-radio-button value="front">正面</el-radio-button>
+                <el-radio-button value="rear">背面</el-radio-button>
+              </el-radio-group>
                 <el-button v-if="canEdit" type="primary" plain size="small" @click="openCustomPanel">
                   自定义面板
                 </el-button>
               </div>
               <div class="chassis-demo-pair access-demo-pair" :style="{ zoom: panelDemoCssZoom }">
-                <div class="chassis-demo-col">
+                <div v-if="panelDemoSide === 'front'" class="chassis-demo-col">
                   <div class="chassis-demo-lab">正面</div>
                   <AccessSwitchSchematic
                     :downlink="accessDownlinkSlot"
@@ -3699,7 +3668,7 @@ onMounted(() => {
                     @inspect-port="onChassisPortInspect"
                   />
                 </div>
-                <div class="chassis-demo-col">
+                <div v-else class="chassis-demo-col">
                   <div class="chassis-demo-lab">背面</div>
                   <AccessSwitchRearSchematic
                     :fan-count="Number(attrFieldValue('fan_count') ?? 2)"
@@ -3807,7 +3776,7 @@ onMounted(() => {
             </el-form>
           </template>
 
-          <template v-if="usesGridPanel && !isSwitchModel && !isServerModel">
+          <template v-if="usesGridPanel && !isSwitchModel && !isServerModel && !isSecurityModel">
             <div class="sec-title-row">
               <span class="sec-title with-hint">
                 面板样式
@@ -4089,7 +4058,7 @@ onMounted(() => {
         :palette="panelPalette"
         :slots="serverSlots"
         :editable="canEdit"
-        free-board
+        :free-board="isCoreAggSwitch"
         :max-boards="
           isCoreAggSwitch ? Number(attrFieldValue('modular_expansion_slots') ?? 6) : 8
         "
@@ -4134,8 +4103,45 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="modelDialogVisible" title="新建模型" width="620px">
+    <el-dialog v-model="modelDialogVisible" title="新建模型" width="760px">
       <el-form label-width="100px">
+        <el-form-item label="专业模板">
+          <el-select
+            :model-value="modelForm.preset_id"
+            clearable
+            filterable
+            placeholder="选择典型型号，一键生成硬件与接口定义"
+            style="width: 100%"
+            @change="onCreatePresetChange"
+          >
+            <el-option-group
+              v-for="group in NETWORK_MODEL_PRESET_GROUPS"
+              :key="group.family"
+              :label="group.label"
+            >
+              <el-option
+                v-for="preset in group.presets"
+                :key="preset.id"
+                :label="`${preset.name} · ${preset.summary}`"
+                :value="preset.id"
+              />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
+        <el-alert
+          v-if="selectedCreatePreset"
+          type="success"
+          :closable="false"
+          show-icon
+          class="preset-summary"
+        >
+          <template #title>{{ selectedCreatePreset.summary }}</template>
+          <div class="preset-tags">
+            <el-tag v-for="tag in selectedCreatePreset.tags" :key="tag" size="small" effect="plain">
+              {{ tag }}
+            </el-tag>
+          </div>
+        </el-alert>
         <el-form-item label="编号" required>
           <el-input v-model="modelForm.code" />
         </el-form-item>
@@ -4143,6 +4149,16 @@ onMounted(() => {
           <el-select v-model="modelForm.category" style="width: 100%">
             <el-option
               v-for="opt in NETWORK_DEVICE_TYPE_OPTIONS"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="设备子类型" required>
+          <el-select v-model="modelForm.subtype" style="width: 100%">
+            <el-option
+              v-for="opt in createSubtypeOptions"
               :key="opt.value"
               :label="opt.label"
               :value="opt.value"
@@ -4197,6 +4213,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.preset-summary {
+  margin-bottom: 16px;
+}
+.preset-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
 .model-design {
   display: grid;
   grid-template-columns: 260px 340px minmax(0, 1fr);
@@ -4324,6 +4349,7 @@ onMounted(() => {
 .sec-title-row .sec-title {
   margin: 8px 0 4px;
 }
+.panel-side-toggles { margin-left: auto; }
 .panel-zoom-toggles {
   flex: 0 0 auto;
 }
@@ -4400,6 +4426,62 @@ onMounted(() => {
 .attr-grid-form .span-2 {
   grid-column: span 2;
 }
+.pcie-card-configs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.pcie-card-config {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--el-fill-color-blank), var(--el-fill-color-light));
+}
+.pcie-card-config :deep(.el-select) {
+  width: 118px !important;
+}
+.pcie-placement-buttons {
+  display: inline-flex;
+  flex-wrap: nowrap;
+}
+.pcie-placement-buttons :deep(.el-button) {
+  min-width: 46px;
+  padding-inline: 10px;
+}
+.security-interface-editor {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  background: var(--el-fill-color-extra-light);
+}
+.security-editor-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+}
+.security-editor-head span { color: var(--el-text-color-secondary); }
+.security-editor-title { display: flex; flex-direction: column; gap: 3px; }
+.security-editor-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 9px 0;
+  border-top: 1px dashed var(--el-border-color);
+}
+.security-editor-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+}
+.security-editor-row :deep(.el-input-number) { width: 72px; }
+.security-slot-delete { margin-left: auto; }
 .pcie-slot-defs {
   display: flex;
   flex-wrap: wrap;
@@ -4568,9 +4650,9 @@ onMounted(() => {
 }
 .chassis-demo-pair {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px 16px;
-  max-width: 760px;
+  max-width: 860px;
   margin: 6px 0 12px;
   align-items: start;
 }
@@ -4579,8 +4661,8 @@ onMounted(() => {
   max-width: 860px;
 }
 .access-demo-pair {
-  max-width: 760px;
-  grid-template-columns: 1fr 1fr;
+  max-width: 860px;
+  grid-template-columns: 1fr;
 }
 @media (max-width: 900px) {
   .chassis-demo-pair {
@@ -4834,7 +4916,16 @@ onMounted(() => {
   margin-bottom: 4px;
 }
 @media (max-width: 1100px) {
-  .model-design {
+  .preset-summary {
+  margin-bottom: 16px;
+}
+.preset-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.model-design {
     grid-template-columns: 1fr;
     height: auto;
   }

@@ -477,8 +477,7 @@ watch(currentId, () => {
         </div>
 
         <p class="sheet-hint">
-          添加连线时可选择场景；本端/对端须已关联设备管理（合同设备名称）。接口来自设备定义面板。
-          点击位置/U位可改上架；修改后请保存。
+          接口设计表固定展示本端/对端设备、位置、U 位、接口、接口类型、线缆类型和标签；双击任一行可编辑完整连线信息，右键可删除连线。
         </p>
 
         <el-table
@@ -488,182 +487,23 @@ watch(currentId, () => {
           border
           height="calc(100vh - 280px)"
           class="design-sheet"
+          @row-dblclick="openEditDialog"
+          @row-contextmenu="removeLink"
         >
-          <el-table-column label="场景" width="130" fixed>
-            <template #default="{ row }: { row: InterfaceDesignRow }">
-              <el-select
-                v-if="canEdit"
-                :model-value="row.linkRole"
-                size="small"
-                @change="(v: string) => updateRowField(row, 'link_role', v)"
-              >
-                <el-option
-                  v-for="(label, key) in LINK_ROLE_LABELS"
-                  :key="key"
-                  :label="label"
-                  :value="key"
-                />
-              </el-select>
-              <span v-else>{{ row.linkRoleLabel }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="连接类型" width="90" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.connectionType || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="速率" width="72" align="center">
-            <template #default="{ row }">{{ row.speed || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="LAG" min-width="100" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.lagGroup || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="冗余" width="64" align="center">
-            <template #default="{ row }">{{ row.redundancyPath || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="介质" width="80" align="center">
-            <template #default="{ row }">{{ row.media || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="本端设备" min-width="110" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.sourceKind }}</template>
-          </el-table-column>
-          <el-table-column label="设备名称" min-width="130" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.sourceName }}</template>
-          </el-table-column>
-          <el-table-column label="设备位置" min-width="140" show-overflow-tooltip>
-            <template #default="{ row }">
-              <el-button
-                v-if="canEdit"
-                link
-                type="primary"
-                @click="openLocationEditor(row.link.source_node_id)"
-              >
-                {{ row.sourceLocation === '-' ? '设置位置' : row.sourceLocation }}
-              </el-button>
-              <span v-else>{{ row.sourceLocation }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="U位" width="80" align="center">
-            <template #default="{ row }">
-              <el-button
-                v-if="canEdit"
-                link
-                type="primary"
-                @click="openLocationEditor(row.link.source_node_id)"
-              >
-                {{ row.sourceU === '-' ? '设U' : row.sourceU }}
-              </el-button>
-              <span v-else>{{ row.sourceU }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="本端接口" min-width="120" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.sourcePortLabel }}</template>
-          </el-table-column>
-
-          <el-table-column label="对端设备" min-width="110" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.targetKind }}</template>
-          </el-table-column>
-          <el-table-column label="设备名称" min-width="130" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.targetName }}</template>
-          </el-table-column>
-          <el-table-column label="对端位置" min-width="140" show-overflow-tooltip>
-            <template #default="{ row }">
-              <el-button
-                v-if="canEdit"
-                link
-                type="primary"
-                @click="openLocationEditor(row.link.target_node_id)"
-              >
-                {{ row.targetLocation === '-' ? '设置位置' : row.targetLocation }}
-              </el-button>
-              <span v-else>{{ row.targetLocation }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="U位" width="80" align="center">
-            <template #default="{ row }">
-              <el-button
-                v-if="canEdit"
-                link
-                type="primary"
-                @click="openLocationEditor(row.link.target_node_id)"
-              >
-                {{ row.targetU === '-' ? '设U' : row.targetU }}
-              </el-button>
-              <span v-else>{{ row.targetU }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="对端接口" min-width="120" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.targetPortLabel }}</template>
-          </el-table-column>
-
-          <el-table-column label="接口类" width="100">
-            <template #default="{ row }">
-              <el-select
-                v-if="canEdit"
-                :model-value="row.interfaceClass"
-                size="small"
-                @change="(v: string) => updateRowField(row, 'interface_class', v)"
-              >
-                <el-option label="电口" value="electric" />
-                <el-option label="光口" value="optical" />
-                <el-option label="高速铜缆" value="dac" />
-                <el-option label="其他" value="other" />
-              </el-select>
-              <span v-else>{{ row.interfaceClassLabel }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="线缆类" width="130">
-            <template #default="{ row }">
-              <el-select
-                v-if="canEdit"
-                :model-value="row.cableType"
-                size="small"
-                @change="(v: string) => updateRowField(row, 'cable_type', v)"
-              >
-                <el-option label="超六类铜缆" value="copper_cat6" />
-                <el-option label="多模光纤" value="fiber_mm" />
-                <el-option label="单模光纤" value="fiber_sm" />
-                <el-option label="DAC" value="dac" />
-                <el-option label="AOC" value="aoc" />
-                <el-option label="其他" value="other" />
-              </el-select>
-              <span v-else>{{ row.cableTypeLabel }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="本端标签" min-width="180">
-            <template #default="{ row }">
-              <el-input
-                v-if="canEdit"
-                :model-value="row.sourceLabel"
-                size="small"
-                @change="(v: string) => updateRowField(row, 'source_label', v)"
-              />
-              <span v-else>{{ row.sourceLabel }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="对端标签" min-width="180">
-            <template #default="{ row }">
-              <el-input
-                v-if="canEdit"
-                :model-value="row.targetLabel"
-                size="small"
-                @change="(v: string) => updateRowField(row, 'target_label', v)"
-              />
-              <span v-else>{{ row.targetLabel }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="88" fixed="right" align="center">
-            <template #default="{ row }">
-              <el-dropdown v-if="canEdit" trigger="click">
-                <el-button type="primary" link>操作</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item @click="openEditDialog(row)">编辑</el-dropdown-item>
-                    <el-dropdown-item divided @click="removeLink(row)">删除</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </template>
-          </el-table-column>
-        </el-table>
+          <el-table-column label="本端设备" min-width="110" fixed show-overflow-tooltip><template #default="{ row }">{{ row.sourceKind }}</template></el-table-column>
+          <el-table-column label="设备名称" min-width="150" fixed show-overflow-tooltip><template #default="{ row }">{{ row.sourceName }}</template></el-table-column>
+          <el-table-column label="设备位置" min-width="150" show-overflow-tooltip><template #default="{ row }"><el-button v-if="canEdit" link type="primary" @click="openLocationEditor(row.link.source_node_id)">{{ row.sourceLocation === '-' ? '设置位置' : row.sourceLocation }}</el-button><span v-else>{{ row.sourceLocation }}</span></template></el-table-column>
+          <el-table-column label="U位" width="78" align="center"><template #default="{ row }"><el-button v-if="canEdit" link type="primary" @click="openLocationEditor(row.link.source_node_id)">{{ row.sourceU === '-' ? '设U' : row.sourceU }}</el-button><span v-else>{{ row.sourceU }}</span></template></el-table-column>
+          <el-table-column label="本端接口" min-width="135" show-overflow-tooltip><template #default="{ row }">{{ row.sourcePortLabel }}</template></el-table-column>
+          <el-table-column label="对端设备" min-width="110" show-overflow-tooltip><template #default="{ row }">{{ row.targetKind }}</template></el-table-column>
+          <el-table-column label="设备名称" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.targetName }}</template></el-table-column>
+          <el-table-column label="对端位置" min-width="150" show-overflow-tooltip><template #default="{ row }"><el-button v-if="canEdit" link type="primary" @click="openLocationEditor(row.link.target_node_id)">{{ row.targetLocation === '-' ? '设置位置' : row.targetLocation }}</el-button><span v-else>{{ row.targetLocation }}</span></template></el-table-column>
+          <el-table-column label="U位" width="78" align="center"><template #default="{ row }"><el-button v-if="canEdit" link type="primary" @click="openLocationEditor(row.link.target_node_id)">{{ row.targetU === '-' ? '设U' : row.targetU }}</el-button><span v-else>{{ row.targetU }}</span></template></el-table-column>
+          <el-table-column label="对端接口" min-width="135" show-overflow-tooltip><template #default="{ row }">{{ row.targetPortLabel }}</template></el-table-column>
+          <el-table-column label="接口类型" width="115"><template #default="{ row }"><el-select v-if="canEdit" :model-value="row.interfaceClass" size="small" @change="(v: string) => updateRowField(row, 'interface_class', v)"><el-option label="电口" value="electric" /><el-option label="光口" value="optical" /><el-option label="高速铜缆" value="dac" /><el-option label="其他" value="other" /></el-select><span v-else>{{ row.interfaceClassLabel }}</span></template></el-table-column>
+          <el-table-column label="线缆类型" width="135"><template #default="{ row }"><el-select v-if="canEdit" :model-value="row.cableType" size="small" @change="(v: string) => updateRowField(row, 'cable_type', v)"><el-option label="超六类铜缆" value="copper_cat6" /><el-option label="多模光纤" value="fiber_mm" /><el-option label="单模光纤" value="fiber_sm" /><el-option label="DAC" value="dac" /><el-option label="AOC" value="aoc" /><el-option label="其他" value="other" /></el-select><span v-else>{{ row.cableTypeLabel }}</span></template></el-table-column>
+          <el-table-column label="本端标签" min-width="180"><template #default="{ row }"><el-input v-if="canEdit" :model-value="row.sourceLabel" size="small" @change="(v: string) => updateRowField(row, 'source_label', v)" /><span v-else>{{ row.sourceLabel }}</span></template></el-table-column>
+          <el-table-column label="对端标签" min-width="180"><template #default="{ row }"><el-input v-if="canEdit" :model-value="row.targetLabel" size="small" @change="(v: string) => updateRowField(row, 'target_label', v)" /><span v-else>{{ row.targetLabel }}</span></template></el-table-column>        </el-table>
         <el-empty v-else description="请先在「设备定义」中创建或选择项目" />
       </section>
     </el-card>

@@ -28,13 +28,17 @@ const props = defineProps<{
   nodes: NetworkNode[]
   links: NetworkLink[]
   selectedNodeId: string | null
+  selectedNodeIds?: string[]
   selectedLinkId?: string | null
   selectedGroupName?: string | null
+  selectedGroupNames?: string[]
   linkMode: boolean
   linkSourceId?: string | null
   stampMode?: boolean
   nodeLabStatus?: Record<string, string> | null
-  /** devices=逐台；groups=按设备组简化架构 */
+  /** 本地流量模拟运行时为连线启用数据流动画 */
+  trafficRunning?: boolean
+  /** devices=全设备；groups=按设备组简化架构 */
   viewMode?: 'devices' | 'groups'
   /** 组名 → 角色（图标） */
   groupRoles?: Record<string, FabricRole | null>
@@ -46,13 +50,17 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectNode: [id: string | null]
+  selectNodes: [ids: string[]]
   selectLink: [id: string | null]
   selectGroup: [name: string | null]
+  selectGroups: [names: string[]]
   inspectGroup: [name: string]
   moveNode: [id: string, x: number, y: number]
   moveGroup: [name: string, x: number, y: number]
   placeNode: [id: string, x: number, y: number]
   placeDeviceGroup: [name: string, x: number, y: number]
+  removeNodeFromCanvas: [id: string]
+  removeGroupFromCanvas: [name: string]
   canvasClick: [x: number, y: number]
 }>()
 
@@ -67,6 +75,8 @@ const MIN_CANVAS_H = 1200
 
 const dragging = ref<{ id: string; offsetX: number; offsetY: number } | null>(null)
 const draggingGroup = ref<{ name: string; offsetX: number; offsetY: number } | null>(null)
+const marquee = ref<{ startX: number; startY: number; x: number; y: number } | null>(null)
+let suppressBackgroundClick = false
 let groupDragMoved = false
 const svgRef = ref<SVGSVGElement | null>(null)
 const wrapRef = ref<HTMLElement | null>(null)
@@ -79,6 +89,18 @@ let pendingMove: { id: string; x: number; y: number } | null = null
 let scrollRaf = 0
 
 const isGroupView = computed(() => props.viewMode === 'groups')
+const selectedNodeSet = computed(() => new Set(props.selectedNodeIds || []))
+const selectedGroupSet = computed(() => new Set(props.selectedGroupNames || []))
+const marqueeRect = computed(() => {
+  const box = marquee.value
+  if (!box) return null
+  return {
+    x: Math.min(box.startX, box.x),
+    y: Math.min(box.startY, box.y),
+    width: Math.abs(box.x - box.startX),
+    height: Math.abs(box.y - box.startY),
+  }
+})
 
 const roleMap = computed(() => {
   const m = new Map<string, FabricRole | null>()
@@ -241,6 +263,7 @@ function shouldShowNodeLabel(node: NetworkNode) {
   return (
     showAllNodeLabels.value ||
     props.selectedNodeId === node.id ||
+    selectedNodeSet.value.has(node.id) ||
     props.linkSourceId === node.id
   )
 }
@@ -286,7 +309,9 @@ function svgPointFromEvent(event: MouseEvent | DragEvent) {
 function onNodeMouseDown(event: MouseEvent, node: NetworkNode) {
   event.stopPropagation()
   emit('selectGroup', null)
+  emit('selectGroups', [])
   emit('selectLink', null)
+  emit('selectNodes', [node.id])
   emit('selectNode', node.id)
   if (props.linkMode) return
   const cursor = svgPointFromEvent(event)
@@ -296,12 +321,36 @@ function onNodeMouseDown(event: MouseEvent, node: NetworkNode) {
     offsetX: cursor.x - node.pos_x,
     offsetY: cursor.y - node.pos_y,
   }
+  window.addEventListener('mousemove', onWindowNodeMove)
+  window.addEventListener('mouseup', onWindowNodeUp)
+}
+
+function pointerOutsideCanvas(event: MouseEvent): boolean {
+  const rect = wrapRef.value?.getBoundingClientRect()
+  if (!rect) return false
+  return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom
+}
+
+function onWindowNodeMove(event: MouseEvent) {
+  if (!dragging.value) return
+  onMouseMove(event)
+}
+
+function onWindowNodeUp(event: MouseEvent) {
+  const id = dragging.value?.id || null
+  const outside = !!id && pointerOutsideCanvas(event)
+  window.removeEventListener('mousemove', onWindowNodeMove)
+  window.removeEventListener('mouseup', onWindowNodeUp)
+  onMouseUp()
+  if (outside && id) emit('removeNodeFromCanvas', id)
 }
 
 function onGroupMouseDown(event: MouseEvent, g: CanvasGroupGlyph) {
   event.stopPropagation()
   if (event.button !== 0) return
   event.preventDefault()
+  emit('selectNodes', [])
+  emit('selectGroups', [g.name])
   emit('selectNode', null)
   emit('selectLink', null)
   emit('selectGroup', g.name)
@@ -329,10 +378,13 @@ function onWindowGroupMove(event: MouseEvent) {
   emit('moveGroup', draggingGroup.value.name, x, y)
 }
 
-function onWindowGroupUp() {
+function onWindowGroupUp(event: MouseEvent) {
+  const name = draggingGroup.value?.name || null
+  const outside = !!name && pointerOutsideCanvas(event)
   window.removeEventListener('mousemove', onWindowGroupMove)
   window.removeEventListener('mouseup', onWindowGroupUp)
   onMouseUp()
+  if (outside && name) emit('removeGroupFromCanvas', name)
 }
 
 function flushMove() {
@@ -347,6 +399,11 @@ function onMouseMove(event: MouseEvent) {
   if (draggingGroup.value) return
   const cursor = svgPointFromEvent(event)
   if (!cursor) return
+  if (marquee.value) {
+    marquee.value.x = cursor.x
+    marquee.value.y = cursor.y
+    return
+  }
   if (!dragging.value) return
   pendingMove = {
     id: dragging.value.id,
@@ -356,20 +413,69 @@ function onMouseMove(event: MouseEvent) {
   if (!moveRaf) moveRaf = requestAnimationFrame(flushMove)
 }
 
+function finishMarquee() {
+  const rect = marqueeRect.value
+  if (!rect || (rect.width < 5 && rect.height < 5)) {
+    marquee.value = null
+    return
+  }
+  const ids = displayNodes.value
+    .filter(
+      (node) =>
+        node.pos_x + ICON >= rect.x &&
+        node.pos_x <= rect.x + rect.width &&
+        node.pos_y + ICON >= rect.y &&
+        node.pos_y <= rect.y + rect.height,
+    )
+    .map((node) => node.id)
+  const groupNames = groupGlyphs.value
+    .filter(
+      (group) =>
+        group.pos_x + GROUP_ICON >= rect.x &&
+        group.pos_x <= rect.x + rect.width &&
+        group.pos_y + GROUP_ICON >= rect.y &&
+        group.pos_y <= rect.y + rect.height,
+    )
+    .map((group) => group.name)
+  emit('selectNodes', ids)
+  emit('selectGroups', groupNames)
+  emit('selectNode', ids.length === 1 && !groupNames.length ? ids[0] : null)
+  emit('selectLink', null)
+  emit('selectGroup', groupNames.length === 1 && !ids.length ? groupNames[0] : null)
+  suppressBackgroundClick = true
+  marquee.value = null
+}
+
 function onMouseUp() {
+  if (marquee.value) finishMarquee()
   if (pendingMove) flushMove()
   dragging.value = null
   draggingGroup.value = null
   window.removeEventListener('mousemove', onWindowGroupMove)
   window.removeEventListener('mouseup', onWindowGroupUp)
+  window.removeEventListener('mousemove', onWindowNodeMove)
+  window.removeEventListener('mouseup', onWindowNodeUp)
 }
 
 function onWrapMouseLeave() {
-  if (draggingGroup.value) return
+  if (draggingGroup.value || dragging.value) return
   onMouseUp()
 }
 
+function onBackgroundMouseDown(event: MouseEvent) {
+  if (event.button !== 0 || props.linkMode || props.stampMode) return
+  const target = event.target as Element | null
+  if (target?.closest?.('.node') || target?.closest?.('.link-hit') || target?.closest?.('.group-node')) return
+  const cursor = svgPointFromEvent(event)
+  if (!cursor) return
+  marquee.value = { startX: cursor.x, startY: cursor.y, x: cursor.x, y: cursor.y }
+}
+
 function onBackgroundClick(event: MouseEvent) {
+  if (suppressBackgroundClick) {
+    suppressBackgroundClick = false
+    return
+  }
   if (props.linkMode) return
   const target = event.target as Element | null
   if (target?.closest?.('.node') || target?.closest?.('.link-hit') || target?.closest?.('.group-node'))
@@ -377,6 +483,8 @@ function onBackgroundClick(event: MouseEvent) {
   const cursor = svgPointFromEvent(event)
   if (!cursor) {
     emit('selectLink', null)
+    emit('selectNodes', [])
+    emit('selectGroups', [])
     emit('selectNode', null)
     emit('selectGroup', null)
     return
@@ -386,6 +494,8 @@ function onBackgroundClick(event: MouseEvent) {
     return
   }
   emit('selectLink', null)
+  emit('selectNodes', [])
+  emit('selectGroups', [])
   emit('selectNode', null)
   emit('selectGroup', null)
   emit('canvasClick', cursor.x, cursor.y)
@@ -394,13 +504,17 @@ function onBackgroundClick(event: MouseEvent) {
 function onNodeClick(event: MouseEvent, node: NetworkNode) {
   event.stopPropagation()
   emit('selectGroup', null)
+  emit('selectGroups', [])
   emit('selectLink', null)
+  emit('selectNodes', [node.id])
   emit('selectNode', node.id)
 }
 
 function onGroupClick(event: MouseEvent, g: CanvasGroupGlyph) {
   event.stopPropagation()
   if (groupDragMoved) return
+  emit('selectNodes', [])
+  emit('selectGroups', [g.name])
   emit('selectNode', null)
   emit('selectLink', null)
   emit('selectGroup', g.name)
@@ -409,6 +523,8 @@ function onGroupClick(event: MouseEvent, g: CanvasGroupGlyph) {
 function onGroupContextMenu(event: MouseEvent, g: CanvasGroupGlyph) {
   event.preventDefault()
   event.stopPropagation()
+  emit('selectNodes', [])
+  emit('selectGroups', [g.name])
   emit('selectNode', null)
   emit('selectLink', null)
   emit('selectGroup', g.name)
@@ -419,6 +535,7 @@ function onLinkClick(event: MouseEvent, link: NetworkLink) {
   event.stopPropagation()
   if (props.linkMode || props.stampMode) return
   emit('selectGroup', null)
+  emit('selectNodes', [])
   emit('selectNode', null)
   emit('selectLink', link.id)
 }
@@ -531,6 +648,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', updateViewport)
   window.removeEventListener('mousemove', onWindowGroupMove)
   window.removeEventListener('mouseup', onWindowGroupUp)
+  window.removeEventListener('mousemove', onWindowNodeMove)
+  window.removeEventListener('mouseup', onWindowNodeUp)
   if (moveRaf) cancelAnimationFrame(moveRaf)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
 })
@@ -553,6 +672,7 @@ watch(
       'link-mode': linkMode,
       'stamp-mode': stampMode && !linkMode,
       'group-dragging': !!draggingGroup,
+      'traffic-running': !!trafficRunning,
     }"
     @mousemove="onMouseMove"
     @mouseup="onMouseUp"
@@ -568,8 +688,17 @@ watch(
       :width="canvasSize.width"
       :height="canvasSize.height"
       :viewBox="`0 0 ${canvasSize.width} ${canvasSize.height}`"
+      @mousedown="onBackgroundMouseDown"
       @click="onBackgroundClick"
     >
+      <rect
+        v-if="marqueeRect"
+        class="marquee-box"
+        :x="marqueeRect.x"
+        :y="marqueeRect.y"
+        :width="marqueeRect.width"
+        :height="marqueeRect.height"
+      />
       <defs>
         <marker id="topo-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L0,6 L6,3 z" fill="#606266" />
@@ -735,7 +864,7 @@ watch(
           @contextmenu.prevent="onGroupContextMenu($event, g)"
         >
           <rect
-            v-if="selectedGroupName === g.name"
+            v-if="selectedGroupName === g.name || selectedGroupSet.has(g.name)"
             x="-5"
             y="-5"
             :width="GROUP_ICON + 10"
@@ -757,7 +886,7 @@ watch(
               <TopologyGroupIcon
                 :kind="g.kind"
                 :size="GROUP_ICON"
-                :selected="selectedGroupName === g.name"
+                :selected="selectedGroupName === g.name || selectedGroupSet.has(g.name)"
                 :count="g.count"
               />
             </div>
@@ -775,7 +904,7 @@ watch(
           :key="node.id"
           class="node"
           :class="{
-            selected: selectedNodeId === node.id,
+            selected: selectedNodeId === node.id || selectedNodeSet.has(node.id),
             'link-source': linkSourceId === node.id,
             'link-target': linkMode,
           }"
@@ -784,7 +913,7 @@ watch(
           @click.stop="onNodeClick($event, node)"
         >
           <rect
-            v-if="selectedNodeId === node.id || linkSourceId === node.id"
+            v-if="selectedNodeId === node.id || selectedNodeSet.has(node.id) || linkSourceId === node.id"
             x="-2"
             y="-2"
             :width="ICON + 4"
@@ -871,12 +1000,21 @@ watch(
 
 .canvas {
   display: block;
+  user-select: none;
   min-width: 1800px;
   min-height: 1200px;
 }
 
 .node {
   cursor: grab;
+}
+
+.marquee-box {
+  fill: rgba(64, 158, 255, 0.12);
+  stroke: #409eff;
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+  pointer-events: none;
 }
 
 .group-node {
@@ -913,6 +1051,14 @@ watch(
   pointer-events: none;
 }
 
+.traffic-running .link-line {
+  stroke-dasharray: 12 7 !important;
+  animation: topology-traffic-flow 0.75s linear infinite;
+  filter: drop-shadow(0 0 2px rgba(64, 158, 255, 0.48));
+}
+@keyframes topology-traffic-flow {
+  to { stroke-dashoffset: -38; }
+}
 .link-hit {
   cursor: pointer;
 }

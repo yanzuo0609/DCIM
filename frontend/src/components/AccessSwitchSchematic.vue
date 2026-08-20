@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import SwitchSquarePort from '@/components/SwitchSquarePort.vue'
 import {
   ACCESS_DEMO,
+  rackPanelAspect,
   accessPortFace,
   effectivePortCount,
   resolveSlotPort,
@@ -92,7 +93,8 @@ function portKind(slot: SwitchSlotAttr, portIndex: number) {
 }
 
 const frameStyle = computed(() => ({
-  height: `${ACCESS_DEMO.height}px`,
+  aspectRatio: rackPanelAspect(1),
+  maxWidth: `${ACCESS_DEMO.maxW}px`,
 }))
 </script>
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ACCESS_DEMO, type SwitchSystemPortAttr } from '@/utils/switchModelAttrs'
+import { ACCESS_DEMO, rackPanelAspect, type SwitchSystemPortAttr } from '@/utils/switchModelAttrs'
 
 const props = defineProps<{
   fanCount?: number
@@ -37,7 +37,8 @@ function onContext(id: string, ev: MouseEvent) {
 }
 
 const frameStyle = computed(() => ({
-  height: `${ACCESS_DEMO.height}px`,
+  aspectRatio: rackPanelAspect(1),
+  maxWidth: `${ACCESS_DEMO.maxW}px`,
 }))
 </script>
 

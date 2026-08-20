@@ -26,10 +26,10 @@ TAXONOMY: list[TaxonomyCategory] = [
         value="network",
         label="网络设备",
         subtypes=[
-            TaxonomyOption(value="switch", label="交换机"),
-            TaxonomyOption(value="router", label="路由器"),
-            TaxonomyOption(value="load_balancer", label="负载均衡"),
-            TaxonomyOption(value="optical_gate", label="光闸"),
+            TaxonomyOption(value="gigabit", label="千兆交换机"),
+            TaxonomyOption(value="ten_gigabit", label="万兆交换机"),
+            TaxonomyOption(value="aggregation", label="汇聚交换机"),
+            TaxonomyOption(value="core", label="核心交换机"),
         ],
     ),
     TaxonomyCategory(
@@ -41,6 +41,9 @@ TAXONOMY: list[TaxonomyCategory] = [
             TaxonomyOption(value="ddos", label="DDoS 防护"),
             TaxonomyOption(value="ips", label="IPS"),
             TaxonomyOption(value="ids", label="IDS"),
+            TaxonomyOption(value="optical_gate", label="光闸"),
+            TaxonomyOption(value="host_audit", label="主机审计"),
+            TaxonomyOption(value="database_audit", label="数据库审计"),
             TaxonomyOption(value="net_audit", label="网络审计"),
             TaxonomyOption(value="crypto", label="密码机"),
         ],
@@ -126,6 +129,7 @@ CORE_CARD_TYPE_OPTIONS = [
 ]
 
 IFACE_BOARD_OPTIONS = [
+    TaxonomyOption(value="1ge", label="千兆以太网电接口板"),
     TaxonomyOption(value="10ge", label="万兆以太网光接口板"),
     TaxonomyOption(value="25ge", label="25GE 以太网光接口板"),
     TaxonomyOption(value="40ge", label="40GE 光接口板"),
@@ -379,7 +383,7 @@ def _normalize_switch_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
     if attrs.get("airflow_custom") is None:
         attrs["airflow_custom"] = ""
     board = str(attrs.get("iface_board_type") or "10ge")
-    attrs["iface_board_type"] = board if board in ("10ge", "25ge", "40ge", "100ge", "400ge") else "10ge"
+    attrs["iface_board_type"] = board if board in ("1ge", "10ge", "25ge", "40ge", "100ge", "400ge") else "10ge"
     attrs["iface_board_port_count"] = _clamp_int(attrs.get("iface_board_port_count"), 48, 1, 128)
     attrs["console_ports"] = _clamp_int(attrs.get("console_ports"), 1, 0, 8)
     eth_src = attrs.get("eth_mgmt_ports")
@@ -428,30 +432,57 @@ def _as_int(v: Any, default: int, lo: int | None = None, hi: int | None = None) 
 
 
 def _normalize_pcie_slots(raw: Any, max_slots: int, flex_fallback: int) -> list[dict[str, Any]]:
-    """灵活 IO 光口按 PCIE 槽定义：0=挡板，2/4=光口。"""
+    """PCIe 插槽支持空挡板、RAID 卡、2/4 口电卡或光卡，并兼容旧 flex_ports。"""
     n = max(0, min(16, int(max_slots or 0)))
+
+    def speed(value: Any) -> str:
+        raw_speed = str(value or "10ge").lower().strip()
+        if raw_speed.endswith("gbps"):
+            raw_speed = raw_speed[:-4] + "ge"
+        elif raw_speed.endswith("g"):
+            raw_speed = raw_speed[:-1] + "ge"
+        return raw_speed if raw_speed in ("1ge", "10ge", "25ge", "40ge", "100ge") else "10ge"
+
     if isinstance(raw, list) and raw:
         slots: list[dict[str, Any]] = []
         for i in range(n):
             src = raw[i] if i < len(raw) and isinstance(raw[i], dict) else {}
-            slots.append(
-                {
-                    "index": i + 1,
-                    "flex_ports": _as_int(src.get("flex_ports"), 0, 0, 4),
-                }
-            )
+            legacy_count = _as_int(src.get("port_count", src.get("flex_ports")), 0, 0, 4)
+            port_count = 4 if legacy_count >= 4 else 2 if legacy_count >= 2 else 0
+            card_type = str(src.get("card_type") or "")
+            if card_type not in ("blank", "raid", "nic_copper", "nic_optical"):
+                card_type = "nic_optical" if port_count else "blank"
+            if card_type not in ("nic_copper", "nic_optical"):
+                port_count = 0
+            elif port_count == 0:
+                port_count = 2
+            slots.append({
+                "index": i + 1,
+                "flex_ports": port_count,
+                "card_type": card_type,
+                "port_count": port_count,
+                "speed": speed(src.get("speed")),
+                "raid_level": str(src.get("raid_level") or "raid1") if card_type == "raid" else None,
+                "orientation": "vertical" if str(src.get("orientation")) == "vertical" else "horizontal",
+                "placement": str(src.get("placement")) if str(src.get("placement")) in ("top", "middle", "bottom") else "middle",
+            })
         return slots
     remain = max(0, min(64, int(flex_fallback or 0)))
     slots = []
-    per = 2
     for i in range(n):
-        take = 0 if remain <= 0 else min(4, remain, per)
-        slots.append({"index": i + 1, "flex_ports": take})
+        take = 0 if remain <= 0 else min(4, remain, 2)
+        slots.append({
+            "index": i + 1,
+            "flex_ports": take,
+            "card_type": "nic_optical" if take else "blank",
+            "port_count": take,
+            "speed": "10ge",
+            "orientation": "horizontal",
+            "placement": ("top", "middle", "bottom")[i % 3],
+            "raid_level": None,
+        })
         remain -= take
-    if remain > 0 and slots:
-        slots[-1]["flex_ports"] = max(0, min(4, int(slots[-1]["flex_ports"]) + remain))
     return slots
-
 
 def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
     """硬件规格 + 接口计数驱动 server_slots / 稳定端口 ID。"""
@@ -496,7 +527,11 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
         total = int(attrs["memory_module_gb"]) * int(attrs["memory_modules"])
     attrs["memory_gb"] = max(1, total)
     default_pcie = 2 if form_u == 1 else 6 if form_u == 2 else 8
-    attrs["pcie_slot_max"] = _as_int(attrs.get("pcie_slot_max"), default_pcie, 0, 16)
+    pcie_slot_count = _as_int(
+        attrs.get("flex_io_slot_count", attrs.get("pcie_slot_max")), default_pcie, 0, 16
+    )
+    attrs["flex_io_slot_count"] = pcie_slot_count
+    attrs["pcie_slot_max"] = pcie_slot_count
 
     attrs["ssd_internal_count"] = _as_int(attrs.get("ssd_internal_count"), 0, 0, 16)
     ssd_if = str(attrs.get("ssd_internal_iface") or "sata").lower()
@@ -584,14 +619,14 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
     attrs["hdmi_ports"] = attrs["vga_count"]
     attrs["lom_1g_count"] = _as_int(attrs.get("lom_1g_count"), 2, 0, 8)
     flex_speed = str(attrs.get("flex_io_speed") or "10ge").lower()
-    attrs["flex_io_speed"] = "25ge" if flex_speed in ("25ge", "25g", "25") else "10ge"
+    attrs["flex_io_speed"] = flex_speed if flex_speed in ("1ge", "10ge", "25ge", "40ge", "100ge") else "10ge"
     pcie_slots = _normalize_pcie_slots(
         attrs.get("pcie_slots"),
-        int(attrs["pcie_slot_max"]),
+        int(attrs["flex_io_slot_count"]),
         _as_int(attrs.get("flex_io_count"), 2, 0, 16),
     )
     attrs["pcie_slots"] = pcie_slots
-    attrs["flex_io_count"] = sum(int(s.get("flex_ports") or 0) for s in pcie_slots)
+    attrs["flex_io_count"] = sum(int(s.get("port_count") or 0) for s in pcie_slots)
 
     bmc = int(attrs["bmc_ports"])
     ipmi = int(attrs["ipmi_iface_count"])
@@ -685,13 +720,17 @@ def _normalize_server_slots(attrs: dict[str, Any]) -> dict[str, Any]:
             }
         )
     for pcie in pcie_slots:
-        n = int(pcie.get("flex_ports") or 0)
-        ifaces = _pcie_ports(int(pcie["index"]), n, flex_type)
+        n = int(pcie.get("port_count") or 0)
+        speed = str(pcie.get("speed") or attrs["flex_io_speed"])
+        ptype = "1g" if speed == "1ge" else "10g" if speed == "10ge" else "25g" if speed == "25ge" else "40_100g"
+        card_type = str(pcie.get("card_type") or "blank")
+        ifaces = _pcie_ports(int(pcie["index"]), n, ptype) if card_type in ("nic_copper", "nic_optical") else []
         design_slots.append(
             {
                 "index": len(design_slots) + 1,
-                "type": "nic_10g" if n else "blank",
+                "type": "raid" if card_type == "raid" else "nic_1g" if ifaces and ptype == "1g" else "nic_10g" if ifaces else "blank",
                 "port_count": len(ifaces),
+                "raid_level": pcie.get("raid_level"),
                 "interfaces": ifaces,
             }
         )
@@ -734,6 +773,7 @@ def _server_defaults(subtype: str) -> dict[str, Any]:
         "memory_gb": 256 if subtype == "hpc" else 128,
         "memory_modules": 8,
         "memory_module_gb": 16 if subtype != "hpc" else 32,
+        "flex_io_slot_count": 6 if form_u == 2 else 2,
         "pcie_slot_max": 6 if form_u == 2 else 2,
         "slot_count": 2,
         "psu_count": 2,
@@ -779,10 +819,10 @@ def _server_defaults(subtype: str) -> dict[str, Any]:
 
 
 def _network_defaults(subtype: str) -> dict[str, Any]:
-    if subtype == "switch":
+    if subtype in ("switch", "gigabit", "ten_gigabit", "aggregation", "core"):
         return _normalize_switch_attrs(
             {
-                "switch_role": "gigabit",
+                "switch_role": subtype if subtype != "switch" else "gigabit",
                 "card_slot_count": 2,
                 "switch_slots": [
                     {
@@ -871,62 +911,111 @@ def _network_defaults(subtype: str) -> dict[str, Any]:
     }
 
 
+MAX_SECURITY_IFACE_SLOTS = 8
+
+
+def _normalize_security_iface_slots(attrs: dict[str, Any]) -> dict[str, Any]:
+    """Normalize security interface slots and enforce the API-side eight-slot limit."""
+    raw_slots = attrs.get("security_slots")
+    slots: list[dict[str, int]] = []
+    if isinstance(raw_slots, list):
+        for raw_slot in raw_slots[:MAX_SECURITY_IFACE_SLOTS]:
+            if not isinstance(raw_slot, dict):
+                continue
+            slots.append({
+                "index": len(slots) + 1,
+                "control_count": _as_int(raw_slot.get("control_count"), 0, 0, 8),
+                "ha_count": _as_int(raw_slot.get("ha_count"), 0, 0, 8),
+                "mgmt_count": _as_int(raw_slot.get("mgmt_count"), 0, 0, 8),
+                "usb_count": _as_int(raw_slot.get("usb_count"), 0, 0, 8),
+                "ports_10g": _as_int(raw_slot.get("ports_10g"), 0, 0, 48),
+                "ports_1g": _as_int(raw_slot.get("ports_1g"), 0, 0, 48),
+            })
+    explicit_empty = isinstance(raw_slots, list) and not raw_slots and _as_int(attrs.get("slot_count"), -1) == 0
+    if not slots and not explicit_empty:
+        slots.append({
+            "index": 1,
+            "control_count": 1,
+            "ha_count": 2,
+            "mgmt_count": 1,
+            "usb_count": 2,
+            "ports_10g": 4,
+            "ports_1g": 2,
+        })
+
+    attrs["security_slots"] = slots
+    attrs["slot_count"] = len(slots)
+    attrs["data_port_type"] = "10g"
+    attrs["data_port_count"] = sum(slot["ports_10g"] for slot in slots)
+    attrs["control_ports"] = sum(slot["control_count"] for slot in slots)
+    attrs["ha_ports"] = sum(slot["ha_count"] for slot in slots)
+    attrs["mgmt_ports"] = sum(slot["mgmt_count"] for slot in slots)
+    attrs["usb_ports"] = sum(slot["usb_count"] for slot in slots)
+    return attrs
+
+
 def _security_defaults(subtype: str) -> dict[str, Any]:
-    return {
-        "chassis_height_u": 1,
-        "form_factor_u": 1,
-        "slot_count": 4,
-        "security_slots": [
-            {
-                "index": 1,
-                "control_count": 1,
-                "ha_count": 2,
-                "mgmt_count": 1,
-                "usb_count": 2,
-                "ports_10g": 4,
-                "ports_1g": 2,
-            },
-            {
-                "index": 2,
-                "control_count": 0,
-                "ha_count": 0,
-                "mgmt_count": 0,
-                "usb_count": 0,
-                "ports_10g": 4,
-                "ports_1g": 2,
-            },
-            {
-                "index": 3,
-                "control_count": 0,
-                "ha_count": 0,
-                "mgmt_count": 0,
-                "usb_count": 0,
-                "ports_10g": 4,
-                "ports_1g": 2,
-            },
-            {
-                "index": 4,
-                "control_count": 0,
-                "ha_count": 0,
-                "mgmt_count": 0,
-                "usb_count": 0,
-                "ports_10g": 4,
-                "ports_1g": 2,
-            },
-        ],
-        "data_port_type": "10g" if subtype in ("firewall", "ddos", "ips") else "1g",
-        "data_port_count": 16 if subtype != "crypto" else 8,
-        "control_ports": 1,
-        "ha_ports": 2 if subtype in ("firewall", "vpn", "ddos") else 0,
-        "mgmt_ports": 1,
-        "usb_ports": 2,
-        "fan_count": 2,
+    profiles = {
+        # deployment, throughput, cpu, memory, disks, disk_gb, retention,
+        # metric_key, metric_value, 10G ports, 1G ports, height_u, fan_count
+        "firewall": ("route/transparent", 40, 24, 128, 2, 960, 30, "concurrent_sessions_10k", 400, 8, 2, 2, 4),
+        "ips": ("inline/bypass", 40, 28, 128, 2, 1920, 60, "signature_capacity_10k", 20, 8, 2, 1, 3),
+        "ids": ("tap/mirror", 40, 32, 192, 8, 3840, 90, "capture_gbps", 40, 8, 2, 2, 4),
+        "vpn": ("gateway", 20, 20, 64, 2, 960, 30, "vpn_tunnels", 20000, 4, 4, 1, 3),
+        "optical_gate": ("dual-network/isolation", 10, 24, 128, 4, 1920, 90, "exchange_tasks", 1000, 2, 4, 2, 4),
+        "host_audit": ("agent/collector", 10, 24, 128, 8, 3840, 180, "audit_hosts", 2000, 4, 2, 2, 4),
+        "database_audit": ("mirror/agent", 20, 32, 256, 12, 3840, 180, "database_instances", 500, 8, 2, 2, 5),
+        "net_audit": ("tap/mirror", 20, 28, 192, 12, 3840, 180, "log_eps", 50000, 8, 2, 2, 5),
+        "ddos": ("inline/diversion", 400, 48, 256, 4, 1920, 60, "cleaning_gbps", 400, 8, 2, 2, 6),
+        "crypto": ("service", 10, 20, 64, 2, 960, 90, "crypto_tps", 5000, 4, 2, 1, 3),
+    }
+    device_type = subtype if subtype in profiles else "firewall"
+    deployment, throughput, cpu, memory, disks, disk_gb, retention, metric_key, metric_value, ports10, ports1, height_u, fan_count = profiles[device_type]
+    management = {
+        "index": 1,
+        "control_count": 1,
+        "ha_count": 0 if device_type == "ids" else 2,
+        "mgmt_count": 1,
+        "usb_count": 2,
+        "ports_10g": ports10,
+        "ports_1g": ports1,
+    }
+    slots = [management]
+    if device_type == "optical_gate":
+        slots.append({
+            "index": 2,
+            "control_count": 0,
+            "ha_count": 0,
+            "mgmt_count": 1,
+            "usb_count": 0,
+            "ports_10g": 2,
+            "ports_1g": 4,
+        })
+    result = {
+        "security_device_type": device_type,
+        "panel_variant": device_type,
+        "security_profile_type_applied": device_type,
+        "security_profile_version": 3,
+        "chassis_height_u": height_u,
+        "form_factor_u": height_u,
+        "slot_count": len(slots),
+        "security_slots": slots,
+        "data_port_type": "10g",
+        "data_port_count": sum(int(slot["ports_10g"]) for slot in slots),
+        "control_ports": sum(int(slot["control_count"]) for slot in slots),
+        "ha_ports": sum(int(slot["ha_count"]) for slot in slots),
+        "mgmt_ports": sum(int(slot["mgmt_count"]) for slot in slots),
+        "usb_ports": sum(int(slot["usb_count"]) for slot in slots),
+        "fan_count": fan_count,
         "psu_count": 2,
-        "cpu_cores": 8,
-        "memory_gb": 32,
-        "disk_gb": 480,
-        "disk_count": 2,
-        "throughput_gbps": None,
+        "cpu_cores": cpu,
+        "memory_gb": memory,
+        "disk_gb": disk_gb,
+        "disk_count": disks,
+        "throughput_gbps": throughput,
+        "deployment_mode": deployment,
+        "retention_days": retention,
+        metric_key: metric_value,
         "panel_layout": {
             "cols": 38,
             "rows": 16,
@@ -936,6 +1025,7 @@ def _security_defaults(subtype: str) -> dict[str, Any]:
         },
         "custom_attributes": [],
     }
+    return _normalize_security_iface_slots(result)
 
 
 def _software_defaults(subtype: str) -> dict[str, Any]:
@@ -989,7 +1079,7 @@ def attribute_schema(category: str) -> CategoryAttributeSchema:
             AttributeFieldDef(key="memory_module_gb", label="单条容量(GB)", type="int", min=1),
             AttributeFieldDef(key="memory_modules", label="内存条数", type="int", min=1, max=64, required=True),
             AttributeFieldDef(key="memory_gb", label="内存总容量(GB)", type="int", min=1, required=True),
-            AttributeFieldDef(key="pcie_slot_max", label="PCIE最大插槽", type="int", min=0, max=16),
+            AttributeFieldDef(key="flex_io_slot_count", label="灵活IO插槽数量", type="int", min=0, max=16, description="定义服务器背面可配置的 PCIe 物理插槽个数"),
             AttributeFieldDef(key="disk_front_count", label="前置盘位数", type="int", min=0, max=48),
             AttributeFieldDef(key="disk_front_size", label="前置盘尺寸", type="select", options=DISK_SIZE_OPTIONS),
             AttributeFieldDef(key="disk_front_proto", label="前置盘协议", type="select", options=DISK_PROTO_OPTIONS),
@@ -1139,6 +1229,38 @@ def merge_defaults(category: str, subtype: str, attributes: dict[str, Any] | Non
         merged["disk_rear_count"] = max(0, min(6, rear))
         merged["disk_rear_max"] = 6
         merged = _normalize_server_slots(merged)
-    if category == "network" and subtype == "switch":
+    if category == "security":
+        # 模型 subtype 是设备真实类型。旧 attributes 中遗留的 firewall 不得覆盖
+        # DDoS / IPS / IDS / VPN / 审计等设备的独立硬件配置。
+        source_attrs = attributes or {}
+        applied_type = str(source_attrs.get("security_profile_type_applied") or "")
+        profile_version = _as_int(source_attrs.get("security_profile_version"), 0)
+        if applied_type != subtype or profile_version < 3:
+            profile_keys = (
+                "security_device_type", "panel_variant", "chassis_height_u", "form_factor_u",
+                "slot_count", "security_slots", "data_port_type", "data_port_count",
+                "control_ports", "ha_ports", "mgmt_ports", "usb_ports", "fan_count",
+                "psu_count", "cpu_cores", "memory_gb", "disk_gb", "disk_count",
+                "throughput_gbps", "deployment_mode", "retention_days",
+                "concurrent_sessions_10k", "signature_capacity_10k", "capture_gbps",
+                "vpn_tunnels", "exchange_tasks", "audit_hosts", "database_instances",
+                "log_eps", "cleaning_gbps", "crypto_tps",
+            )
+            for key in profile_keys:
+                if key in base:
+                    merged[key] = deepcopy(base[key])
+                else:
+                    merged.pop(key, None)
+        merged["security_device_type"] = subtype
+        merged["panel_variant"] = subtype
+        merged["security_profile_type_applied"] = subtype
+        merged["security_profile_version"] = 3
+        merged = _normalize_security_iface_slots(merged)
+    if category == "network" and subtype in ("switch", "gigabit", "ten_gigabit", "aggregation", "core"):
+        merged["switch_role"] = (
+            _normalize_switch_attrs(merged).get("switch_role")
+            if subtype == "switch"
+            else subtype
+        )
         merged = _normalize_switch_attrs(merged)
     return merged

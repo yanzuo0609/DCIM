@@ -101,7 +101,8 @@ if (Test-PortListening 5173) {
     Write-Host "Frontend already listening on :5173" -ForegroundColor DarkGray
 } else {
     Write-Host "Starting frontend on :5173 ..." -ForegroundColor Yellow
-    Start-Process -WorkingDirectory $FrontendDir -FilePath "npm" `
+    $npmCommand = (Get-Command "npm.cmd" -ErrorAction Stop).Source
+    Start-Process -WorkingDirectory $FrontendDir -FilePath $npmCommand `
         -ArgumentList "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173" `
         -WindowStyle Hidden
 }

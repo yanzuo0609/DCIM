@@ -16,7 +16,10 @@ export type ServerDiskProto = 'sas_sata' | 'sas' | 'sata' | 'nvme'
 export type ServerSsdIface = 'sata' | 'nvme' | 'sas' | 'm.2' | 'u.2' | 'other'
 export type ServerSsdType = 'sata' | 'nvme' | 'sas' | 'mixed' | 'other'
 export type ServerPsuRedundancy = '1+1' | '1+n' | 'other'
-export type ServerFlexSpeed = '10ge' | '25ge'
+export type ServerFlexSpeed = '1ge' | '10ge' | '25ge' | '40ge' | '100ge'
+export type ServerPcieCardType = 'blank' | 'raid' | 'nic_copper' | 'nic_optical'
+export type ServerPcieOrientation = 'horizontal' | 'vertical'
+export type ServerPciePlacement = 'top' | 'middle' | 'bottom'
 export type ServerPortKind = 'bmc' | 'ipmi' | 'vga' | 'usb' | 'lom' | 'flex'
 export type ServerPortFace = 'copper' | 'optical' | 'other'
 
@@ -59,8 +62,15 @@ export interface ServerPortAttr {
 /** PCIE 插槽：灵活 IO 光口定义在槽上 */
 export interface ServerPcieSlotAttr {
   index: number
-  /** 本槽光口数，0=挡板 */
+  /** 兼容旧数据：等于当前网卡端口数 */
   flex_ports: number
+  card_type: ServerPcieCardType
+  port_count: 0 | 2 | 4
+  speed: ServerFlexSpeed
+  raid_level?: string
+  /** 背板物理挡板方向与纵向安装位置，仅影响面板演示。 */
+  orientation: ServerPcieOrientation
+  placement: ServerPciePlacement
 }
 
 export interface ServerDriveGrid {
@@ -161,15 +171,20 @@ export function normalizeServerFormFactor(u: unknown): ServerFormFactorU {
   return 1
 }
 
-export function diskFrontMaxForU(u: unknown): number {
+export function diskFrontMaxForU(u: unknown, size?: unknown): number {
   const ff = normalizeServerFormFactor(u)
   if (ff === 4) return 48
   if (ff === 2) return 24
-  return 4
+  return normalizeDiskSize(size, '3.5') === '2.5' ? 10 : 4
 }
 
 export function diskRearMaxForU(_u?: unknown): number {
   return 6
+}
+
+/** 依据标准服务器背板可用扩展区限制 PCIe 物理挡板数量。 */
+export function pcieSlotMaxForU(u?: unknown): number {
+  return normalizeServerFormFactor(u) === 1 ? 3 : 8
 }
 
 export const SERVER_HEIGHT_OPTIONS: { value: ServerFormFactorU; label: string }[] = [
@@ -220,8 +235,35 @@ export const SERVER_PSU_REDUNDANCY_OPTIONS: { value: ServerPsuRedundancy; label:
 ]
 
 export const SERVER_FLEX_SPEED_OPTIONS: { value: ServerFlexSpeed; label: string }[] = [
-  { value: '10ge', label: '10GE 光口' },
-  { value: '25ge', label: '25GE 光口' },
+  { value: '1ge', label: '1GE' },
+  { value: '10ge', label: '10GE' },
+  { value: '25ge', label: '25GE' },
+  { value: '40ge', label: '40GE' },
+  { value: '100ge', label: '100GE' },
+]
+
+export const PCIE_CARD_TYPE_OPTIONS: { value: ServerPcieCardType; label: string }[] = [
+  { value: 'blank', label: '空挡板' },
+  { value: 'raid', label: 'RAID 卡' },
+  { value: 'nic_copper', label: '电口网卡' },
+  { value: 'nic_optical', label: '光口网卡' },
+]
+
+export const PCIE_PORT_COUNT_OPTIONS: { value: 0 | 2 | 4; label: string }[] = [
+  { value: 0, label: '无接口' },
+  { value: 2, label: '2 口' },
+  { value: 4, label: '4 口' },
+]
+
+export const PCIE_ORIENTATION_OPTIONS: { value: ServerPcieOrientation; label: string }[] = [
+  { value: 'horizontal', label: '横向挡板' },
+  { value: 'vertical', label: '竖向挡板' },
+]
+
+export const PCIE_PLACEMENT_OPTIONS: { value: ServerPciePlacement; label: string }[] = [
+  { value: 'top', label: '上部' },
+  { value: 'middle', label: '中部' },
+  { value: 'bottom', label: '下部' },
 ]
 
 export const SERVER_OS_OPTIONS: { value: string; label: string }[] = [
@@ -266,11 +308,8 @@ export const SERVER_DEMO = {
   },
 }
 
-export const PCIE_FLEX_PORT_OPTIONS: { value: number; label: string }[] = [
-  { value: 0, label: '挡板' },
-  { value: 2, label: '2 光口' },
-  { value: 4, label: '4 光口' },
-]
+/** @deprecated 使用 PCIE_PORT_COUNT_OPTIONS */
+export const PCIE_FLEX_PORT_OPTIONS = PCIE_PORT_COUNT_OPTIONS
 
 export function pciePortId(slotIndex: number, portIndex: number) {
   return `pcie${Math.max(1, slotIndex)}-p${Math.max(0, portIndex)}`
@@ -285,39 +324,73 @@ export function distributeFlexToPcie(max: number, flexCount: number, perCard = 2
   let remain = clamp(flexCount, 0, 64)
   const slots: ServerPcieSlotAttr[] = []
   for (let i = 1; i <= n; i++) {
-    const take = remain <= 0 ? 0 : Math.min(4, remain, perCard)
-    slots.push({ index: i, flex_ports: take })
+    const take = (remain <= 0 ? 0 : Math.min(4, remain, perCard)) as 0 | 2 | 4
+    slots.push({
+      index: i,
+      flex_ports: take,
+      card_type: take > 0 ? 'nic_optical' : 'blank',
+      port_count: take,
+      speed: '10ge',
+      orientation: 'horizontal',
+      placement: (['top', 'middle', 'bottom'] as const)[(i - 1) % 3],
+    })
     remain -= take
-  }
-  if (remain > 0 && slots.length) {
-    const last = slots[slots.length - 1]
-    last.flex_ports = clamp(last.flex_ports + remain, 0, 4)
   }
   return slots
 }
-
-export function normalizePcieSlots(raw: unknown, max: number, flexFallback: number): ServerPcieSlotAttr[] {
+export function normalizePcieSlots(
+  raw: unknown,
+  max: number,
+  flexFallback: number,
+  speedFallback: ServerFlexSpeed = '10ge',
+): ServerPcieSlotAttr[] {
   const n = clamp(max, 0, 16)
-  if (!Array.isArray(raw) || !raw.length) return distributeFlexToPcie(n, flexFallback)
+  if (!Array.isArray(raw) || !raw.length) {
+    return distributeFlexToPcie(n, flexFallback).map((slot) => ({ ...slot, speed: speedFallback }))
+  }
   const list: ServerPcieSlotAttr[] = []
   for (let i = 0; i < n; i++) {
     const src = raw[i] && typeof raw[i] === 'object' ? (raw[i] as Record<string, unknown>) : {}
+    const legacyCount = clamp(asInt(src.port_count ?? src.flex_ports, 0), 0, 4)
+    const portCount = (legacyCount >= 4 ? 4 : legacyCount >= 2 ? 2 : 0) as 0 | 2 | 4
+    const rawType = String(src.card_type || '')
+    const cardType: ServerPcieCardType =
+      rawType === 'raid' || rawType === 'nic_copper' || rawType === 'nic_optical'
+        ? rawType
+        : portCount > 0
+          ? 'nic_optical'
+          : 'blank'
+    const count = cardType === 'nic_copper' || cardType === 'nic_optical' ? portCount || 2 : 0
     list.push({
       index: i + 1,
-      flex_ports: clamp(asInt(src.flex_ports, 0), 0, 4),
+      flex_ports: count,
+      card_type: cardType,
+      port_count: count,
+      speed: normalizeFlexSpeed(src.speed || speedFallback),
+      raid_level: cardType === 'raid' ? String(src.raid_level || 'raid1') : undefined,
+      orientation: String(src.orientation) === 'vertical' ? 'vertical' : 'horizontal',
+      placement:
+        String(src.placement) === 'top' || String(src.placement) === 'bottom'
+          ? (String(src.placement) as ServerPciePlacement)
+          : 'middle',
     })
   }
   return list
 }
-
 export function readPcieSlots(attrs: Record<string, unknown> | null | undefined): ServerPcieSlotAttr[] {
   if (!attrs) return distributeFlexToPcie(2, 2)
-  const max = clamp(asInt(attrs.pcie_slot_max, 2), 0, 16)
-  return normalizePcieSlots(attrs.pcie_slots, max, asInt(attrs.flex_io_count, 2))
+  const max = clamp(
+    asInt(attrs.flex_io_slot_count ?? attrs.pcie_slot_max, 2),
+    0,
+    pcieSlotMaxForU(attrs.form_factor_u),
+  )
+  const slots = normalizePcieSlots(attrs.pcie_slots, max, asInt(attrs.flex_io_count, 2), normalizeFlexSpeed(attrs.flex_io_speed))
+  if (normalizeServerFormFactor(attrs.form_factor_u) !== 1) return slots
+  return slots.map((slot) => slot.orientation === 'horizontal' ? slot : { ...slot, orientation: 'horizontal' })
 }
 
 export function pcieFlexTotal(slots: ServerPcieSlotAttr[]) {
-  return slots.reduce((sum, s) => sum + clamp(s.flex_ports, 0, 4), 0)
+  return slots.reduce((sum, s) => sum + clamp(s.port_count ?? s.flex_ports, 0, 4), 0)
 }
 
 export function serverPortId(kind: ServerPortKind, portIndex: number) {
@@ -391,6 +464,19 @@ function portSpecForKind(
   }
 }
 
+function pciePortSpec(slot: ServerPcieSlotAttr): Pick<ServerPortAttr, 'port_type' | 'iface_type' | 'speed' | 'module' | 'connector' | 'fiber_mode'> {
+  const speed = normalizeFlexSpeed(slot.speed)
+  const optical = slot.card_type === 'nic_optical'
+  const portType = speed === '1ge' ? '1g' : speed === '10ge' ? '10g' : speed === '25ge' ? '25g' : '40_100g'
+  return {
+    port_type: portType,
+    iface_type: optical ? 'optical' : 'copper',
+    speed: speed.replace('ge', 'GE'),
+    module: optical ? (speed === '100ge' ? 'QSFP28' : speed === '40ge' ? 'QSFP+' : speed === '25ge' ? 'SFP28' : speed === '10ge' ? 'SFP+' : 'SFP') : 'RJ45',
+    connector: optical ? (speed === '40ge' || speed === '100ge' ? 'MPO/LC' : 'LC') : 'RJ45',
+    fiber_mode: optical ? 'mm' : 'na',
+  }
+}
 export function listServerPorts(attrs: Record<string, unknown> | null | undefined): ServerPortAttr[] {
   const a = attrs || {}
   const flexSpeed = normalizeFlexSpeed(a.flex_io_speed)
@@ -417,7 +503,8 @@ export function listServerPorts(attrs: Record<string, unknown> | null | undefine
   const pcieSlots = readPcieSlots(a)
   let flexSeq = 0
   for (const slot of pcieSlots) {
-    for (let i = 0; i < slot.flex_ports; i++) {
+    if (slot.card_type !== 'nic_copper' && slot.card_type !== 'nic_optical') continue
+    for (let i = 0; i < slot.port_count; i++) {
       list.push({
         kind: 'flex',
         index: flexSeq,
@@ -425,7 +512,7 @@ export function listServerPorts(attrs: Record<string, unknown> | null | undefine
         id: pciePortId(slot.index, i),
         code: pciePortCode(slot.index, i),
         face: 'rear',
-        ...portSpecForKind('flex', flexSpeed),
+        ...pciePortSpec(slot),
       })
       flexSeq += 1
     }
@@ -494,8 +581,13 @@ export function normalizePsuRedundancy(v: unknown): ServerPsuRedundancy {
 }
 
 export function normalizeFlexSpeed(v: unknown): ServerFlexSpeed {
-  const s = String(v || '').toLowerCase()
-  if (s === '25ge' || s === '25g' || s === '25') return '25ge'
+  const raw = String(v || '').toLowerCase().trim()
+  const s = raw.endsWith('gbps')
+    ? `${raw.slice(0, -4)}ge`
+    : raw.endsWith('g')
+      ? `${raw.slice(0, -1)}ge`
+      : raw
+  if (s === '1ge' || s === '10ge' || s === '25ge' || s === '40ge' || s === '100ge') return s
   return '10ge'
 }
 
@@ -516,24 +608,24 @@ export function frontDriveGrid(u: unknown, count: number, size: ServerDiskSize):
   const n = Math.max(0, Math.trunc(count) || 0)
   if (n <= 0) return { rows: 1, cols: 1, vertical: false, empty: true }
   if (ff === 1) {
-    if (size === '2.5') return { rows: 1, cols: Math.min(10, n), vertical: n >= 8, empty: false }
-    return { rows: 1, cols: Math.min(4, n), vertical: false, empty: false }
+    if (size === '2.5') return { rows: 1, cols: 10, vertical: true, empty: false }
+    return { rows: 1, cols: 4, vertical: false, empty: false }
   }
   if (ff === 2) {
-    if (size === '2.5') {
-      if (n <= 12) return { rows: 1, cols: n, vertical: true, empty: false }
-      const cols = Math.min(12, Math.ceil(n / 2))
-      return { rows: 2, cols, vertical: true, empty: false }
-    }
-    const cols = n <= 4 ? n : 4
-    return { rows: Math.min(3, Math.ceil(n / cols)), cols, vertical: false, empty: false }
+    // 2U 12 盘及以下按常见 3x4 LFF 托架横放；13~24 盘按单排 SFF 托架竖放。
+    // 网格使用满配容量而不是已装数量，保证少装磁盘时托架物理尺寸不被拉伸。
+    if (n <= 12) return { rows: 3, cols: 4, vertical: false, empty: false }
+    return { rows: 1, cols: 24, vertical: true, empty: false }
   }
-  if (size === '2.5') {
-    const cols = n <= 24 ? 6 : 8
-    return { rows: Math.min(8, Math.ceil(n / cols)), cols, vertical: false, empty: false }
+  // 4U 固定为 4 列横置托架：面板高度约为 2U 的两倍，因此 6 行时与
+  // 2U ≤12 盘的 3×4 托架具有相同物理宽高。数量减少时仍保留 4×6 网格尺寸，
+  // 数量超过 24 时只增加行数，绝不因数量变化改变托架宽度。
+  return {
+    rows: Math.max(6, Math.ceil(n / 4)),
+    cols: 4,
+    vertical: false,
+    empty: false,
   }
-  const cols = n <= 12 ? 4 : 6
-  return { rows: Math.min(8, Math.ceil(n / cols)), cols, vertical: false, empty: false }
 }
 
 export function rearDriveGrid(count: number, size: ServerDiskSize): ServerDriveGrid {
@@ -775,10 +867,18 @@ export function serverIfaceSlotsToDesignSlots(
       for (const p of ports.filter((x) => x.kind === 'flex' && x.slot_index === slot.index)) {
         pushIface(interfacesPcie, p)
       }
+      const type = slot.card_type === 'raid'
+        ? 'raid'
+        : interfacesPcie.some((item) => item.port_type === '1g')
+          ? 'nic_1g'
+          : interfacesPcie.length
+            ? 'nic_10g'
+            : 'blank'
       out.push({
         index: out.length + 1,
-        type: interfacesPcie.length ? 'nic_10g' : 'blank',
+        type,
         port_count: interfacesPcie.length,
+        raid_level: slot.raid_level,
         interfaces: interfacesPcie,
       })
     }
@@ -877,13 +977,15 @@ function applyCountsToSlots(
 export function syncServerDerivedAttrs(attrs: Record<string, unknown>): void {
   const u = normalizeServerFormFactor(attrs.form_factor_u)
   attrs.form_factor_u = u
-  const frontMax = diskFrontMaxForU(u)
+  attrs.disk_front_size = normalizeDiskSize(attrs.disk_front_size, '3.5')
+  const requestedFrontCount = asInt(attrs.disk_front_count, u === 1 ? 4 : u === 2 ? 12 : 24)
+  if (u === 2 && requestedFrontCount > 12) attrs.disk_front_size = '2.5'
+  const frontMax = diskFrontMaxForU(u, attrs.disk_front_size)
   const rearMax = diskRearMaxForU(u)
-  attrs.disk_front_count = clamp(asInt(attrs.disk_front_count, u === 1 ? 4 : u === 2 ? 12 : 24), 0, frontMax)
+  attrs.disk_front_count = clamp(requestedFrontCount, 0, frontMax)
   attrs.disk_rear_count = clamp(asInt(attrs.disk_rear_count, 0), 0, rearMax)
   attrs.disk_rear_max = rearMax
   attrs.disk_front_max = frontMax
-  attrs.disk_front_size = normalizeDiskSize(attrs.disk_front_size, u === 1 ? '3.5' : '3.5')
   attrs.disk_rear_size = normalizeDiskSize(attrs.disk_rear_size, '2.5')
   attrs.disk_front_proto = normalizeDiskProto(attrs.disk_front_proto)
   attrs.disk_rear_proto = normalizeDiskProto(attrs.disk_rear_proto)
@@ -899,7 +1001,14 @@ export function syncServerDerivedAttrs(attrs: Record<string, unknown>): void {
 
   attrs.cpu_sockets = clamp(asInt(attrs.cpu_sockets, 2), 1, 8)
   attrs.cpu_cores_per_socket = clamp(asInt(attrs.cpu_cores_per_socket, 16), 1, 128)
-  attrs.pcie_slot_max = clamp(asInt(attrs.pcie_slot_max, u === 1 ? 2 : u === 2 ? 6 : 8), 0, 16)
+  const pcieSlotCount = clamp(
+    asInt(attrs.flex_io_slot_count ?? attrs.pcie_slot_max, u === 1 ? 2 : u === 2 ? 6 : 8),
+    0,
+    pcieSlotMaxForU(u),
+  )
+  // flex_io_slot_count 是当前模型属性名称；pcie_slot_max 作为旧数据兼容镜像保留。
+  attrs.flex_io_slot_count = pcieSlotCount
+  attrs.pcie_slot_max = pcieSlotCount
 
   attrs.ssd_internal_count = clamp(asInt(attrs.ssd_internal_count, 0), 0, 16)
   attrs.ssd_internal_iface = normalizeSsdIface(attrs.ssd_internal_iface)
@@ -942,7 +1051,8 @@ export function syncServerDerivedAttrs(attrs: Record<string, unknown>): void {
   attrs.hdmi_ports = attrs.vga_count
   attrs.lom_1g_count = clamp(asInt(attrs.lom_1g_count, 2), 0, 8)
   attrs.flex_io_speed = normalizeFlexSpeed(attrs.flex_io_speed)
-  const pcieSlots = normalizePcieSlots(attrs.pcie_slots, Number(attrs.pcie_slot_max) || 2, asInt(attrs.flex_io_count, 2))
+  const pcieSlots = normalizePcieSlots(attrs.pcie_slots, pcieSlotCount, asInt(attrs.flex_io_count, 2), normalizeFlexSpeed(attrs.flex_io_speed))
+    .map((slot) => u === 1 ? { ...slot, orientation: 'horizontal' as const } : slot)
   attrs.pcie_slots = pcieSlots
   attrs.flex_io_count = pcieFlexTotal(pcieSlots)
 
@@ -970,6 +1080,7 @@ export function defaultServerAttributes(formFactor: ServerFormFactorU = 1): Reco
     memory_module_gb: moduleGb,
     memory_modules: modules,
     memory_gb: moduleGb * modules,
+    flex_io_slot_count: formFactor === 1 ? 2 : formFactor === 2 ? 6 : 8,
     pcie_slot_max: formFactor === 1 ? 2 : formFactor === 2 ? 6 : 8,
     pcie_slots: distributeFlexToPcie(formFactor === 1 ? 2 : formFactor === 2 ? 6 : 8, 2),
     slot_count: 2,
@@ -1046,14 +1157,16 @@ export function applyServerHeightDefaults(
 ): Record<string, unknown> {
   const next = { ...attrs }
   next.form_factor_u = formFactor
-  const frontMax = diskFrontMaxForU(formFactor)
+  const frontMax = diskFrontMaxForU(formFactor, next.disk_front_size)
   next.disk_front_max = frontMax
   next.disk_rear_max = 6
   if (Number(next.disk_front_count) > frontMax) next.disk_front_count = frontMax
   if (Number(next.disk_rear_count) > 6) next.disk_rear_count = 6
-  if (next.pcie_slot_max == null) next.pcie_slot_max = formFactor === 1 ? 2 : formFactor === 2 ? 6 : 8
+  if (next.flex_io_slot_count == null && next.pcie_slot_max == null) {
+    next.flex_io_slot_count = formFactor === 1 ? 2 : formFactor === 2 ? 6 : 8
+  }
   if (next.fan_count == null) next.fan_count = formFactor === 1 ? 4 : formFactor === 2 ? 6 : 8
-  if (formFactor === 1 && Number(next.disk_front_count) > 4) next.disk_front_count = 4
+  if (formFactor === 1 && Number(next.disk_front_count) > frontMax) next.disk_front_count = frontMax
   if (formFactor >= 2 && Number(next.disk_front_count) < 8) {
     next.disk_front_count = formFactor === 2 ? 12 : 24
   }

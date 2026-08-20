@@ -2698,6 +2698,13 @@ watch(
     void openDeviceFromQuery()
   },
 )
+// 保留待恢复的参数档案/IP 表单逻辑，避免被生产构建误判为死代码。
+void [
+  paramDialogVisible, paramEditingId, DDR_OPTIONS, DISK_INTERFACE_OPTIONS, DISK_MEDIA_OPTIONS,
+  resetParamForm, fillParamForm, buildParamPayload, addDiskRow, removeDiskRow,
+  addOsTag, removeOsTag, addCustomRow, removeCustomRow, bindTypeLabel, resetIpForm,
+]
+
 </script>
 
 <template>

@@ -2,6 +2,7 @@ import math
 import uuid
 from copy import deepcopy
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
@@ -44,6 +45,12 @@ def _pagination(params: PaginationParams, total: int) -> PaginationMeta:
     pages = max(1, math.ceil(total / params.page_size)) if total else 1
     return PaginationMeta(page=params.page, page_size=params.page_size, total=total, pages=pages)
 
+
+def _model_response(entity: NetworkDesignModel) -> NetworkDesignModelResponse:
+    """所有模型响应统一应用分类默认值和旧数据迁移，避免列表/详情显示过期属性。"""
+    response = NetworkDesignModelResponse.model_validate(entity)
+    normalized = merge_defaults(entity.category, entity.subtype, entity.attributes)
+    return response.model_copy(update={"attributes": normalized})
 
 class NetworkModelDesignService:
     def __init__(self, session: AsyncSession) -> None:
@@ -139,6 +146,16 @@ class NetworkModelDesignService:
         entity = await self.folder_repo.get_by_id(folder_id)
         if not entity:
             raise NotFoundError("文件夹/项目不存在")
+        linked_project = await self.session.scalar(
+            select(NetworkProject.id)
+            .where(
+                NetworkProject.model_root_folder_id == folder_id,
+                NetworkProject.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+        if linked_project is not None:
+            raise ConflictError("该文件夹/项目仍被网络项目关联，请先解除关联")
         count = await self.folder_repo.count_models(folder_id)
         children = [f for f in await self.folder_repo.list_all() if f.parent_id == folder_id]
         if count or children:
@@ -182,7 +199,7 @@ class NetworkModelDesignService:
             in_filters=in_filters,
             search_fields=["code", "name", "manufacturer_name", "vendor_sku", "contract_device_name"],
         )
-        return [NetworkDesignModelResponse.model_validate(i) for i in items], _pagination(params, total)
+        return [_model_response(i) for i in items], _pagination(params, total)
 
     async def _descendant_folder_ids(self, root_id: uuid.UUID) -> list[uuid.UUID]:
         root = await self.folder_repo.get_by_id(root_id)
@@ -213,7 +230,7 @@ class NetworkModelDesignService:
         entity = await self.model_repo.get_by_id(model_id)
         if not entity:
             raise NotFoundError("模型不存在")
-        return NetworkDesignModelResponse.model_validate(entity)
+        return _model_response(entity)
 
     async def create_model(
         self, payload: NetworkDesignModelCreate, *, user_id: uuid.UUID | None
@@ -232,7 +249,7 @@ class NetworkModelDesignService:
         await self.model_repo.create(entity)
         await self.session.commit()
         await self.session.refresh(entity)
-        return NetworkDesignModelResponse.model_validate(entity)
+        return _model_response(entity)
 
     async def update_model(
         self,
@@ -265,7 +282,7 @@ class NetworkModelDesignService:
         entity.version = (entity.version or 1) + 1
         await self.session.commit()
         await self.session.refresh(entity)
-        return NetworkDesignModelResponse.model_validate(entity)
+        return _model_response(entity)
 
     async def delete_model(self, model_id: uuid.UUID, *, user_id: uuid.UUID | None) -> None:
         entity = await self.model_repo.get_by_id(model_id)

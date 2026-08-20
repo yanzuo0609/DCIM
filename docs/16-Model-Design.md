@@ -1,9 +1,9 @@
 ---
 title: Model Design Redesign
 project: RackDCIM Pro
-version: 1.1.0
+version: 1.2.0
 status: Active
-date: 2026-08-07
+date: 2026-08-17
 ---
 
 # 模型设计（原设备定义）重设计
@@ -48,9 +48,17 @@ date: 2026-08-07
 | --- | --- |
 | server | compute / storage / hpc |
 | network | switch / router / load_balancer / optical_gate |
-| security | firewall / vpn / ddos / ips / ids / net_audit / crypto |
+| security | firewall / vpn / ddos / ips / ids / optical_gate / host_audit / database_audit / net_audit / crypto |
 | software | cloud / bigdata / mysql |
 
+## 专业模型预设库
+
+模型新建窗口内置 15 个可编辑预设，选择后自动生成硬件属性、面板与稳定接口编号：
+
+- 服务器：1U 通用计算、2U 虚拟化、2U 存储、4U GPU/HPC。
+- 交换机：48 口千兆接入、48 口万兆接入、模块化汇聚、100G 核心。
+- 安全设备：防火墙、IPS、IDS、VPN、光闸、主机审计、数据库审计、网络审计。
+- 预设只是起点，所有属性、板卡、接口编号和仿真图标仍可手动调整；发布后供批量拓扑复用。
 ## 属性（attributes JSON）摘要
 
 - **server**：CPU 路数/颗数、内存、扩展 Slot、电源、BMC/USB、前后硬盘槽
@@ -59,6 +67,13 @@ date: 2026-08-07
 - **software**：版本、组件、兼容 OS、授权
 - **仿真（各类共用）**：`sim_engine`、`sim_image`、`sim_icon`、`sim_ram`、`sim_cpu`
 
+## 服务器与安全设备面板规范（1.3）
+
+- 服务器 1U / 2U / 4U 使用接近实际 19 英寸机箱比例的前后面板；背板管理口、VGA、USB 与板载 LOM 固定在底部接口区。
+- PCIe 插槽不再等同于“PCIe 光口”，每槽可选空挡板、RAID 卡、2/4 口电口网卡、2/4 口光口网卡；速率按卡独立选择，电口支持 1/10GE，光口支持 10/25/40/100GE。
+- PCIe 端口 ID 使用 `pcie{slot}-p{index}`，卡类型、介质、速率、模块随拓扑节点同步。
+- 防火墙、IPS、IDS、VPN、光闸、主机审计、数据库审计、网络审计等使用差异化仿真面板和硬件默认值，原 Slot 网格收进“接口参数/自定义面板”。
+- 安全接口命名空间使用 `sec-s{slot}-{kind}-p{index}`，保证模型、面板和拓扑中的接口唯一且可定位。
 ## 应用与拓扑
 
 - 模型可绑定合同设备名称并「应用面板/规格」到台账
@@ -73,6 +88,12 @@ date: 2026-08-07
   - 执行后写回 `NetworkLink`（含 connection_type、speed、LAG、冗余路径、介质等），保存拓扑后在「接口设计」连线表与 Excel 可见
 - Eve-NG：后端代理同步 Lab；浏览器不直连凭证
 
+### 批量拓扑与智能编排
+
+- 批量放置模型时可直接指定设备组和网络角色，并按角色分层、组内相邻的紧凑算法自动排版。
+- 画布保留单设备拖放、手工移动、手工连线；工具栏可随时重新执行「智能布局」。
+- 「一键自动布线」只执行启用且分配方式为 `AUTO` 的规则；`MANUAL` / `HYBRID` 保留人工确认流程。
+- 自动规则可按设备组限定范围，也可在整个拓扑中按角色执行，执行后统一保存节点与连线。
 ### 端口池与模型板卡/上联
 
 模型属性驱动面板端口，布线按池选取：
