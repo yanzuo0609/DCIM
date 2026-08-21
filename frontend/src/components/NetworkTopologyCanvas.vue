@@ -67,9 +67,10 @@ const emit = defineEmits<{
 const ICON = 72
 const GROUP_ICON = 88
 const CULL_MARGIN = 240
-const CULL_NODE_THRESHOLD = 350
-const LABEL_NODE_THRESHOLD = 400
-const LABEL_LINK_THRESHOLD = 200
+/** 超过该节点数启用视口裁剪，降低拖拽时 SVG 节点量 */
+const CULL_NODE_THRESHOLD = 80
+const LABEL_NODE_THRESHOLD = 100
+const LABEL_LINK_THRESHOLD = 80
 const MIN_CANVAS_W = 1800
 const MIN_CANVAS_H = 1200
 
@@ -86,7 +87,13 @@ const hoveredLinkId = ref<string | null>(null)
 const viewport = ref({ left: 0, top: 0, right: MIN_CANVAS_W, bottom: MIN_CANVAS_H })
 let moveRaf = 0
 let pendingMove: { id: string; x: number; y: number } | null = null
+let groupMoveRaf = 0
+let pendingGroupMove: { name: string; x: number; y: number } | null = null
+let marqueeRaf = 0
+let pendingMarquee: { x: number; y: number } | null = null
 let scrollRaf = 0
+/** 交互过程中缓存 CTM，避免每帧 getScreenCTM 强制布局 */
+let cachedCtmInverse: DOMMatrix | null = null
 
 const isGroupView = computed(() => props.viewMode === 'groups')
 const selectedNodeSet = computed(() => new Set(props.selectedNodeIds || []))
@@ -142,7 +149,9 @@ const canvasSize = computed(() => {
   return { width: Math.ceil(maxX), height: Math.ceil(maxY) }
 })
 
-const useCull = computed(() => canvasNodes.value.length >= CULL_NODE_THRESHOLD)
+const useCull = computed(
+  () => displayNodes.value.length + groupGlyphs.value.length >= CULL_NODE_THRESHOLD,
+)
 
 const visibleNodes = computed(() => {
   const nodes = displayNodes.value
@@ -189,47 +198,84 @@ const visibleLinks = computed(() => {
 const showAllNodeLabels = computed(() => canvasNodes.value.length <= LABEL_NODE_THRESHOLD)
 const showAllLinkLabels = computed(() => canvasLinks.value.length <= LABEL_LINK_THRESHOLD)
 
-function groupCenter(g: CanvasGroupGlyph) {
-  return { x: g.pos_x + GROUP_ICON / 2, y: g.pos_y + GROUP_ICON / 2 }
-}
+const groupEndpointMap = computed(() => {
+  const map = new Map<string, { x: number; y: number }>()
+  for (const g of groupGlyphs.value) {
+    map.set(g.id, { x: g.pos_x + GROUP_ICON / 2, y: g.pos_y + GROUP_ICON / 2 })
+  }
+  for (const n of displayNodes.value) {
+    map.set(`node:${n.id}`, { x: n.pos_x + ICON / 2, y: n.pos_y + ICON / 2 })
+  }
+  return map
+})
 
-function groupEdgeEnds(edge: { sourceGroup: string; targetGroup: string }) {
-  const src =
-    groupGlyphs.value.find((g) => g.id === edge.sourceGroup) ||
-    (edge.sourceGroup.startsWith('node:')
-      ? displayNodes.value.find((n) => `node:${n.id}` === edge.sourceGroup)
-      : null)
-  const tgt =
-    groupGlyphs.value.find((g) => g.id === edge.targetGroup) ||
-    (edge.targetGroup.startsWith('node:')
-      ? displayNodes.value.find((n) => `node:${n.id}` === edge.targetGroup)
-      : null)
-  if (!src || !tgt) return null
-  const a =
-    'pos_x' in src && 'count' in src
-      ? groupCenter(src as CanvasGroupGlyph)
-      : { x: (src as NetworkNode).pos_x + ICON / 2, y: (src as NetworkNode).pos_y + ICON / 2 }
-  const b =
-    'pos_x' in tgt && 'count' in tgt
-      ? groupCenter(tgt as CanvasGroupGlyph)
-      : { x: (tgt as NetworkNode).pos_x + ICON / 2, y: (tgt as NetworkNode).pos_y + ICON / 2 }
-  return { a, b }
-}
+const visibleGroupEdges = computed(() => {
+  if (!isGroupView.value) return [] as typeof groupEdges.value
+  const edges = groupEdges.value
+  if (!useCull.value) return edges
+  const { left, top, right, bottom } = viewport.value
+  const pad = CULL_MARGIN
+  const ends = groupEndpointMap.value
+  return edges.filter((edge) => {
+    const a = ends.get(edge.sourceGroup)
+    const b = ends.get(edge.targetGroup)
+    if (!a || !b) return false
+    const minX = Math.min(a.x, b.x)
+    const maxX = Math.max(a.x, b.x)
+    const minY = Math.min(a.y, b.y)
+    const maxY = Math.max(a.y, b.y)
+    return maxX >= left - pad && minX <= right + pad && maxY >= top - pad && minY <= bottom + pad
+  })
+})
+
+const groupEdgeRenderItems = computed(() => {
+  const style = resolvedLineStyle()
+  const dash = strokeDasharrayOf(style)
+  const ends = groupEndpointMap.value
+  return visibleGroupEdges.value.map((edge) => {
+    const a = ends.get(edge.sourceGroup)
+    const b = ends.get(edge.targetGroup)
+    if (!a || !b) {
+      return { edge, d: '', labelX: 0, labelY: 0, dash }
+    }
+    const d = topologyLinkPath(a.x, a.y, b.x, b.y, style)
+    const label = topologyLinkLabelPos(a.x, a.y, b.x, b.y, style)
+    return { edge, d, labelX: label.x, labelY: label.y, dash }
+  })
+})
+
+const linkRenderItems = computed(() => {
+  const items: Array<{
+    link: NetworkLink
+    d: string
+    labelX: number
+    labelY: number
+    color: string
+    dash: string | undefined
+  }> = []
+  for (const link of visibleLinks.value) {
+    const source = nodeMap.value.get(link.source_node_id)
+    const target = nodeMap.value.get(link.target_node_id)
+    if (!source || !target) continue
+    const s = nodeCenter(source)
+    const t = nodeCenter(target)
+    const style = resolvedLineStyle(link)
+    const d = topologyLinkPath(s.x, s.y, t.x, t.y, style)
+    const label = topologyLinkLabelPos(s.x, s.y, t.x, t.y, style)
+    items.push({
+      link,
+      d,
+      labelX: label.x,
+      labelY: label.y,
+      color: linkColor(link),
+      dash: strokeDasharrayOf(style),
+    })
+  }
+  return items
+})
 
 function resolvedLineStyle(link?: { line_style?: string | null }) {
   return normalizeLineStyle(link?.line_style || props.lineStyle)
-}
-
-function groupEdgePath(edge: { sourceGroup: string; targetGroup: string }) {
-  const ends = groupEdgeEnds(edge)
-  if (!ends) return ''
-  return topologyLinkPath(ends.a.x, ends.a.y, ends.b.x, ends.b.y, resolvedLineStyle())
-}
-
-function groupEdgeLabelPos(edge: { sourceGroup: string; targetGroup: string }) {
-  const ends = groupEdgeEnds(edge)
-  if (!ends) return { x: 0, y: 0 }
-  return topologyLinkLabelPos(ends.a.x, ends.a.y, ends.b.x, ends.b.y, resolvedLineStyle())
 }
 
 function nodeCenter(node: NetworkNode) {
@@ -279,6 +325,7 @@ function shouldShowLinkLabel(link: NetworkLink) {
 function updateViewport() {
   const el = wrapRef.value
   if (!el) return
+  cachedCtmInverse = null
   const left = el.scrollLeft
   const top = el.scrollTop
   viewport.value = {
@@ -297,13 +344,22 @@ function onWrapScroll() {
   })
 }
 
+function invalidateCtmCache() {
+  cachedCtmInverse = null
+}
+
 function svgPointFromEvent(event: MouseEvent | DragEvent) {
   const svg = svgRef.value
   if (!svg) return null
+  if (!cachedCtmInverse) {
+    const ctm = svg.getScreenCTM()
+    if (!ctm) return null
+    cachedCtmInverse = ctm.inverse()
+  }
   const pt = svg.createSVGPoint()
   pt.x = event.clientX
   pt.y = event.clientY
-  return pt.matrixTransform(svg.getScreenCTM()?.inverse())
+  return pt.matrixTransform(cachedCtmInverse)
 }
 
 function onNodeMouseDown(event: MouseEvent, node: NetworkNode) {
@@ -372,10 +428,13 @@ function onWindowGroupMove(event: MouseEvent) {
   event.preventDefault()
   const cursor = svgPointFromEvent(event)
   if (!cursor) return
-  const x = Math.max(0, cursor.x - draggingGroup.value.offsetX)
-  const y = Math.max(0, cursor.y - draggingGroup.value.offsetY)
+  pendingGroupMove = {
+    name: draggingGroup.value.name,
+    x: Math.max(0, cursor.x - draggingGroup.value.offsetX),
+    y: Math.max(0, cursor.y - draggingGroup.value.offsetY),
+  }
   groupDragMoved = true
-  emit('moveGroup', draggingGroup.value.name, x, y)
+  if (!groupMoveRaf) groupMoveRaf = requestAnimationFrame(flushGroupMove)
 }
 
 function onWindowGroupUp(event: MouseEvent) {
@@ -395,13 +454,31 @@ function flushMove() {
   emit('moveNode', m.id, m.x, m.y)
 }
 
+function flushGroupMove() {
+  groupMoveRaf = 0
+  if (!pendingGroupMove) return
+  const m = pendingGroupMove
+  pendingGroupMove = null
+  emit('moveGroup', m.name, m.x, m.y)
+}
+
+function flushMarquee() {
+  marqueeRaf = 0
+  if (!marquee.value || !pendingMarquee) return
+  marquee.value.x = pendingMarquee.x
+  marquee.value.y = pendingMarquee.y
+  pendingMarquee = null
+}
+
 function onMouseMove(event: MouseEvent) {
+  // 空闲移动不做 CTM/坐标换算，避免悬停画布时持续强制布局
   if (draggingGroup.value) return
+  if (!marquee.value && !dragging.value) return
   const cursor = svgPointFromEvent(event)
   if (!cursor) return
   if (marquee.value) {
-    marquee.value.x = cursor.x
-    marquee.value.y = cursor.y
+    pendingMarquee = { x: cursor.x, y: cursor.y }
+    if (!marqueeRaf) marqueeRaf = requestAnimationFrame(flushMarquee)
     return
   }
   if (!dragging.value) return
@@ -447,10 +524,15 @@ function finishMarquee() {
 }
 
 function onMouseUp() {
-  if (marquee.value) finishMarquee()
+  if (marquee.value) {
+    if (pendingMarquee) flushMarquee()
+    finishMarquee()
+  }
   if (pendingMove) flushMove()
+  if (pendingGroupMove) flushGroupMove()
   dragging.value = null
   draggingGroup.value = null
+  invalidateCtmCache()
   window.removeEventListener('mousemove', onWindowGroupMove)
   window.removeEventListener('mouseup', onWindowGroupUp)
   window.removeEventListener('mousemove', onWindowNodeMove)
@@ -581,24 +663,6 @@ function onDrop(event: DragEvent) {
   emit('placeNode', id, x, y)
 }
 
-function linkPath(link: NetworkLink) {
-  const source = nodeMap.value.get(link.source_node_id)
-  const target = nodeMap.value.get(link.target_node_id)
-  if (!source || !target) return ''
-  const s = nodeCenter(source)
-  const t = nodeCenter(target)
-  return topologyLinkPath(s.x, s.y, t.x, t.y, resolvedLineStyle(link))
-}
-
-function linkLabelPos(link: NetworkLink) {
-  const source = nodeMap.value.get(link.source_node_id)
-  const target = nodeMap.value.get(link.target_node_id)
-  if (!source || !target) return { x: 0, y: 0 }
-  const s = nodeCenter(source)
-  const t = nodeCenter(target)
-  return topologyLinkLabelPos(s.x, s.y, t.x, t.y, resolvedLineStyle(link))
-}
-
 function resolveLinkSpeed(link: NetworkLink): string {
   const raw = String(link.speed || link.media || '').trim().toUpperCase()
   if (raw) return raw.replace('_', '')
@@ -651,6 +715,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onWindowNodeMove)
   window.removeEventListener('mouseup', onWindowNodeUp)
   if (moveRaf) cancelAnimationFrame(moveRaf)
+  if (groupMoveRaf) cancelAnimationFrame(groupMoveRaf)
+  if (marqueeRaf) cancelAnimationFrame(marqueeRaf)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
 })
 
@@ -790,63 +856,63 @@ watch(
 
       <g class="links">
         <template v-if="isGroupView">
-          <g v-for="edge in groupEdges" :key="edge.id" class="link-group">
+          <g v-for="item in groupEdgeRenderItems" :key="item.edge.id" class="link-group">
             <path
               class="link-line"
-              :d="groupEdgePath(edge)"
+              :d="item.d"
               fill="none"
               stroke="#909399"
-              :stroke-width="Math.min(6, 2 + edge.count * 0.4)"
-              :stroke-dasharray="strokeDasharrayOf(resolvedLineStyle())"
+              :stroke-width="Math.min(6, 2 + item.edge.count * 0.4)"
+              :stroke-dasharray="item.dash"
               marker-end="url(#topo-arrow)"
               pointer-events="none"
             />
             <text
-              :x="groupEdgeLabelPos(edge).x"
-              :y="groupEdgeLabelPos(edge).y"
+              :x="item.labelX"
+              :y="item.labelY"
               class="link-label"
               text-anchor="middle"
             >
-              {{ edge.count }} 条
+              {{ item.edge.count }} 条
             </text>
           </g>
         </template>
         <template v-else>
           <g
-            v-for="link in visibleLinks"
-            :key="link.id"
+            v-for="item in linkRenderItems"
+            :key="item.link.id"
             class="link-group"
-            :class="{ selected: selectedLinkId === link.id }"
-            @mouseenter="hoveredLinkId = link.id"
+            :class="{ selected: selectedLinkId === item.link.id }"
+            @mouseenter="hoveredLinkId = item.link.id"
             @mouseleave="hoveredLinkId = null"
           >
             <path
               class="link-hit"
-              :d="linkPath(link)"
+              :d="item.d"
               fill="none"
               stroke="transparent"
               :stroke-width="showAllLinkLabels ? 14 : 10"
-              @click.stop="onLinkClick($event, link)"
+              @click.stop="onLinkClick($event, item.link)"
             />
             <path
               class="link-line"
-              :d="linkPath(link)"
+              :d="item.d"
               fill="none"
-              :stroke="selectedLinkId === link.id ? '#f56c6c' : linkColor(link)"
-              :stroke-width="selectedLinkId === link.id ? 3.2 : 2"
-              :stroke-dasharray="strokeDasharrayOf(resolvedLineStyle(link))"
+              :stroke="selectedLinkId === item.link.id ? '#f56c6c' : item.color"
+              :stroke-width="selectedLinkId === item.link.id ? 3.2 : 2"
+              :stroke-dasharray="item.dash"
               marker-end="url(#topo-arrow)"
               pointer-events="none"
             />
             <text
-              v-if="shouldShowLinkLabel(link)"
-              :x="linkLabelPos(link).x"
-              :y="linkLabelPos(link).y"
+              v-if="shouldShowLinkLabel(item.link)"
+              :x="item.labelX"
+              :y="item.labelY"
               class="link-label"
               text-anchor="middle"
-              @click.stop="onLinkClick($event, link)"
+              @click.stop="onLinkClick($event, item.link)"
             >
-              {{ link.label || `${link.source_port} → ${link.target_port}` }}
+              {{ item.link.label || `${item.link.source_port} → ${item.link.target_port}` }}
             </text>
           </g>
         </template>
@@ -1053,8 +1119,8 @@ watch(
 
 .traffic-running .link-line {
   stroke-dasharray: 12 7 !important;
-  animation: topology-traffic-flow 0.75s linear infinite;
-  filter: drop-shadow(0 0 2px rgba(64, 158, 255, 0.48));
+  animation: topology-traffic-flow 0.9s linear infinite;
+  will-change: stroke-dashoffset;
 }
 @keyframes topology-traffic-flow {
   to { stroke-dashoffset: -38; }

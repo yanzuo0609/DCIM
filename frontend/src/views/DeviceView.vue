@@ -91,6 +91,18 @@ import RackCabinet from '@/components/RackCabinet.vue'
 import RackRangePicker from '@/components/RackRangePicker.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { PortLayout } from '@/api/network'
+import { resolveDeviceTypeByInfer } from '@/utils/batchMountTypeLimits'
+import {
+  DEVICE_TYPE_CODES,
+  DEVICE_TYPE_FALLBACK_NAMES,
+  RESOURCE_CLASS_LABELS,
+  buildDeviceTypeOptions,
+  displayDeviceTypeName,
+  isDeviceTypeCode,
+  resourceClassOf,
+  type DeviceTypeCode,
+  type ResourceClass,
+} from '@/utils/deviceTypeCatalog'
 
 const auth = useAuthStore()
 const route = useRoute()
@@ -161,7 +173,14 @@ async function onFormContractChange(contractId: string | null) {
   form.contract_id = contractId || null
   form.contract_item_key = ''
   form.manufacturer_id = null
-  if (!contractId) return
+  if (!contractId) {
+    form.project_scope = ''
+    return
+  }
+  const contract = formContracts.value.find((c) => c.id === contractId)
+  if (contract?.project_no) {
+    form.project_scope = contract.project_no
+  }
   try {
     // 先按合同同步型号档案，再自动关联合同设备
     await syncContractModelsById(contractId)
@@ -183,12 +202,14 @@ async function onFormContractItemChange(key: string | null) {
     return
   }
   form.name = item.device_name
+  if (!form.hostname) form.hostname = item.device_name
   try {
     const mfg = await ensureManufacturer(item.manufacturer_name)
     form.manufacturer_id = mfg?.id || null
     const modelName = (item.device_model_name || item.device_name || '').trim()
     if (!modelName) {
       ElMessage.warning('该合同设备未填写型号，请手动选择设备型号')
+      applyInferredMountType(item.device_name, form.hostname)
       return
     }
     let hit = findModelForContract(modelName, mfg)
@@ -207,6 +228,7 @@ async function onFormContractItemChange(key: string | null) {
       if (!form.manufacturer_id && hit.manufacturer_id) {
         form.manufacturer_id = hit.manufacturer_id
       }
+      applyInferredMountType(item.device_name, hit.name, hit.code, form.hostname)
     }
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
@@ -358,6 +380,10 @@ const form = reactive({
   manufacturer_id: null as string | null,
   height_u: 1 as number | null,
   power: null as number | null,
+  warranty_years: null as number | null,
+  project_scope: '',
+  project_app: '',
+  mounted_at: null as string | null,
   description: '',
   room_id: '',
   rack_id: '',
@@ -368,6 +394,254 @@ const form = reactive({
   bmc_ip_id: '' as string | null,
   vip_segment_id: '' as string,
   vip_ip_id: '' as string | null,
+})
+
+/** 设备类型（上架选型）固定清单；类型归类由其自动推导 */
+const deviceTypeOptions = computed(() => buildDeviceTypeOptions(types.value))
+
+const resourceClassLabel = computed(() => {
+  const t = types.value.find((x) => x.id === form.device_type_id)
+  const code =
+    t?.code
+    || deviceTypeOptions.value.find((o) => o.id === form.device_type_id)?.code
+    || null
+  return RESOURCE_CLASS_LABELS[resourceClassOf(code)]
+})
+
+const resourceClassKey = computed(() => {
+  const t = types.value.find((x) => x.id === form.device_type_id)
+  const code =
+    t?.code
+    || deviceTypeOptions.value.find((o) => o.id === form.device_type_id)?.code
+    || null
+  return resourceClassOf(code)
+})
+
+async function ensureDeviceTypeOption(code: DeviceTypeCode) {
+  const existed = types.value.find((t) => t.code === code)
+  if (existed) return existed
+  const created = await createDeviceType({
+    code,
+    name: DEVICE_TYPE_FALLBACK_NAMES[code],
+    description: DEVICE_TYPE_FALLBACK_NAMES[code],
+  })
+  types.value = [...types.value, created].sort((a, b) => a.code.localeCompare(b.code))
+  return created
+}
+
+async function onDeviceTypePick(typeId: string | null) {
+  if (!typeId) {
+    form.device_type_id = null
+    return
+  }
+  const opt = deviceTypeOptions.value.find((o) => o.id === typeId || o.code === typeId)
+  if (opt?.missing) {
+    const created = await ensureDeviceTypeOption(opt.code)
+    form.device_type_id = created.id
+    return
+  }
+  form.device_type_id = typeId
+}
+
+function applyInferredMountType(...parts: Array<string | null | undefined>) {
+  const hit = resolveDeviceTypeByInfer(types.value, ...parts)
+  if (!hit) return
+  // 仅接受清单内类型；否则按名称再匹配兜底显示名
+  if (isDeviceTypeCode(hit.code)) {
+    form.device_type_id = hit.id
+    return
+  }
+  const byName = deviceTypeOptions.value.find((o) => o.name === hit.name)
+  if (byName?.id) form.device_type_id = byName.id
+}
+
+function onFormRoomChange() {
+  form.rack_id = ''
+  formLayoutSlots.value = []
+  formLayoutTotalPower.value = 0
+}
+
+function deviceTypeCodeOf(row: Device): string | null {
+  return (
+    row.device_type_code
+    || types.value.find((t) => t.id === row.device_type_id)?.code
+    || null
+  )
+}
+
+function deviceTypeDisplayName(row: Device): string {
+  return displayDeviceTypeName(types.value, row.device_type_id || row.device_type_code, row.device_type_name)
+}
+
+function deviceResourceClassOf(row: Device): ResourceClass {
+  return resourceClassOf(deviceTypeCodeOf(row))
+}
+
+function deviceResourceClassLabel(row: Device): string {
+  return RESOURCE_CLASS_LABELS[deviceResourceClassOf(row)]
+}
+
+function locationText(row: Device): string {
+  if (!row.rack_id) return '—'
+  return `${row.room_name || '—'} / ${row.rack_code || '—'} / U${row.u_position ?? '—'}`
+}
+
+const paramViewVisible = ref(false)
+const paramViewLoading = ref(false)
+const paramViewDevice = ref<Device | null>(null)
+const paramViewProfile = ref<ParamProfile | null>(null)
+
+function normalizeParamName(s: string | null | undefined) {
+  return (s || '').trim().toLowerCase()
+}
+
+function findContractParamByName(name: string | null | undefined, pool: ParamProfile[]) {
+  const key = normalizeParamName(name)
+  if (!key) return null
+  return (
+    pool.find(
+      (p) =>
+        normalizeParamName(p.name) === key
+        || normalizeParamName(p.source_device_name) === key
+        || normalizeParamName(p.payload?.source_device_name) === key,
+    ) || null
+  )
+}
+
+function formatDiskSpec(d: {
+  size_gb?: number | null
+  count?: number | null
+  interface?: string | null
+  media_type?: string | null
+} | null | undefined) {
+  if (!d) return '—'
+  const mediaMap: Record<string, string> = { ssd: 'SSD', hdd: '机械盘', nvme: 'NVMe' }
+  const bits = [
+    d.size_gb != null ? `${d.size_gb}GB` : '',
+    d.count != null ? `×${d.count}块` : '',
+    d.interface || '',
+    d.media_type ? mediaMap[d.media_type] || d.media_type : '',
+  ].filter(Boolean)
+  return bits.length ? bits.join(' ') : '—'
+}
+
+function paramViewDisks(role: 'system' | 'data') {
+  const disks = paramViewProfile.value?.payload?.disks || []
+  const hasRole = disks.some((d) => d.role)
+  if (hasRole) {
+    return disks.filter((d) => d.role === role)
+  }
+  if (role === 'system') return disks[0] ? [disks[0]] : []
+  return disks.slice(1)
+}
+
+function paramViewTypeName(p: ParamProfile | null) {
+  if (!p) return '—'
+  const typeId = p.device_type_id || p.payload?.device_type_id
+  if (!typeId) return '—'
+  const hit = types.value.find((t) => t.id === typeId)
+  return hit?.name || '—'
+}
+
+function paramViewOtherText(p: ParamProfile | null) {
+  if (!p) return ''
+  const payload = p.payload
+  if (p.other_params?.trim()) return p.other_params
+  if (payload?.other_params?.trim()) return payload.other_params
+  if (!payload) return ''
+  const lines: string[] = []
+  const fanBits = [
+    payload.fan_count != null ? `${payload.fan_count}个` : '',
+    payload.fan_model || '',
+  ].filter(Boolean)
+  if (fanBits.length) lines.push(`风扇: ${fanBits.join(' ')}`)
+  if (payload.psu_power_w != null) lines.push(`电源: ${payload.psu_power_w}W`)
+  const raidBits = [payload.raid?.model || '', payload.raid?.params || ''].filter(Boolean)
+  if (raidBits.length) lines.push(`RAID: ${raidBits.join(' / ')}`)
+  if (payload.supported_os?.length) lines.push(`操作系统: ${payload.supported_os.join(', ')}`)
+  return lines.join('\n')
+}
+
+async function resolveContractParamProfile(row: Device): Promise<ParamProfile | null> {
+  let pool = paramProfiles.value
+  if (!pool.length) {
+    pool = await listParamProfiles()
+    paramProfiles.value = pool
+  }
+
+  // 1) 已绑定参数档案 → 取其名称再对齐合同设备参数（同名）
+  let linked: ParamProfile | null = null
+  if (row.param_profile_id) {
+    linked = pool.find((p) => p.id === row.param_profile_id) || null
+  }
+
+  const nameCandidates = [
+    linked?.name,
+    linked?.source_device_name,
+    linked?.payload?.source_device_name,
+    row.name,
+  ].filter(Boolean) as string[]
+
+  for (const name of nameCandidates) {
+    const hit = findContractParamByName(name, pool)
+    if (hit) return hit
+  }
+
+  // 2) 按采购名称关键字从合同设备参数接口再查一次
+  const keyword = (row.name || linked?.name || '').trim()
+  if (keyword) {
+    try {
+      const remote = await listParamProfiles({ keyword, page_size: 200 })
+      for (const name of [keyword, ...nameCandidates]) {
+        const hit = findContractParamByName(name, remote)
+        if (hit) {
+          // 合并进本地缓存
+          const map = new Map(paramProfiles.value.map((p) => [p.id, p]))
+          for (const item of remote) map.set(item.id, item)
+          paramProfiles.value = [...map.values()]
+          return hit
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 3) 回退：直接展示已绑定档案
+  return linked
+}
+
+async function viewDeviceParams(row: Device) {
+  paramViewDevice.value = row
+  paramViewProfile.value = null
+  paramViewVisible.value = true
+  paramViewLoading.value = true
+  try {
+    const profile = await resolveContractParamProfile(row)
+    if (!profile) {
+      paramViewVisible.value = false
+      ElMessage.warning(
+        row.name
+          ? `未在合同设备参数中找到与「${row.name}」对应的参数，请先在合同-设备参数中完善或绑定`
+          : '该设备未关联设备参数，且无采购名称可匹配合同参数',
+      )
+      return
+    }
+    paramViewProfile.value = profile
+  } catch (error: unknown) {
+    paramViewVisible.value = false
+    const err = error as { message?: string }
+    ElMessage.error(err.message || '加载合同设备参数失败')
+  } finally {
+    paramViewLoading.value = false
+  }
+}
+
+const formRoomMeta = computed(() => rooms.value.find((r) => r.id === form.room_id) || null)
+const formDatacenterLabel = computed(() => {
+  const r = formRoomMeta.value
+  if (!r) return ''
+  return r.datacenter_name || '—'
 })
 
 const deviceIpSegments = ref<IpSegment[]>([])
@@ -503,12 +777,14 @@ const formLayoutSlots = ref<RackLayoutSlot[]>([])
 const formLayoutTotalPower = ref(0)
 
 const mountVisible = ref(false)
+const mountIsMove = ref(false)
 const mountForm = reactive({
   device_id: '',
   room_id: '',
   rack_id: '',
   u_position: 1,
 })
+const mountDialogTitle = computed(() => (mountIsMove.value ? '移动设备' : '手动上架'))
 const mountRacks = computed(() =>
   racks.value.filter((r) => !mountForm.room_id || r.room_id === mountForm.room_id),
 )
@@ -870,6 +1146,7 @@ async function onDeviceModelSelect(value: string | null) {
       if (!form.manufacturer_id && model.manufacturer_id) {
         form.manufacturer_id = model.manufacturer_id
       }
+      applyInferredMountType(model.name, model.code, form.name, form.hostname)
     }
   } catch (error: unknown) {
     form.device_model_id = ''
@@ -1365,9 +1642,126 @@ const ipAllocateRacks = computed(() =>
 
 const statusLabel: Record<string, string> = {
   stock: '库存',
-  mounted: '已上架',
+  mounted: '上架加电',
+  mounted_nopower: '上架无电',
+  app_online: '应用上线',
+  app_offline: '应用下线',
+  fault: '故障',
   maintenance: '维护',
   retired: '退役',
+}
+
+/** 修改状态可选值；上架加电 / 下架 / 库存走现有上架、下架流程 */
+type DeviceStatusAction =
+  | 'mounted'
+  | 'mounted_nopower'
+  | 'app_online'
+  | 'app_offline'
+  | 'unmount'
+  | 'stock'
+  | 'fault'
+
+const DEVICE_STATUS_OPTIONS: { value: DeviceStatusAction; label: string; hint: string }[] = [
+  { value: 'mounted', label: '上架加电', hint: '未上架时打开上架对话框；已上架则直接改状态' },
+  { value: 'mounted_nopower', label: '上架无电', hint: '需已上架' },
+  { value: 'app_online', label: '应用上线', hint: '需已上架' },
+  { value: 'app_offline', label: '应用下线', hint: '需已上架' },
+  { value: 'unmount', label: '下架', hint: '沿用现有下架确认' },
+  { value: 'stock', label: '库存', hint: '未上架直接设为库存；已上架则先下架' },
+  { value: 'fault', label: '故障', hint: '可直接设置' },
+]
+
+const statusChangeVisible = ref(false)
+const statusChangeSaving = ref(false)
+const statusChangeDevice = ref<Device | null>(null)
+const statusChangeTarget = ref<DeviceStatusAction>('mounted')
+
+function openStatusChange(row: Device) {
+  statusChangeDevice.value = row
+  const current = row.status as DeviceStatusAction
+  const known = DEVICE_STATUS_OPTIONS.some((o) => o.value === current)
+  statusChangeTarget.value = known ? current : row.rack_id ? 'mounted' : 'stock'
+  statusChangeVisible.value = true
+}
+
+async function handleStatusChangeConfirm() {
+  const row = statusChangeDevice.value
+  if (!row) return
+  const target = statusChangeTarget.value
+
+  if (target === 'mounted') {
+    if (!row.rack_id) {
+      statusChangeVisible.value = false
+      openMount(row)
+      return
+    }
+    statusChangeSaving.value = true
+    try {
+      await updateDevice(row.id, { status: 'mounted' })
+      ElMessage.success('状态已更新为「上架加电」')
+      statusChangeVisible.value = false
+      await loadData()
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      ElMessage.error(err.response?.data?.message || err.message || '修改失败')
+    } finally {
+      statusChangeSaving.value = false
+    }
+    return
+  }
+  if (target === 'unmount') {
+    if (!row.rack_id) {
+      ElMessage.warning('设备未上架，无需下架')
+      return
+    }
+    statusChangeVisible.value = false
+    await handleUnmount(row)
+    return
+  }
+  if (target === 'stock') {
+    if (row.rack_id) {
+      statusChangeVisible.value = false
+      await handleUnmount(row)
+      return
+    }
+    if (row.status === 'stock') {
+      ElMessage.info('设备已是库存状态')
+      statusChangeVisible.value = false
+      return
+    }
+    statusChangeSaving.value = true
+    try {
+      await updateDevice(row.id, { status: 'stock' })
+      ElMessage.success('已设为库存')
+      statusChangeVisible.value = false
+      await loadData()
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      ElMessage.error(err.response?.data?.message || err.message || '修改失败')
+    } finally {
+      statusChangeSaving.value = false
+    }
+    return
+  }
+
+  const onRackStatuses = new Set(['mounted_nopower', 'app_online', 'app_offline'])
+  if (onRackStatuses.has(target) && !row.rack_id) {
+    ElMessage.warning('请先上架设备后再设置该状态')
+    return
+  }
+
+  statusChangeSaving.value = true
+  try {
+    await updateDevice(row.id, { status: target })
+    ElMessage.success(`状态已更新为「${statusLabel[target] || target}」`)
+    statusChangeVisible.value = false
+    await loadData()
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '修改失败')
+  } finally {
+    statusChangeSaving.value = false
+  }
 }
 
 async function loadProfileRefs() {
@@ -1383,6 +1777,35 @@ async function loadProfileRefs() {
   paramProfiles.value = params
   bmcProfiles.value = bmcs
   systemProfiles.value = systems
+  void syncCanonicalDeviceTypeNames()
+}
+
+/** 将库中旧短名（计算/存储/安全）同步为标准展示名，并补齐「其他」 */
+async function syncCanonicalDeviceTypeNames() {
+  const byCode = new Map(types.value.map((t) => [t.code, t]))
+  for (const code of DEVICE_TYPE_CODES) {
+    const want = DEVICE_TYPE_FALLBACK_NAMES[code]
+    const hit = byCode.get(code)
+    if (!hit) {
+      try {
+        const created = await createDeviceType({ code, name: want, description: want })
+        types.value = [...types.value, created]
+        byCode.set(code, created)
+      } catch {
+        // ignore create race / permission
+      }
+      continue
+    }
+    if (hit.name !== want) {
+      try {
+        const updated = await updateDeviceType(hit.id, { name: want, description: want })
+        types.value = types.value.map((t) => (t.id === updated.id ? updated : t))
+        byCode.set(code, updated)
+      } catch {
+        // ignore
+      }
+    }
+  }
 }
 
 async function loadLocationRefs() {
@@ -1651,7 +2074,9 @@ function resetForm() {
   form.hostname = ''
   form.serial_number = ''
   form.device_model_id = ''
-  form.device_type_id = types.value[0]?.id || null
+  form.device_type_id = types.value.find((t) => t.code === 'switch_10g')?.id
+    || types.value.find((t) => (DEVICE_TYPE_CODES as readonly string[]).includes(t.code))?.id
+    || null
   form.param_profile_id = null
   form.bmc_profile_id = null
   form.system_profile_id = null
@@ -1660,6 +2085,10 @@ function resetForm() {
   form.manufacturer_id = null
   form.height_u = 1
   form.power = null
+  form.warranty_years = null
+  form.project_scope = ''
+  form.project_app = ''
+  form.mounted_at = null
   form.description = ''
   form.room_id = ''
   form.rack_id = ''
@@ -1728,6 +2157,10 @@ function openEdit(row: Device) {
   form.manufacturer_id = row.manufacturer_id || null
   form.height_u = row.height_u
   form.power = row.power
+  form.warranty_years = row.warranty_years ?? null
+  form.project_scope = row.project_scope || row.project_no || ''
+  form.project_app = row.project_app || ''
+  form.mounted_at = row.mounted_at || null
   form.description = row.description || ''
   form.room_id = row.room_id || ''
   form.rack_id = row.rack_id || ''
@@ -1762,6 +2195,10 @@ function openEdit(row: Device) {
         network_kind: d.network_kind || null,
         device_name: d.name || d.hostname,
       }
+      form.warranty_years = d.warranty_years ?? form.warranty_years
+      form.project_scope = d.project_scope || d.project_no || form.project_scope
+      form.project_app = d.project_app || form.project_app
+      form.mounted_at = d.mounted_at || form.mounted_at
       applyDeviceIpAssign(d)
     })
     .catch(() => undefined)
@@ -1886,6 +2323,10 @@ async function handleSubmit() {
       height_u: form.height_u,
       power: form.power,
       description: form.description || null,
+      project_scope: form.project_scope || null,
+      project_app: form.project_app || null,
+      warranty_years: form.warranty_years,
+      mounted_at: form.mounted_at || null,
       system_ip_id: form.system_ip_id || null,
       bmc_ip_id: form.bmc_ip_id || null,
       vip_ip_id: form.vip_ip_id || null,
@@ -2009,6 +2450,7 @@ async function onBatchEditSuccess() {
 }
 
 function openMount(row: Device) {
+  mountIsMove.value = !!row.rack_id
   mountForm.device_id = row.id
   mountForm.room_id = row.room_id || rooms.value[0]?.id || ''
   const roomRacks = racks.value.filter((r) => r.room_id === mountForm.room_id)
@@ -2068,11 +2510,11 @@ async function handleMount() {
   }
   try {
     await mountDevice(mountForm.rack_id, mountForm.device_id, mountForm.u_position)
-    ElMessage.success('上架成功')
+    ElMessage.success(mountIsMove.value ? '移动成功' : '上架成功')
     mountVisible.value = false
     await loadData()
   } catch {
-    ElMessage.error('上架失败，U 位冲突或参数错误')
+    ElMessage.error(mountIsMove.value ? '移动失败，U 位冲突或参数错误' : '上架失败，U 位冲突或参数错误')
   }
 }
 
@@ -2095,6 +2537,176 @@ async function handleUnmount(row: Device) {
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     ElMessage.error(err.response?.data?.message || err.message || '下架失败')
+  }
+}
+
+const assignIpVisible = ref(false)
+const assignIpSaving = ref(false)
+const assignIpHydrating = ref(false)
+const assignIpDevice = ref<Device | null>(null)
+const assignIpForm = reactive({
+  system_segment_id: '' as string,
+  system_ip_id: null as string | null,
+  bmc_segment_id: '' as string,
+  bmc_ip_id: null as string | null,
+  vip_segment_id: '' as string,
+  vip_ip_id: null as string | null,
+})
+const assignSystemIpOptions = ref<IpAddress[]>([])
+const assignBmcIpOptions = ref<IpAddress[]>([])
+const assignVipIpOptions = ref<IpAddress[]>([])
+const assignIpLoading = reactive({
+  system: false,
+  bmc: false,
+  vip: false,
+})
+
+async function loadAssignSegmentIpOptions(
+  kind: 'system' | 'bmc' | 'vip',
+  segmentId: string,
+  keepIpId?: string | null,
+) {
+  if (!segmentId) {
+    if (kind === 'system') assignSystemIpOptions.value = []
+    if (kind === 'bmc') assignBmcIpOptions.value = []
+    if (kind === 'vip') assignVipIpOptions.value = []
+    return
+  }
+  assignIpLoading[kind] = true
+  try {
+    const params: Record<string, unknown> = {
+      page: 1,
+      page_size: 200,
+      segment_id: segmentId,
+    }
+    if (kind === 'system' || kind === 'bmc') {
+      params.status = 'free'
+    }
+    const data = await listIpAddresses(params)
+    let items = (data?.items ?? []) as IpAddress[]
+    if (kind === 'vip') {
+      items = items.filter((ip) => ip.status !== 'disabled')
+    }
+    const deviceId = assignIpDevice.value?.id
+    if (keepIpId && !items.some((ip) => ip.id === keepIpId)) {
+      try {
+        const mine = await listIpAddresses({
+          page: 1,
+          page_size: 50,
+          segment_id: segmentId,
+          ...(kind !== 'vip' && deviceId ? { device_id: deviceId } : {}),
+        })
+        const extra = ((mine?.items ?? []) as IpAddress[]).filter((ip) => ip.id === keepIpId)
+        if (!extra.length && kind === 'vip') {
+          const all = await listIpAddresses({ page: 1, page_size: 200, segment_id: segmentId })
+          items = [
+            ...((all?.items ?? []) as IpAddress[]).filter((ip) => ip.id === keepIpId),
+            ...items,
+          ]
+        } else {
+          items = [...extra, ...items]
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    items = sortIpOptions(items)
+    if (kind === 'system') assignSystemIpOptions.value = items
+    if (kind === 'bmc') assignBmcIpOptions.value = items
+    if (kind === 'vip') assignVipIpOptions.value = items
+  } catch {
+    if (kind === 'system') assignSystemIpOptions.value = []
+    if (kind === 'bmc') assignBmcIpOptions.value = []
+    if (kind === 'vip') assignVipIpOptions.value = []
+  } finally {
+    assignIpLoading[kind] = false
+  }
+}
+
+watch(
+  () => assignIpForm.system_segment_id,
+  (id) => {
+    if (!assignIpVisible.value) return
+    if (!assignIpHydrating.value) assignIpForm.system_ip_id = null
+    void loadAssignSegmentIpOptions('system', id, assignIpForm.system_ip_id)
+  },
+)
+watch(
+  () => assignIpForm.bmc_segment_id,
+  (id) => {
+    if (!assignIpVisible.value) return
+    if (!assignIpHydrating.value) assignIpForm.bmc_ip_id = null
+    void loadAssignSegmentIpOptions('bmc', id, assignIpForm.bmc_ip_id)
+  },
+)
+watch(
+  () => assignIpForm.vip_segment_id,
+  (id) => {
+    if (!assignIpVisible.value) return
+    if (!assignIpHydrating.value) assignIpForm.vip_ip_id = null
+    void loadAssignSegmentIpOptions('vip', id, assignIpForm.vip_ip_id)
+  },
+)
+
+async function openAssignIp(row: Device) {
+  try {
+    await ensureDeviceIpSegments()
+    const detail = await getDevice(row.id)
+    assignIpDevice.value = detail
+    assignIpHydrating.value = true
+    assignIpForm.system_segment_id = detail.system_segment_id || ''
+    assignIpForm.system_ip_id = detail.system_ip_id || null
+    assignIpForm.bmc_segment_id = detail.bmc_segment_id || ''
+    assignIpForm.bmc_ip_id = detail.bmc_ip_id || null
+    assignIpForm.vip_segment_id = detail.vip_segment_id || ''
+    assignIpForm.vip_ip_id = detail.vip_ip_id || null
+    assignIpVisible.value = true
+    await Promise.all([
+      assignIpForm.system_segment_id
+        ? loadAssignSegmentIpOptions(
+            'system',
+            assignIpForm.system_segment_id,
+            assignIpForm.system_ip_id,
+          )
+        : Promise.resolve((assignSystemIpOptions.value = [])),
+      assignIpForm.bmc_segment_id
+        ? loadAssignSegmentIpOptions('bmc', assignIpForm.bmc_segment_id, assignIpForm.bmc_ip_id)
+        : Promise.resolve((assignBmcIpOptions.value = [])),
+      assignIpForm.vip_segment_id
+        ? loadAssignSegmentIpOptions('vip', assignIpForm.vip_segment_id, assignIpForm.vip_ip_id)
+        : Promise.resolve((assignVipIpOptions.value = [])),
+    ])
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '加载设备 IP 失败')
+  } finally {
+    assignIpHydrating.value = false
+  }
+}
+
+async function handleAssignIpSubmit() {
+  const row = assignIpDevice.value
+  if (!row) return
+  if (assignIpForm.vip_ip_id && !assignIpForm.system_ip_id && !assignIpForm.bmc_ip_id) {
+    ElMessage.warning('分配虚拟IP前请先选择业务地址或带外地址')
+    return
+  }
+  assignIpSaving.value = true
+  try {
+    await updateDevice(row.id, {
+      system_ip_id: assignIpForm.system_ip_id || '',
+      bmc_ip_id: assignIpForm.bmc_ip_id || '',
+      vip_ip_id: assignIpForm.vip_ip_id || '',
+    })
+    ElMessage.success('IP 地址已分配')
+    assignIpVisible.value = false
+    await loadData()
+    await refreshIpAfterDeviceChange()
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { message?: string } }; message?: string }
+    ElMessage.error(err.response?.data?.message || err.message || '分配失败')
+  } finally {
+    assignIpSaving.value = false
   }
 }
 
@@ -2716,7 +3328,7 @@ void [
             <div class="actions">
               <el-input
                 v-model="keyword"
-                placeholder="搜索设备名称/编号/序列号"
+                placeholder="搜索采购名称/编号/设备序号"
                 clearable
                 style="width: 220px"
                 @keyup.enter="loadData"
@@ -2765,7 +3377,7 @@ void [
                     <el-dropdown-item v-if="canUpdate" command="model">型号</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="manufacturer">厂商</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="unmount">批量下架</el-dropdown-item>
-                    <el-dropdown-item v-if="canUpdate" command="mount">改位置</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="mount">移动设备</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="ip">改 IP</el-dropdown-item>
                     <el-dropdown-item
                       v-if="canDelete"
@@ -2787,6 +3399,7 @@ void [
             class="device-list-table"
             :data="tableData"
             stripe
+            size="small"
             @selection-change="onSelectionChange"
           >
             <el-table-column
@@ -2798,7 +3411,7 @@ void [
             <el-table-column
               type="index"
               label="序号"
-              width="48"
+              width="52"
               align="center"
               class-name="col-index"
               label-class-name="col-index"
@@ -2807,32 +3420,19 @@ void [
             <el-table-column prop="hostname" label="设备编号" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">{{ row.hostname || '—' }}</template>
             </el-table-column>
-            <el-table-column prop="name" label="设备名称" min-width="130" show-overflow-tooltip>
+            <el-table-column prop="name" label="采购名称" min-width="130" show-overflow-tooltip>
               <template #default="{ row }">{{ row.name || '—' }}</template>
             </el-table-column>
-            <el-table-column prop="device_type_name" label="类型" width="90" />
-            <el-table-column prop="device_model_name" label="型号" min-width="110" />
-            <el-table-column prop="serial_number" label="序列号" min-width="120" />
-            <el-table-column prop="height_u" label="高度" width="70" />
-            <el-table-column prop="manufacturer_name" label="厂商" min-width="100" />
-            <el-table-column label="合同" min-width="140">
-              <template #default="{ row }">
-                <div>{{ row.contract_no || '—' }}</div>
-                <div v-if="row.project_no" class="ip-extra">项目: {{ row.project_no }}</div>
-              </template>
+            <el-table-column prop="device_model_name" label="设备型号" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.device_model_name || '—' }}</template>
             </el-table-column>
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }">{{ statusLabel[row.status] || row.status }}</template>
+            <el-table-column prop="manufacturer_name" label="厂商" min-width="100" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.manufacturer_name || '—' }}</template>
             </el-table-column>
-            <el-table-column label="位置" min-width="160">
-              <template #default="{ row }">
-                <template v-if="row.rack_id">
-                  {{ row.room_name || '—' }} / {{ row.rack_code || '—' }} / U{{ row.u_position }}
-                </template>
-                <template v-else>—</template>
-              </template>
+            <el-table-column label="上架位置" min-width="170" show-overflow-tooltip>
+              <template #default="{ row }">{{ locationText(row) }}</template>
             </el-table-column>
-            <el-table-column label="IP" min-width="150">
+            <el-table-column label="IP 地址" min-width="150" show-overflow-tooltip>
               <template #default="{ row }">
                 <div>{{ row.ip_summary || '—' }}</div>
                 <div v-if="row.bmc_ip || row.vip" class="ip-extra">
@@ -2841,22 +3441,54 @@ void [
                 </div>
               </template>
             </el-table-column>
+            <el-table-column label="项目归属" min-width="110" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.project_scope || row.project_no || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="项目应用" min-width="110" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.project_app || '—' }}</template>
+            </el-table-column>
+            <el-table-column prop="serial_number" label="设备序号" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.serial_number || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="设备类型" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ deviceTypeDisplayName(row) }}</template>
+            </el-table-column>
+            <el-table-column label="类型归类" min-width="110" align="center">
+              <template #default="{ row }">
+                <span class="resource-class-badge sm" :data-class="deviceResourceClassOf(row)">
+                  {{ deviceResourceClassLabel(row) }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="88" align="center">
+              <template #default="{ row }">{{ statusLabel[row.status] || row.status }}</template>
+            </el-table-column>
+            <el-table-column label="归属合同" min-width="140" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.contract_no || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="设备高度" width="88" align="center">
+              <template #default="{ row }">{{ row.height_u != null ? `${row.height_u}U` : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="电源功率" width="96" align="center">
+              <template #default="{ row }">{{ row.power != null ? `${row.power}W` : '—' }}</template>
+            </el-table-column>
             <el-table-column label="操作" width="88" fixed="right" align="center">
               <template #default="{ row }">
                 <el-dropdown trigger="click">
                   <el-button type="primary" link>操作</el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
-                      <el-dropdown-item v-if="row.rack_id" @click="openRackDetail(row)">机柜图</el-dropdown-item>
-                      <el-dropdown-item v-if="canUpdate" @click="openMount(row)">
-                        {{ row.rack_id ? '改位' : '上架' }}
+                      <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑设备</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" @click="openAssignIp(row)">分配IP地址</el-dropdown-item>
+                      <el-dropdown-item v-if="canUpdate" @click="openStatusChange(row)">
+                        修改设备状态
                       </el-dropdown-item>
-                      <el-dropdown-item
-                        v-if="canUpdate && row.rack_id"
-                        @click="handleUnmount(row)"
-                      >
-                        下架
+                      <el-dropdown-item v-if="canUpdate" @click="openMount(row)">
+                        移动设备位置
+                      </el-dropdown-item>
+                      <el-dropdown-item @click="viewDeviceParams(row)">查看设备参数</el-dropdown-item>
+                      <el-dropdown-item v-if="row.rack_id" @click="openRackDetail(row)">
+                        查看机柜位图
                       </el-dropdown-item>
                       <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">
                         删除
@@ -3091,315 +3723,518 @@ void [
     <el-drawer
       v-model="editVisible"
       :title="editingId ? '编辑设备' : '新建设备'"
-      size="720px"
+      size="1080px"
+      class="device-form-drawer"
     >
-      <el-form label-width="100px">
-        <el-form-item label="采购合同">
-          <el-select
-            v-model="form.contract_id"
-            clearable
-            filterable
-            style="width: 100%"
-            placeholder="选择采购合同"
-            @change="onFormContractChange"
-          >
-            <el-option
-              v-for="c in formContracts"
-              :key="c.id"
-              :label="c.project_no ? `${c.contract_no} · ${c.project_no}` : c.contract_no"
-              :value="c.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="合同设备">
-          <el-select
-            v-model="form.contract_item_key"
-            clearable
-            filterable
-            style="width: 100%"
-            placeholder="选择合同内的设备名称"
-            :disabled="!form.contract_id"
-            @change="onFormContractItemChange"
-          >
-            <el-option
-              v-for="it in formContractItems"
-              :key="contractItemKey(it)"
-              :label="contractItemOptionLabel(it)"
-              :value="contractItemKey(it)"
-            />
-          </el-select>
-          <p v-if="form.contract_id && !formContractItems.length" class="bind-device-hint">
-            该合同暂无可用硬件设备明细
-          </p>
-          <p
-            v-else-if="form.contract_item_key && form.device_model_id"
-            class="bind-device-hint"
-          >
-            已自动关联型号「{{ models.find((m) => m.id === form.device_model_id)?.name || '—' }}」
-          </p>
-        </el-form-item>
-        <el-form-item label="厂商">
-          <el-select
-            v-model="form.manufacturer_id"
-            clearable
-            filterable
-            allow-create
-            default-first-option
-            style="width: 100%"
-            placeholder="选择或输入厂商；选合同设备时可自动匹配"
-            @change="onManufacturerChange"
-          >
-            <el-option
-              v-for="m in manufacturers"
-              :key="m.id"
-              :label="m.name"
-              :value="m.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="设备名称" required>
-          <el-input
-            v-model="form.name"
-            placeholder="与合同采购清单/采购汇总设备名称一致"
-          />
-        </el-form-item>
-        <el-form-item label="设备编号">
-          <el-input v-model="form.hostname" placeholder="唯一编号，默认可与名称相同" />
-        </el-form-item>
-        <el-form-item label="序列号" required>
-          <el-input v-model="form.serial_number" />
-        </el-form-item>
-        <el-form-item label="类型">
-          <div class="type-select-row">
-            <el-select
-              v-model="form.device_type_id"
-              clearable
-              filterable
-              allow-create
-              default-first-option
-              placeholder="选择或输入自定义类型"
-              style="flex: 1"
-              @change="onDeviceTypeSelect"
-            >
-              <el-option v-for="t in types" :key="t.id" :label="t.name" :value="t.id" />
-            </el-select>
-            <el-button v-if="canUpdate" @click="openTypeCreate">新建</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="型号" required>
-          <div class="type-select-row">
-            <el-select
-              v-model="form.device_model_id"
-              filterable
-              allow-create
-              default-first-option
-              placeholder="输入自定义型号或选择已有"
-              style="flex: 1"
-              @change="onDeviceModelSelect"
-            >
-              <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
-            </el-select>
-            <el-button v-if="canCreate || canUpdate" @click="openModelCreate">新建</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="高度(U)">
-          <el-input-number v-model="form.height_u" :min="1" :max="10" />
-        </el-form-item>
-        <el-form-item label="功率(W)">
-          <el-input-number v-model="form.power" :min="0" :step="50" />
-        </el-form-item>
-        <el-divider content-position="left">上架位置</el-divider>
-        <el-form-item label="机房">
-          <el-select v-model="form.room_id" clearable filterable style="width: 100%" placeholder="选择机房">
-            <el-option v-for="r in rooms" :key="r.id" :label="r.name" :value="r.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="机柜">
-          <el-select
-            v-model="form.rack_id"
-            clearable
-            filterable
-            style="width: 100%"
-            placeholder="选择机柜"
-            :disabled="!form.room_id"
-          >
-            <el-option
-              v-for="r in formRacks"
-              :key="r.id"
-              :label="`${r.code} · 空闲 ${r.free_u}U`"
-              :value="r.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="U 位">
-          <el-input-number
-            v-model="form.u_position"
-            :min="1"
-            :max="formRackMeta?.total_u || 60"
-            :disabled="!form.rack_id"
-          />
-        </el-form-item>
-        <el-form-item label="设备参数">
-          <el-select
-            v-model="form.param_profile_id"
-            clearable
-            filterable
-            style="width: 100%"
-            placeholder="选择设备参数（设备ID - 设备名称）"
-          >
-            <el-option
-              v-for="p in paramProfiles"
-              :key="p.id"
-              :label="`${p.code} - ${p.name}`"
-              :value="p.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-divider content-position="left">IP 地址分配</el-divider>
-        <el-form-item label="业务地址">
-          <div class="ip-assign-row">
-            <el-select
-              v-model="form.system_segment_id"
-              clearable
-              filterable
-              placeholder="选择地址段"
-              style="width: 48%"
-            >
-              <el-option
-                v-for="s in deviceIpSegments"
-                :key="s.id"
-                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
-                :value="s.id"
+      <div class="device-form-sheet-wrap">
+        <table class="device-form-sheet">
+          <!-- 合同信息 -->
+          <tr>
+            <th rowspan="1" class="sheet-section">合同信息</th>
+            <th>采购合同</th>
+            <td>
+              <el-select
+                v-model="form.contract_id"
+                clearable
+                filterable
+                placeholder="选择合同"
+                @change="onFormContractChange"
+              >
+                <el-option
+                  v-for="c in formContracts"
+                  :key="c.id"
+                  :label="c.project_no ? `${c.contract_no} · ${c.project_no}` : c.contract_no"
+                  :value="c.id"
+                />
+              </el-select>
+            </td>
+            <th>合同设备</th>
+            <td>
+              <el-select
+                v-model="form.contract_item_key"
+                clearable
+                filterable
+                placeholder="读取合同"
+                :disabled="!form.contract_id"
+                @change="onFormContractItemChange"
+              >
+                <el-option
+                  v-for="it in formContractItems"
+                  :key="contractItemKey(it)"
+                  :label="contractItemOptionLabel(it)"
+                  :value="contractItemKey(it)"
+                />
+              </el-select>
+            </td>
+            <th>上架时间</th>
+            <td>
+              <el-date-picker
+                v-model="form.mounted_at"
+                type="datetime"
+                value-format="YYYY-MM-DDTHH:mm:ss"
+                placeholder="选择上架时间"
+                style="width: 100%"
               />
-            </el-select>
-            <el-select
-              v-model="form.system_ip_id"
-              clearable
-              filterable
-              :loading="ipOptionsLoading.system"
-              :disabled="!form.system_segment_id"
-              placeholder="选择可用业务IP"
-              style="width: 48%"
-            >
-              <el-option
-                v-for="ip in systemIpOptions"
-                :key="ip.id"
-                :label="ip.system_ip"
-                :value="ip.id"
+            </td>
+          </tr>
+
+          <!-- 基本信息 -->
+          <tr>
+            <th rowspan="5" class="sheet-section">基本信息</th>
+            <th>设备编号</th>
+            <td>
+              <el-input v-model="form.hostname" placeholder="唯一编号" />
+            </td>
+            <th>项目归属</th>
+            <td>
+              <el-input v-model="form.project_scope" placeholder="同步合同项目号或手工填写" />
+            </td>
+            <th>项目应用</th>
+            <td>
+              <el-input v-model="form.project_app" placeholder="业务应用/分区" />
+            </td>
+          </tr>
+          <tr>
+            <th>设备型号</th>
+            <td>
+              <div class="sheet-inline">
+                <el-select
+                  v-model="form.device_model_id"
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="同步合同 / 选择型号"
+                  style="flex: 1"
+                  @change="onDeviceModelSelect"
+                >
+                  <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
+                </el-select>
+                <el-button v-if="canCreate || canUpdate" link type="primary" @click="openModelCreate">新建</el-button>
+              </div>
+            </td>
+            <th>厂商</th>
+            <td>
+              <el-select
+                v-model="form.manufacturer_id"
+                clearable
+                filterable
+                allow-create
+                default-first-option
+                placeholder="同步合同"
+                @change="onManufacturerChange"
+              >
+                <el-option v-for="m in manufacturers" :key="m.id" :label="m.name" :value="m.id" />
+              </el-select>
+            </td>
+            <th>设备类型</th>
+            <td>
+              <el-select
+                :model-value="form.device_type_id || undefined"
+                filterable
+                placeholder="选择设备类型"
+                @change="onDeviceTypePick"
+              >
+                <el-option
+                  v-for="t in deviceTypeOptions"
+                  :key="t.code"
+                  :label="t.name"
+                  :value="t.id || t.code"
+                />
+              </el-select>
+            </td>
+          </tr>
+          <tr>
+            <th>设备高度</th>
+            <td>
+              <div class="sheet-inline unit-row">
+                <el-input-number v-model="form.height_u" :min="1" :max="10" controls-position="right" />
+                <span class="unit-suffix">U</span>
+              </div>
+            </td>
+            <th>电源功率</th>
+            <td>
+              <div class="sheet-inline unit-row">
+                <el-input-number v-model="form.power" :min="0" :step="50" controls-position="right" />
+                <span class="unit-suffix">W</span>
+              </div>
+            </td>
+            <th>维保年限</th>
+            <td>
+              <div class="sheet-inline unit-row">
+                <el-input-number
+                  v-model="form.warranty_years"
+                  :min="0"
+                  :max="50"
+                  controls-position="right"
+                  placeholder="年"
+                />
+                <span class="unit-suffix">年</span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <th>设备序号</th>
+            <td colspan="3">
+              <el-input v-model="form.serial_number" placeholder="必填" />
+            </td>
+            <th>采购名称</th>
+            <td>
+              <el-input v-model="form.name" placeholder="与合同清单一致" />
+            </td>
+          </tr>
+          <tr>
+            <th>类型归类</th>
+            <td colspan="5">
+              <span class="resource-class-badge" :data-class="resourceClassKey">
+                {{ resourceClassLabel }}
+              </span>
+              <span class="sheet-hint" style="display: inline; margin-left: 8px">由设备类型自动归类</span>
+            </td>
+          </tr>
+
+          <!-- 上架信息 -->
+          <tr>
+            <th rowspan="4" class="sheet-section">上架信息</th>
+            <th>中心机房</th>
+            <td>
+              <el-select
+                v-model="form.room_id"
+                clearable
+                filterable
+                placeholder="选择机房"
+                @change="onFormRoomChange"
+              >
+                <el-option
+                  v-for="r in rooms"
+                  :key="r.id"
+                  :label="r.datacenter_name ? `${r.datacenter_name} · ${r.name}` : r.name"
+                  :value="r.id"
+                />
+              </el-select>
+              <div v-if="formDatacenterLabel" class="sheet-hint">数据中心：{{ formDatacenterLabel }}</div>
+            </td>
+            <th>机柜位置</th>
+            <td>
+              <el-select
+                v-model="form.rack_id"
+                clearable
+                filterable
+                placeholder="选择机柜"
+                :disabled="!form.room_id"
+                @change="(id: string) => loadFormRackLayout(id || '')"
+              >
+                <el-option
+                  v-for="r in formRacks"
+                  :key="r.id"
+                  :label="`${r.code} · 空闲 ${r.free_u}U`"
+                  :value="r.id"
+                />
+              </el-select>
+            </td>
+            <th>机柜U位</th>
+            <td>
+              <el-input-number
+                v-model="form.u_position"
+                :min="1"
+                :max="formRackMeta?.total_u || 60"
+                :disabled="!form.rack_id"
+                controls-position="right"
               />
-            </el-select>
-          </div>
-          <p class="bind-device-hint">仅显示空闲地址；占用后自动隐藏，释放后可见</p>
-        </el-form-item>
-        <el-form-item label="带外地址">
-          <div class="ip-assign-row">
-            <el-select
-              v-model="form.bmc_segment_id"
-              clearable
-              filterable
-              placeholder="选择地址段"
-              style="width: 48%"
-            >
-              <el-option
-                v-for="s in deviceIpSegments"
-                :key="s.id"
-                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
-                :value="s.id"
-              />
-            </el-select>
-            <el-select
-              v-model="form.bmc_ip_id"
-              clearable
-              filterable
-              :loading="ipOptionsLoading.bmc"
-              :disabled="!form.bmc_segment_id"
-              placeholder="选择可用带外IP"
-              style="width: 48%"
-            >
-              <el-option
-                v-for="ip in bmcIpOptions"
-                :key="ip.id"
-                :label="ip.system_ip"
-                :value="ip.id"
-              />
-            </el-select>
-          </div>
-          <p class="bind-device-hint">仅显示空闲地址，不可与其他设备重复使用</p>
-        </el-form-item>
-        <el-form-item label="虚拟IP">
-          <div class="ip-assign-row">
-            <el-select
-              v-model="form.vip_segment_id"
-              clearable
-              filterable
-              placeholder="选择地址段"
-              style="width: 48%"
-            >
-              <el-option
-                v-for="s in deviceIpSegments"
-                :key="s.id"
-                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
-                :value="s.id"
-              />
-            </el-select>
-            <el-select
-              v-model="form.vip_ip_id"
-              clearable
-              filterable
-              :loading="ipOptionsLoading.vip"
-              :disabled="!form.vip_segment_id"
-              placeholder="选择虚拟IP（可共用）"
-              style="width: 48%"
-            >
-              <el-option
-                v-for="ip in vipIpOptions"
-                :key="ip.id"
-                :label="ip.system_ip"
-                :value="ip.id"
-              />
-            </el-select>
-          </div>
-          <p class="bind-device-hint">虚拟IP可被多台设备重复选择；需先分配业务或带外地址</p>
-        </el-form-item>
-        <el-form-item label="BMC 档案">
-          <el-select v-model="form.bmc_profile_id" clearable style="width: 100%" filterable>
-            <el-option
-              v-for="p in bmcProfiles"
-              :key="p.id"
-              :label="p.summary ? `${p.name} · ${p.summary}` : p.name"
-              :value="p.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="系统用户档案">
-          <el-select v-model="form.system_profile_id" clearable style="width: 100%" filterable>
-            <el-option
-              v-for="p in systemProfiles"
-              :key="p.id"
-              :label="p.summary ? `${p.name} · ${p.summary}` : p.name"
-              :value="p.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" :rows="2" />
-        </el-form-item>
+            </td>
+          </tr>
+          <tr>
+            <th>业务IP地址</th>
+            <td colspan="5">
+              <div class="sheet-ip-row">
+                <el-select
+                  v-model="form.system_segment_id"
+                  clearable
+                  filterable
+                  placeholder="选择地址段"
+                  style="width: 220px"
+                >
+                  <el-option
+                    v-for="s in deviceIpSegments"
+                    :key="s.id"
+                    :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                    :value="s.id"
+                  />
+                </el-select>
+                <el-select
+                  v-model="form.system_ip_id"
+                  clearable
+                  filterable
+                  :loading="ipOptionsLoading.system"
+                  :disabled="!form.system_segment_id"
+                  placeholder="选择可用IP"
+                  style="width: 200px"
+                >
+                  <el-option
+                    v-for="ip in systemIpOptions"
+                    :key="ip.id"
+                    :label="ip.system_ip"
+                    :value="ip.id"
+                  />
+                </el-select>
+                <el-select
+                  v-model="form.system_profile_id"
+                  clearable
+                  filterable
+                  placeholder="系统用户档案关联"
+                  style="flex: 1"
+                >
+                  <el-option
+                    v-for="p in systemProfiles"
+                    :key="p.id"
+                    :label="p.summary ? `${p.name} · ${p.summary}` : p.name"
+                    :value="p.id"
+                  />
+                </el-select>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <th>带外IP地址</th>
+            <td colspan="5">
+              <div class="sheet-ip-row">
+                <el-select
+                  v-model="form.bmc_segment_id"
+                  clearable
+                  filterable
+                  placeholder="选择地址段"
+                  style="width: 220px"
+                >
+                  <el-option
+                    v-for="s in deviceIpSegments"
+                    :key="s.id"
+                    :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                    :value="s.id"
+                  />
+                </el-select>
+                <el-select
+                  v-model="form.bmc_ip_id"
+                  clearable
+                  filterable
+                  :loading="ipOptionsLoading.bmc"
+                  :disabled="!form.bmc_segment_id"
+                  placeholder="选择可用IP"
+                  style="width: 200px"
+                >
+                  <el-option
+                    v-for="ip in bmcIpOptions"
+                    :key="ip.id"
+                    :label="ip.system_ip"
+                    :value="ip.id"
+                  />
+                </el-select>
+                <el-select
+                  v-model="form.bmc_profile_id"
+                  clearable
+                  filterable
+                  placeholder="BMC档案关联"
+                  style="flex: 1"
+                >
+                  <el-option
+                    v-for="p in bmcProfiles"
+                    :key="p.id"
+                    :label="p.summary ? `${p.name} · ${p.summary}` : p.name"
+                    :value="p.id"
+                  />
+                </el-select>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <th>虚拟IP</th>
+            <td colspan="3">
+              <div class="sheet-ip-row">
+                <el-select
+                  v-model="form.vip_segment_id"
+                  clearable
+                  filterable
+                  placeholder="选择地址段"
+                  style="width: 220px"
+                >
+                  <el-option
+                    v-for="s in deviceIpSegments"
+                    :key="s.id"
+                    :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                    :value="s.id"
+                  />
+                </el-select>
+                <el-select
+                  v-model="form.vip_ip_id"
+                  clearable
+                  filterable
+                  :loading="ipOptionsLoading.vip"
+                  :disabled="!form.vip_segment_id"
+                  placeholder="虚拟IP（可共用）"
+                  style="width: 200px"
+                >
+                  <el-option
+                    v-for="ip in vipIpOptions"
+                    :key="ip.id"
+                    :label="ip.system_ip"
+                    :value="ip.id"
+                  />
+                </el-select>
+              </div>
+            </td>
+            <th>设备参数</th>
+            <td>
+              <el-select
+                v-model="form.param_profile_id"
+                clearable
+                filterable
+                placeholder="可选"
+              >
+                <el-option
+                  v-for="(p, idx) in paramProfiles"
+                  :key="p.id"
+                  :label="`${idx + 1}.${p.name}：${p.code}`"
+                  :value="p.id"
+                />
+              </el-select>
+            </td>
+          </tr>
+        </table>
+
+        <div class="sheet-desc-row">
+          <span class="sheet-desc-label">描述</span>
+          <el-input v-model="form.description" type="textarea" :rows="2" placeholder="备注（可选）" />
+        </div>
+
         <template v-if="editingId && editingPanel?.port_layout">
-          <el-divider content-position="left">设备定义面板</el-divider>
-          <DevicePanelPreview
-            :port-layout="editingPanel.port_layout"
-            :network-kind="editingPanel.network_kind"
-            :device-name="editingPanel.device_name"
-          />
+          <div class="sheet-panel-block">
+            <div class="sheet-panel-title">设备定义面板</div>
+            <DevicePanelPreview
+              :port-layout="editingPanel.port_layout"
+              :network-kind="editingPanel.network_kind"
+              :device-name="editingPanel.device_name"
+            />
+          </div>
         </template>
-      </el-form>
+      </div>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" @click="handleSubmit">保存</el-button>
       </template>
     </el-drawer>
 
-    <el-dialog v-model="mountVisible" title="手动上架 / 改位" width="880px" destroy-on-close>
+    <el-dialog
+      v-model="paramViewVisible"
+      title="查看设备参数"
+      width="780px"
+      destroy-on-close
+      top="6vh"
+      class="param-view-dialog"
+    >
+      <div v-loading="paramViewLoading" class="param-view-body">
+        <div v-if="paramViewDevice" class="param-view-device">
+          设备：
+          <strong>{{ paramViewDevice.name || paramViewDevice.hostname || '—' }}</strong>
+          <span v-if="paramViewDevice.hostname" class="muted">
+            （编号 {{ paramViewDevice.hostname }}）
+          </span>
+        </div>
+        <template v-if="paramViewProfile">
+          <table class="param-view-sheet">
+            <tr>
+              <th>设备名称</th>
+              <td>{{ paramViewProfile.name || '—' }}</td>
+              <th>设备参数ID</th>
+              <td>{{ paramViewProfile.code || '—' }}</td>
+            </tr>
+            <tr>
+              <th>设备型号</th>
+              <td>
+                {{
+                  paramViewProfile.source_device_model
+                    || paramViewProfile.payload?.source_device_model
+                    || '—'
+                }}
+              </td>
+              <th>厂商</th>
+              <td>
+                {{
+                  paramViewProfile.source_manufacturer
+                    || paramViewProfile.payload?.source_manufacturer
+                    || '—'
+                }}
+              </td>
+            </tr>
+            <tr>
+              <th>设备类型</th>
+              <td>{{ paramViewTypeName(paramViewProfile) }}</td>
+              <th>状态</th>
+              <td>
+                <el-tag
+                  :type="paramViewProfile.is_complete ? 'success' : 'danger'"
+                  size="small"
+                  effect="plain"
+                >
+                  {{ paramViewProfile.is_complete ? '已完善' : '待完善' }}
+                </el-tag>
+              </td>
+            </tr>
+            <tr>
+              <th>配置摘要</th>
+              <td colspan="3">{{ paramViewProfile.summary || '—' }}</td>
+            </tr>
+            <tr v-if="paramViewProfile.missing_fields?.length">
+              <th>缺失字段</th>
+              <td colspan="3" class="warn-text">{{ paramViewProfile.missing_fields.join('、') }}</td>
+            </tr>
+            <tr>
+              <th>系统盘</th>
+              <td colspan="3">
+                <template v-if="paramViewDisks('system').length">
+                  <div v-for="(d, i) in paramViewDisks('system')" :key="`sys-${i}`">
+                    {{ formatDiskSpec(d) }}
+                  </div>
+                </template>
+                <template v-else>—</template>
+              </td>
+            </tr>
+            <tr>
+              <th>数据盘</th>
+              <td colspan="3">
+                <template v-if="paramViewDisks('data').length">
+                  <div v-for="(d, i) in paramViewDisks('data')" :key="`data-${i}`">
+                    规格 {{ i + 1 }}：{{ formatDiskSpec(d) }}
+                  </div>
+                </template>
+                <template v-else>—</template>
+              </td>
+            </tr>
+            <tr>
+              <th>详细参数</th>
+              <td colspan="3" class="pre-wrap">
+                {{
+                  paramViewProfile.detail_params
+                    || paramViewProfile.payload?.detail_params
+                    || '—'
+                }}
+              </td>
+            </tr>
+            <tr>
+              <th>其他参数</th>
+              <td colspan="3" class="pre-wrap">{{ paramViewOtherText(paramViewProfile) || '—' }}</td>
+            </tr>
+            <tr v-if="paramViewProfile.description">
+              <th>描述</th>
+              <td colspan="3" class="pre-wrap">{{ paramViewProfile.description }}</td>
+            </tr>
+          </table>
+        </template>
+        <el-empty v-else-if="!paramViewLoading" description="暂无合同设备参数" />
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="paramViewVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="mountVisible" :title="mountDialogTitle" width="880px" destroy-on-close>
       <div class="mount-layout">
         <el-form label-width="80px" class="mount-form">
           <el-form-item label="机房" required>
@@ -3449,6 +4284,162 @@ void [
       <template #footer>
         <el-button @click="mountVisible = false">取消</el-button>
         <el-button type="primary" @click="handleMount">确认</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="statusChangeVisible"
+      title="修改设备状态"
+      width="480px"
+      destroy-on-close
+    >
+      <p class="status-change-current">
+        当前设备：
+        <strong>{{ statusChangeDevice?.name || statusChangeDevice?.hostname || '—' }}</strong>
+        · 状态 {{ statusLabel[statusChangeDevice?.status || ''] || statusChangeDevice?.status || '—' }}
+      </p>
+      <el-radio-group v-model="statusChangeTarget" class="status-change-options">
+        <el-radio
+          v-for="opt in DEVICE_STATUS_OPTIONS"
+          :key="opt.value"
+          :value="opt.value"
+          class="status-change-option"
+        >
+          <span class="status-change-label">{{ opt.label }}</span>
+          <span class="status-change-hint">{{ opt.hint }}</span>
+        </el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button @click="statusChangeVisible = false">取消</el-button>
+        <el-button type="primary" :loading="statusChangeSaving" @click="handleStatusChangeConfirm">
+          确定
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="assignIpVisible"
+      title="分配IP地址"
+      width="640px"
+      destroy-on-close
+    >
+      <p class="status-change-current">
+        设备：
+        <strong>{{ assignIpDevice?.name || assignIpDevice?.hostname || '—' }}</strong>
+        · 从已创建地址段中手动选择业务 / BMC / VIP
+      </p>
+      <el-form label-width="96px">
+        <el-form-item label="业务地址">
+          <div class="ip-assign-row">
+            <el-select
+              v-model="assignIpForm.system_segment_id"
+              clearable
+              filterable
+              placeholder="选择地址段"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="s in deviceIpSegments"
+                :key="s.id"
+                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                :value="s.id"
+              />
+            </el-select>
+            <el-select
+              v-model="assignIpForm.system_ip_id"
+              clearable
+              filterable
+              :loading="assignIpLoading.system"
+              :disabled="!assignIpForm.system_segment_id"
+              placeholder="选择可用业务IP"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="ip in assignSystemIpOptions"
+                :key="ip.id"
+                :label="ip.system_ip"
+                :value="ip.id"
+              />
+            </el-select>
+          </div>
+          <p class="bind-device-hint">仅显示空闲地址；清空表示取消分配</p>
+        </el-form-item>
+        <el-form-item label="带外地址">
+          <div class="ip-assign-row">
+            <el-select
+              v-model="assignIpForm.bmc_segment_id"
+              clearable
+              filterable
+              placeholder="选择地址段"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="s in deviceIpSegments"
+                :key="s.id"
+                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                :value="s.id"
+              />
+            </el-select>
+            <el-select
+              v-model="assignIpForm.bmc_ip_id"
+              clearable
+              filterable
+              :loading="assignIpLoading.bmc"
+              :disabled="!assignIpForm.bmc_segment_id"
+              placeholder="选择可用BMC IP"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="ip in assignBmcIpOptions"
+                :key="ip.id"
+                :label="ip.system_ip"
+                :value="ip.id"
+              />
+            </el-select>
+          </div>
+          <p class="bind-device-hint">仅显示空闲地址，不可与其他设备重复使用</p>
+        </el-form-item>
+        <el-form-item label="虚拟IP">
+          <div class="ip-assign-row">
+            <el-select
+              v-model="assignIpForm.vip_segment_id"
+              clearable
+              filterable
+              placeholder="选择地址段"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="s in deviceIpSegments"
+                :key="s.id"
+                :label="`${s.application ? s.application + ' · ' : ''}${s.network}/${s.prefix_len}`"
+                :value="s.id"
+              />
+            </el-select>
+            <el-select
+              v-model="assignIpForm.vip_ip_id"
+              clearable
+              filterable
+              :loading="assignIpLoading.vip"
+              :disabled="!assignIpForm.vip_segment_id"
+              placeholder="选择虚拟IP（可共用）"
+              style="width: 48%"
+            >
+              <el-option
+                v-for="ip in assignVipIpOptions"
+                :key="ip.id"
+                :label="ip.system_ip"
+                :value="ip.id"
+              />
+            </el-select>
+          </div>
+          <p class="bind-device-hint">虚拟IP可被多台设备共用；需先分配业务或带外地址</p>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="assignIpVisible = false">取消</el-button>
+        <el-button type="primary" :loading="assignIpSaving" @click="handleAssignIpSubmit">
+          确认分配
+        </el-button>
       </template>
     </el-dialog>
 
@@ -4233,6 +5224,41 @@ void [
   font-size: 12px;
   line-height: 1.4;
 }
+
+.status-change-current {
+  margin: 0 0 14px;
+  color: #607080;
+  font-size: 13px;
+}
+
+.status-change-options {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+}
+
+.status-change-option {
+  display: flex;
+  align-items: center;
+  height: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #e4ebf2;
+  border-radius: 8px;
+}
+
+.status-change-label {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.status-change-hint {
+  color: #8a9bab;
+  font-size: 12px;
+}
+
 .ip-assign-row {
   display: flex;
   align-items: center;
@@ -4492,5 +5518,211 @@ void [
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* —— 新建设备 / 编辑设备：表格表单 —— */
+.device-form-sheet-wrap {
+  padding: 4px 2px 12px;
+  background: linear-gradient(180deg, #d6e6f5 0%, #e8f0f8 40%, #eef3f8 100%);
+  border-radius: 4px;
+}
+.device-form-sheet {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: #c5d8ec;
+}
+.device-form-sheet th,
+.device-form-sheet td {
+  border: 1px solid #5a6b7c;
+  padding: 6px 8px;
+  vertical-align: middle;
+  font-size: 13px;
+}
+.device-form-sheet th {
+  background: #a8c0d8;
+  color: #1f2933;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  width: 96px;
+}
+.device-form-sheet td {
+  background: #e7eef6;
+}
+.device-form-sheet .sheet-section {
+  width: 52px;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  letter-spacing: 0.2em;
+  background: #7fa3c4;
+  color: #0f1720;
+  font-size: 14px;
+  font-weight: 700;
+}
+.device-form-sheet :deep(.el-select),
+.device-form-sheet :deep(.el-input),
+.device-form-sheet :deep(.el-input-number),
+.device-form-sheet :deep(.el-date-editor) {
+  width: 100%;
+}
+.device-form-sheet :deep(.el-input__wrapper),
+.device-form-sheet :deep(.el-select__wrapper),
+.device-form-sheet :deep(.el-textarea__inner) {
+  border-radius: 2px;
+  background: #f7fafc;
+  box-shadow: 0 0 0 1px #7a8a9a inset;
+}
+.sheet-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.sheet-inline.unit-row :deep(.el-input-number) {
+  flex: 1;
+}
+.unit-suffix {
+  flex-shrink: 0;
+  color: #334155;
+  font-weight: 600;
+}
+.sheet-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.4;
+}
+.sheet-ip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.mount-type-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mount-type-radios :deep(.el-radio) {
+  margin-right: 0;
+  background: #f8fafc;
+}
+.resource-class-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.55) inset;
+}
+.resource-class-badge.sm {
+  padding: 2px 8px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.param-view-body {
+  min-height: 120px;
+}
+.param-view-device {
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #334155;
+}
+.param-view-device .muted {
+  color: #64748b;
+  margin-left: 4px;
+}
+.param-view-sheet {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13px;
+}
+.param-view-sheet th,
+.param-view-sheet td {
+  border: 1px solid #5a6b7c;
+  padding: 8px 10px;
+  vertical-align: top;
+  word-break: break-word;
+}
+.param-view-sheet th {
+  width: 96px;
+  background: #a8c0d8;
+  color: #1f2933;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+}
+.param-view-sheet td {
+  background: #e7eef6;
+}
+.param-view-sheet .pre-wrap {
+  white-space: pre-wrap;
+}
+.param-view-sheet .warn-text {
+  color: #b91c1c;
+}
+.resource-class-badge[data-class='compute'] {
+  color: #0b3d2e;
+  background: linear-gradient(135deg, #6ee7b7, #34d399);
+  border-color: #059669;
+}
+.resource-class-badge[data-class='network'] {
+  color: #0c2d6b;
+  background: linear-gradient(135deg, #93c5fd, #3b82f6);
+  border-color: #1d4ed8;
+}
+.resource-class-badge[data-class='storage'] {
+  color: #4a1d04;
+  background: linear-gradient(135deg, #fdba74, #f97316);
+  border-color: #c2410c;
+}
+.resource-class-badge[data-class='ai'] {
+  color: #083344;
+  background: linear-gradient(135deg, #67e8f9, #06b6d4);
+  border-color: #0e7490;
+}
+.resource-class-badge[data-class='security'] {
+  color: #7f1d1d;
+  background: linear-gradient(135deg, #fca5a5, #ef4444);
+  border-color: #b91c1c;
+}
+.resource-class-badge[data-class='other'] {
+  color: #1e293b;
+  background: linear-gradient(135deg, #cbd5e1, #94a3b8);
+  border-color: #475569;
+}
+.sheet-desc-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #5a6b7c;
+  background: #e7eef6;
+}
+.sheet-desc-label {
+  flex-shrink: 0;
+  width: 52px;
+  padding-top: 6px;
+  font-weight: 600;
+  color: #1f2933;
+  text-align: center;
+}
+.sheet-panel-block {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #5a6b7c;
+  background: #e7eef6;
+}
+.sheet-panel-title {
+  margin-bottom: 8px;
+  font-weight: 700;
+  color: #1f2933;
 }
 </style>

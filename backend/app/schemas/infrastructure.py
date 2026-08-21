@@ -436,3 +436,124 @@ class RoomResponse(BaseModel):
     description: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class WarehouseCreate(BaseModel):
+    room_id: str
+    code: str | None = Field(default=None, max_length=50, description="编号；空则自动生成 WHn")
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+
+
+class WarehouseUpdate(BaseModel):
+    room_id: str | None = None
+    code: str | None = Field(default=None, min_length=1, max_length=50)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+
+
+class WarehouseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    code: str
+    name: str
+    room_id: str
+    room_name: str | None = None
+    room_no: str | None = None
+    building_no: str | None = None
+    datacenter_id: str | None = None
+    datacenter_name: str | None = None
+    description: str | None = None
+    asset_ledger_ready: bool = True
+    asset_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+WAREHOUSE_ASSET_CATEGORIES = ("complete", "accessory", "material", "tool", "other")
+WAREHOUSE_ASSET_STATUSES = ("new", "replace", "fault", "scrap")
+WAREHOUSE_OUTBOUND_MODES = ("undetermined", "fixed")
+WAREHOUSE_ASSET_UNITS = ("piece", "unit", "box", "set", "other")
+
+
+class WarehouseAssetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    quantity: int = Field(default=1, ge=1, le=999999)
+    unit: str = Field(default="piece", max_length=20)
+    project: str | None = Field(default=None, max_length=200)
+    application: str | None = Field(default=None, max_length=200)
+    category: str = Field(default="other", max_length=30)
+    status: str = Field(default="new", max_length=30)
+    inbound_at: datetime | None = None
+    outbound_mode: str = Field(default="undetermined", max_length=20)
+    outbound_at: datetime | None = None
+    owner_name: str | None = Field(default=None, max_length=100)
+    owner_contact: str | None = Field(default=None, max_length=100)
+    remark: str | None = None
+
+    @model_validator(mode="after")
+    def validate_enums(self) -> "WarehouseAssetCreate":
+        if self.unit not in WAREHOUSE_ASSET_UNITS:
+            raise ValueError("无效的数量单位")
+        if self.category not in WAREHOUSE_ASSET_CATEGORIES:
+            raise ValueError("无效的资产分类")
+        if self.status not in WAREHOUSE_ASSET_STATUSES:
+            raise ValueError("无效的资产状态")
+        if self.outbound_mode not in WAREHOUSE_OUTBOUND_MODES:
+            raise ValueError("无效的出库时间模式")
+        if self.outbound_mode == "undetermined":
+            self.outbound_at = None
+        return self
+
+
+class WarehouseAssetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    quantity: int | None = Field(default=None, ge=1, le=999999)
+    unit: str | None = Field(default=None, max_length=20)
+    project: str | None = Field(default=None, max_length=200)
+    application: str | None = Field(default=None, max_length=200)
+    category: str | None = Field(default=None, max_length=30)
+    status: str | None = Field(default=None, max_length=30)
+    inbound_at: datetime | None = None
+    outbound_mode: str | None = Field(default=None, max_length=20)
+    outbound_at: datetime | None = None
+    owner_name: str | None = Field(default=None, max_length=100)
+    owner_contact: str | None = Field(default=None, max_length=100)
+    remark: str | None = None
+
+    @model_validator(mode="after")
+    def validate_enums(self) -> "WarehouseAssetUpdate":
+        if self.unit is not None and self.unit not in WAREHOUSE_ASSET_UNITS:
+            raise ValueError("无效的数量单位")
+        if self.category is not None and self.category not in WAREHOUSE_ASSET_CATEGORIES:
+            raise ValueError("无效的资产分类")
+        if self.status is not None and self.status not in WAREHOUSE_ASSET_STATUSES:
+            raise ValueError("无效的资产状态")
+        if self.outbound_mode is not None and self.outbound_mode not in WAREHOUSE_OUTBOUND_MODES:
+            raise ValueError("无效的出库时间模式")
+        if self.outbound_mode == "undetermined":
+            self.outbound_at = None
+        return self
+
+
+class WarehouseAssetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    warehouse_id: str
+    name: str
+    quantity: int = 1
+    unit: str = "piece"
+    project: str | None = None
+    application: str | None = None
+    category: str
+    status: str
+    inbound_at: datetime | None = None
+    outbound_mode: str = "undetermined"
+    outbound_at: datetime | None = None
+    owner_name: str | None = None
+    owner_contact: str | None = None
+    remark: str | None = None
+    created_at: datetime
+    updated_at: datetime

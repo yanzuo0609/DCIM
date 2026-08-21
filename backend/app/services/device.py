@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domains.layout.engine import occupied_range
 from app.models.device import (
+    DEVICE_ON_RACK_STATUSES,
+    DEVICE_STATUS_VALUES,
     Device,
     DeviceBmcProfile,
     DeviceModel,
@@ -215,6 +217,10 @@ def _to_device_response(
         power=device.power,
         status=device.status,
         description=device.description,
+        project_scope=getattr(device, "project_scope", None),
+        project_app=getattr(device, "project_app", None),
+        warranty_years=getattr(device, "warranty_years", None),
+        mounted_at=getattr(device, "mounted_at", None),
         port_layout=port_layout,
         network_kind=network_kind,
         panel_apply_device_name=panel_name,
@@ -462,6 +468,10 @@ class DeviceService:
             power=payload.power or model.power,
             status=DeviceStatus.STOCK.value,
             description=payload.description,
+            project_scope=(payload.project_scope or "").strip() or None,
+            project_app=(payload.project_app or "").strip() or None,
+            warranty_years=payload.warranty_years,
+            mounted_at=payload.mounted_at,
             created_by=user_id,
             updated_by=user_id,
         )
@@ -543,9 +553,24 @@ class DeviceService:
         if payload.power is not None:
             device.power = payload.power
         if payload.status is not None:
-            device.status = payload.status
+            status = str(payload.status).strip()
+            if status not in DEVICE_STATUS_VALUES:
+                raise ValidationError("无效的设备状态", code=10010)
+            if status in DEVICE_ON_RACK_STATUSES and not device.rack_id:
+                raise ConflictError("请先上架设备后再设置该状态", code=10011)
+            if status == DeviceStatus.STOCK.value and device.rack_id:
+                raise ConflictError("请先下架设备后再设为库存", code=10012)
+            device.status = status
         if payload.description is not None:
             device.description = payload.description
+        if payload.project_scope is not None:
+            device.project_scope = (payload.project_scope or "").strip() or None
+        if payload.project_app is not None:
+            device.project_app = (payload.project_app or "").strip() or None
+        if payload.warranty_years is not None:
+            device.warranty_years = payload.warranty_years
+        if "mounted_at" in payload.model_fields_set:
+            device.mounted_at = payload.mounted_at
 
         device.updated_by = user_id
         device.version += 1
@@ -1147,65 +1172,122 @@ class DeviceService:
     async def sync_param_profiles_from_contracts(
         self, user_id: uuid.UUID | None = None
     ) -> ParamProfileSyncResult:
-        """按采购汇总「设备名称」新建空待填参数；已存在同名则跳过。"""
+        """采购汇总设备名称 ↔ 设备参数名称关联同步。
+
+        - 汇总有、参数无 → 新建空待完善
+        - 同名已存在 → 校正名称 / source 字段，回填空的型号与厂商
+        - 参数有、汇总无 → 保留不删
+        """
         from app.services.device_contract import DeviceContractService
 
         contract_service = DeviceContractService(self.session)
         summary = await contract_service.summary()
 
-        unique_names: dict[str, str] = {}
+        unique_names: dict[str, dict[str, str]] = {}
         for row in summary:
             device_name = (row.device_name or "").strip()
             if not device_name:
                 continue
-            # 名称字段最长 100
             device_name = device_name[:100]
             key = self._param_source_key(device_name)
-            unique_names.setdefault(key, device_name)
+            model = (row.device_model_name or "").strip()
+            manufacturer = (row.manufacturer_name or "").strip()
+            prev = unique_names.get(key)
+            if not prev:
+                unique_names[key] = {
+                    "name": device_name,
+                    "model": model,
+                    "manufacturer": manufacturer,
+                }
+                continue
+            if not prev["model"] and model:
+                prev["model"] = model
+            if not prev["manufacturer"] and manufacturer:
+                prev["manufacturer"] = manufacturer
 
         existing = await self.param_repo.list_all()
         index = self._index_param_profiles(existing)
         created = 0
+        updated = 0
         skipped = 0
         messages: list[str] = []
+        touched: set[uuid.UUID] = set()
 
-        for key, device_name in unique_names.items():
-            if key in index:
+        for key, meta in unique_names.items():
+            device_name = meta["name"]
+            entity = index.get(key)
+            if not entity:
+                code = self._slug_code(device_name)
+                suffix = 1
+                while await self.param_repo.get_by_code(code):
+                    code = f"{self._slug_code(device_name)[:40]}-{suffix}"[:50]
+                    suffix += 1
+
+                payload = ParamProfilePayload(
+                    source_device_name=device_name,
+                    source_device_model=meta["model"] or None,
+                    source_manufacturer=meta["manufacturer"] or None,
+                    disks=[
+                        ParamDiskSpec(role="system"),
+                        ParamDiskSpec(role="data"),
+                        ParamDiskSpec(role="data"),
+                    ],
+                )
+                entity = DeviceParamProfile(
+                    code=code,
+                    name=device_name,
+                    payload=payload.model_dump(mode="json"),
+                    description="待完善：由采购汇总设备名称同步生成",
+                    created_by=user_id,
+                    updated_by=user_id,
+                )
+                await self.param_repo.create(entity)
+                created += 1
+                messages.append(f"已新建待完善项：{device_name}")
+                index[key] = entity
+                continue
+
+            if entity.id in touched:
+                skipped += 1
+                continue
+            touched.add(entity.id)
+
+            typed: ParamProfilePayload | None = None
+            if entity.payload and isinstance(entity.payload, dict):
+                try:
+                    typed = ParamProfilePayload.model_validate(entity.payload)
+                except Exception:  # noqa: BLE001
+                    typed = None
+            if typed is None:
+                typed = ParamProfilePayload()
+
+            changed = False
+            if (entity.name or "").strip() != device_name:
+                entity.name = device_name
+                changed = True
+            if (typed.source_device_name or "").strip() != device_name:
+                typed.source_device_name = device_name
+                changed = True
+            if not (typed.source_device_model or "").strip() and meta["model"]:
+                typed.source_device_model = meta["model"]
+                changed = True
+            if not (typed.source_manufacturer or "").strip() and meta["manufacturer"]:
+                typed.source_manufacturer = meta["manufacturer"]
+                changed = True
+
+            if not changed:
                 skipped += 1
                 continue
 
-            code = self._slug_code(device_name)
-            suffix = 1
-            while await self.param_repo.get_by_code(code):
-                code = f"{self._slug_code(device_name)[:40]}-{suffix}"[:50]
-                suffix += 1
-
-            # 空待填：仅溯源名称 + 磁盘占位，无 CPU/内存/容量
-            payload = ParamProfilePayload(
-                source_device_name=device_name,
-                disks=[
-                    ParamDiskSpec(role="system"),
-                    ParamDiskSpec(role="data"),
-                    ParamDiskSpec(role="data"),
-                ],
-            )
-            entity = DeviceParamProfile(
-                code=code,
-                name=device_name,
-                payload=payload.model_dump(mode="json"),
-                description="待完善：由采购汇总设备名称同步生成",
-                created_by=user_id,
-                updated_by=user_id,
-            )
-            await self.param_repo.create(entity)
-            created += 1
-            messages.append(f"已新建待完善项：{device_name}")
-            index[key] = entity
+            entity.payload = typed.model_dump(mode="json")
+            entity.updated_by = user_id
+            updated += 1
+            messages.append(f"已关联同步：{device_name}")
 
         await self.session.flush()
         return ParamProfileSyncResult(
             created=created,
-            updated=0,
+            updated=updated,
             skipped=skipped,
             total_summary=len(unique_names),
             messages=messages[:50],

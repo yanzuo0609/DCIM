@@ -38,6 +38,10 @@ export interface Device {
   power: number | null
   status: string
   description: string | null
+  project_scope?: string | null
+  project_app?: string | null
+  warranty_years?: number | null
+  mounted_at?: string | null
   /** 来自设备定义/型号的面板布局（按设备名称匹配） */
   port_layout?: Record<string, unknown> | null
   network_kind?: string | null
@@ -230,6 +234,10 @@ export interface DevicePayload {
   power?: number | null
   status?: string | null
   description?: string | null
+  project_scope?: string | null
+  project_app?: string | null
+  warranty_years?: number | null
+  mounted_at?: string | null
   system_ip_id?: string | null
   bmc_ip_id?: string | null
   vip_ip_id?: string | null
@@ -494,8 +502,10 @@ export async function deleteDeviceType(id: string) {
   await api.delete(`/device-types/${id}`)
 }
 
-export async function listParamProfiles() {
-  const response = await api.get('/device-param-profiles', { params: { page_size: 100 } })
+export async function listParamProfiles(params: Record<string, unknown> = {}) {
+  const response = await api.get('/device-param-profiles', {
+    params: { page_size: 200, ...params },
+  })
   const data = response.data?.data
   const items = data?.items
   if (!Array.isArray(items)) {
@@ -522,61 +532,128 @@ function makeParamCode(deviceName: string): string {
 }
 
 /**
- * 按采购汇总「设备名称」同步空待填参数：
- * - 不存在同名 → 新建空表（待完善）
- * - 已存在同名 → 跳过
- * 直接走前端编排（采购汇总 + 创建），避免专用接口异常导致整页失败。
+ * 按采购汇总「设备名称」与设备参数双向关联同步：
+ * - 汇总有、参数无 → 新建空待完善参数（名称对齐）
+ * - 同名已存在 → 校正名称 / source_device_name，并回填空的型号、厂商
+ * - 参数有、汇总无 → 保留（不删除）
  */
 export async function syncParamProfilesFromContracts(): Promise<ParamProfileSyncResult> {
   const { getContractSummary } = await import('@/api/contract')
   const [summary, profiles] = await Promise.all([getContractSummary(), listParamProfiles()])
-  const existing = new Set(
-    profiles
-      .map((p) => (p.source_device_name || p.name || '').trim().toLowerCase())
-      .filter(Boolean),
-  )
-  const uniqueNames = new Map<string, string>()
+
+  type SummaryMeta = {
+    name: string
+    model: string
+    manufacturer: string
+  }
+  const uniqueNames = new Map<string, SummaryMeta>()
   for (const row of summary || []) {
     const name = (row.device_name || '').trim().slice(0, 100)
     if (!name) continue
     const key = name.toLowerCase()
-    if (!uniqueNames.has(key)) uniqueNames.set(key, name)
+    const model = (row.device_model_name || '').trim()
+    const manufacturer = (row.manufacturer_name || '').trim()
+    const prev = uniqueNames.get(key)
+    if (!prev) {
+      uniqueNames.set(key, { name, model, manufacturer })
+      continue
+    }
+    if (!prev.model && model) prev.model = model
+    if (!prev.manufacturer && manufacturer) prev.manufacturer = manufacturer
+  }
+
+  const profileByKey = new Map<string, ParamProfile>()
+  for (const p of profiles) {
+    const keys = [
+      (p.source_device_name || '').trim().toLowerCase(),
+      (p.payload?.source_device_name || '').trim().toLowerCase(),
+      (p.name || '').trim().toLowerCase(),
+    ].filter(Boolean)
+    for (const key of keys) {
+      if (!profileByKey.has(key)) profileByKey.set(key, p)
+    }
   }
 
   let created = 0
+  let updated = 0
   let skipped = 0
   const messages: string[] = []
   const usedCodes = new Set(profiles.map((p) => p.code))
+  const touched = new Set<string>()
 
-  for (const [key, deviceName] of uniqueNames) {
-    if (existing.has(key)) {
+  for (const [key, meta] of uniqueNames) {
+    const existed = profileByKey.get(key)
+    if (!existed) {
+      let code = makeParamCode(meta.name)
+      let n = 1
+      while (usedCodes.has(code)) {
+        code = `${makeParamCode(meta.name).slice(0, 40)}-${n}`.slice(0, 50)
+        n += 1
+      }
+      const createdRow = await createParamProfile({
+        code,
+        name: meta.name,
+        description: '待完善：由采购汇总设备名称同步生成',
+        payload: {
+          source_device_name: meta.name,
+          source_device_model: meta.model || null,
+          source_manufacturer: meta.manufacturer || null,
+          disks: [{ role: 'system' }, { role: 'data' }, { role: 'data' }],
+        },
+      })
+      usedCodes.add(code)
+      profileByKey.set(key, createdRow)
+      created += 1
+      messages.push(`已新建待完善项：${meta.name}`)
+      continue
+    }
+
+    if (touched.has(existed.id)) {
       skipped += 1
       continue
     }
-    let code = makeParamCode(deviceName)
-    let n = 1
-    while (usedCodes.has(code)) {
-      code = `${makeParamCode(deviceName).slice(0, 40)}-${n}`.slice(0, 50)
-      n += 1
+    touched.add(existed.id)
+
+    const payload: ParamProfilePayload = { ...(existed.payload || {}) }
+    let changed = false
+    if ((existed.name || '').trim() !== meta.name) changed = true
+    if ((payload.source_device_name || '').trim() !== meta.name) {
+      payload.source_device_name = meta.name
+      changed = true
     }
-    await createParamProfile({
-      code,
-      name: deviceName,
-      description: '待完善：由采购汇总设备名称同步生成',
-      payload: {
-        source_device_name: deviceName,
-        disks: [{ role: 'system' }, { role: 'data' }, { role: 'data' }],
-      },
+    if (!(payload.source_device_model || '').trim() && meta.model) {
+      payload.source_device_model = meta.model
+      changed = true
+    }
+    if (!(payload.source_manufacturer || '').trim() && meta.manufacturer) {
+      payload.source_manufacturer = meta.manufacturer
+      changed = true
+    }
+    if (
+      !(existed.source_device_model || '').trim()
+      && meta.model
+      && !(payload.source_device_model || '').trim()
+    ) {
+      payload.source_device_model = meta.model
+      changed = true
+    }
+
+    if (!changed) {
+      skipped += 1
+      continue
+    }
+
+    await updateParamProfile(existed.id, {
+      name: meta.name,
+      payload,
     })
-    usedCodes.add(code)
-    existing.add(key)
-    created += 1
-    messages.push(`已新建待完善项：${deviceName}`)
+    updated += 1
+    messages.push(`已关联同步：${meta.name}`)
   }
 
   return {
     created,
-    updated: 0,
+    updated,
     skipped,
     total_summary: uniqueNames.size,
     messages: messages.slice(0, 50),

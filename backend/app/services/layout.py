@@ -59,8 +59,22 @@ class LayoutService:
         self.ip_service = IpAddressService(session)
 
     async def _build_occupied_map(self, rack_id: uuid.UUID) -> dict[int, uuid.UUID | None]:
+        """仅统计真实占用：有 device_id 的 occupied 位。
+
+        残留 occupied=True 但无设备的幽灵位在机柜图上显示为空闲，
+        若计入占用会导致「U 位空着却上架失败」。
+        """
         positions = await self.position_repo.list_by_rack(rack_id)
-        return {pos.u_position: pos.device_id for pos in positions if pos.occupied}
+        occupied: dict[int, uuid.UUID | None] = {}
+        for pos in positions:
+            if not pos.occupied:
+                continue
+            if pos.device_id is None:
+                # 清理幽灵占用，避免空闲 U 被误拦
+                pos.occupied = False
+                continue
+            occupied[pos.u_position] = pos.device_id
+        return occupied
 
     async def validate(self, payload: ValidateLayoutRequest) -> ValidateLayoutResponse:
         rack_id = uuid.UUID(payload.rack_id)
@@ -359,76 +373,78 @@ class LayoutService:
         room_id = uuid.UUID(payload.room_id)
         start_u = payload.start_u
         gap_u = payload.gap_u
+        # 本批每柜最多上架台数（不含柜内历史已上架设备，避免 AA02 已有千兆时跳过空闲 U44）
         per_rack_limit = max(1, int(payload.per_rack_count or 1))
 
+        # 每柜独立游标，轮询上架：先各柜落起始 U，再向下补齐
+        rack_state: dict[uuid.UUID, dict] = {
+            rack.id: {
+                "rack": rack,
+                "cursor_u": start_u,
+                "mounted": 0,
+                "attempted_us": set(),
+                "exhausted": False,
+            }
+            for rack in racks
+        }
+
         device_idx = 0
-        for rack in racks:
-            if device_idx >= len(queue):
-                break
+        while device_idx < len(queue):
+            progressed = False
+            for rack_id, st in rack_state.items():
+                if device_idx >= len(queue):
+                    break
+                if st["exhausted"] or st["mounted"] >= per_rack_limit:
+                    continue
 
-            # 先看队首设备类型，决定本柜同类型配额
-            peek_id = queue[device_idx]
-            peek = await self.device_repo.get_by_id_with_model(peek_id)
-            if not peek:
-                device_idx += 1
-                result.skipped += 1
-                result.errors.append(f"{peek_id}: 设备不存在")
-                continue
-
-            existing_same_type = await self.device_repo.count_mounted_by_type(
-                rack.id, peek.device_type_id
-            )
-            # 同类型已达每柜上限 → 整柜跳过
-            if existing_same_type >= per_rack_limit:
-                continue
-
-            rack_type_quota = per_rack_limit - existing_same_type
-            mounted_in_rack = 0
-            cursor_u = start_u
-            attempted_us: set[int] = set()
-
-            while device_idx < len(queue) and mounted_in_rack < rack_type_quota:
+                rack = st["rack"]
                 device_id = queue[device_idx]
                 device = await self.device_repo.get_by_id_with_model(device_id)
                 if not device:
                     device_idx += 1
                     result.skipped += 1
                     result.errors.append(f"{device_id}: 设备不存在")
+                    progressed = True
                     continue
 
-                # 类型变化时按新类型重算本柜配额（通常一批同类型）
-                if device.device_type_id != peek.device_type_id:
-                    existing_same_type = await self.device_repo.count_mounted_by_type(
-                        rack.id, device.device_type_id
-                    )
-                    if existing_same_type >= per_rack_limit:
-                        break
-                    rack_type_quota = per_rack_limit - existing_same_type
-                    mounted_in_rack = 0
-                    attempted_us.clear()
-                    peek = device
-
-                if mounted_in_rack >= rack_type_quota:
-                    break
-
                 occupied_map = await self._build_occupied_map(rack.id)
-                # 目标 U 占用时：跳过占用块并按「设备间隔」留空，再向后找合法空闲位
+                height = max(1, int(device.height_u or 1))
+                cursor_u = st["cursor_u"]
+                attempted_us: set[int] = st["attempted_us"]
+
                 u_position = pick_mount_u(
                     total_u=rack.total_u,
-                    height_u=device.height_u,
+                    height_u=height,
                     occupied_map=occupied_map,
                     start_u=cursor_u,
-                    gap_u=gap_u,
-                    prefer_exact=False,
+                    gap_u=0,
+                    prefer_exact=True,
                 )
                 if u_position is None:
-                    # 本柜从 cursor 起已无空位，换下一柜
-                    break
-                if u_position in attempted_us:
-                    break
+                    u_position = pick_mount_u(
+                        total_u=rack.total_u,
+                        height_u=height,
+                        occupied_map=occupied_map,
+                        start_u=cursor_u,
+                        gap_u=gap_u,
+                        prefer_exact=False,
+                        direction="down",
+                    )
+                if u_position is None:
+                    u_position = pick_mount_u(
+                        total_u=rack.total_u,
+                        height_u=height,
+                        occupied_map=occupied_map,
+                        start_u=cursor_u,
+                        gap_u=gap_u,
+                        prefer_exact=False,
+                        direction="up",
+                    )
+                if u_position is None or u_position in attempted_us:
+                    st["exhausted"] = True
+                    continue
                 attempted_us.add(u_position)
 
-                mounted_ok = False
                 try:
                     async with self.session.begin_nested():
                         await self.mount(
@@ -440,9 +456,11 @@ class LayoutService:
                             user_id=user_id,
                         )
                         result.mounted += 1
-                        mounted_in_rack += 1
-                        mounted_ok = True
-                        cursor_u = u_position + device.height_u + gap_u
+                        st["mounted"] += 1
+                        next_down = u_position - gap_u - height
+                        st["cursor_u"] = (
+                            next_down if next_down >= 1 else u_position + height + gap_u
+                        )
 
                         assignment: dict = {
                             "device_id": str(device_id),
@@ -492,15 +510,17 @@ class LayoutService:
                                 business_entity.bmc_ip = bmc_entity.system_ip
 
                         result.assignments.append(assignment)
+                    device_idx += 1
+                    progressed = True
                 except Exception as exc:  # noqa: BLE001
-                    # 该 U 失败：跳过该 U 继续向后找（同柜、同设备）
                     result.errors.append(f"{device.hostname}@{rack.code}/U{u_position}: {exc}")
-                    cursor_u = u_position + 1
+                    st["cursor_u"] = max(1, u_position - 1)
+                    progressed = True
+                    # 同设备换 U 再试，不推进 device_idx
                     continue
 
-                device_idx += 1
-                if mounted_ok and mounted_in_rack >= rack_type_quota:
-                    break
+            if not progressed:
+                break
 
         # 剩余设备：已创建则保留库存不上架
         while device_idx < len(queue):
@@ -508,7 +528,7 @@ class LayoutService:
             label = leftover.hostname if leftover else str(queue[device_idx])
             result.stock_only += 1
             result.errors.append(
-                f"{label}: 无可用机柜/U位或同类型已达每柜上限，已创建并保留在库存（未上架）"
+                f"{label}: 无可用机柜/U位或已达本批每柜上限，已创建并保留在库存（未上架）"
             )
             device_idx += 1
 

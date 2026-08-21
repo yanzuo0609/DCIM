@@ -94,13 +94,40 @@ export function portMatchesAccessSpeed(
   return label === '1G'
 }
 
+/**
+ * 带外管理口判定：交换机 ETH/MGMT 管理口与服务器 BMC/IPMI 同属一类，
+ * 不参与业务下联/网卡池，仅用于管理面布线。
+ */
 export function isBmcPort(port: FramePort): boolean {
   const pt = String(port.port_type || '').toLowerCase()
   if (pt === 'bmc') return true
+  // Console / USB / VGA 等 other 口不算 BMC/IPMI 管理网口
+  if (pt === 'other') return false
+
   const purpose = String(port.purpose || '').toUpperCase()
   const lab = String(port.label || '').toUpperCase()
-  if (purpose === 'MGMT' || purpose === 'BMC') {
-    return lab.includes('IPMI') || lab.includes('BMC') || pt === 'bmc'
+  const id = String(port.id || '').toLowerCase()
+  const group = String(port.port_group || '').toUpperCase()
+
+  if (
+    lab.includes('IPMI') ||
+    lab.includes('BMC') ||
+    lab.includes('MGMT') ||
+    lab.startsWith('MGT') ||
+    lab.includes('管理') ||
+    id.includes('eth-mgmt') ||
+    id.startsWith('bmc') ||
+    id.startsWith('ipmi') ||
+    group === 'ETH_MGMT' ||
+    group === 'BMC' ||
+    group === 'IPMI'
+  ) {
+    return true
   }
-  return lab.includes('IPMI') || lab.includes('BMC')
+
+  // 已显式标为 MGMT/BMC 的电口（含交换机历史 1G 管理口）
+  if (purpose === 'MGMT' || purpose === 'BMC') {
+    return pt === '1g' || pt === 'bmc' || !pt
+  }
+  return false
 }

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.security import hash_password
-from app.models.device import DeviceCategory, DeviceModel, DeviceType, Manufacturer
+from app.models.device import Device, DeviceCategory, DeviceModel, DeviceType, Manufacturer
 from app.models.rack import RackTemplate
 from app.models.user import Permission, Role, RolePermission, User, UserRole, UserStatus
 
@@ -52,10 +52,19 @@ DEFAULT_RACK_TEMPLATES = [
 ]
 
 DEFAULT_DEVICE_TYPES = [
-    ("compute", "计算", "服务器/计算节点"),
-    ("storage", "存储", "存储设备"),
-    ("network", "网络", "交换机/路由等网络设备"),
-    ("security", "安全", "防火墙/安全设备"),
+    ("compute", "计算服务器", "计算服务器/计算节点"),
+    ("storage", "存储服务器", "存储服务器/存储设备"),
+    ("switch_1g", "千兆交换机", "接入层千兆交换机（与万兆分属不同类型）"),
+    ("switch_10g", "万兆交换机", "接入层万兆交换机（与千兆分属不同类型）"),
+    ("switch_bmc_1g", "BMC千兆交换机", "带外/BMC 管理千兆交换机"),
+    ("switch_ai", "AI交换机", "AI/智能网卡或 AI 网络交换机"),
+    ("switch_agg", "汇聚交换机", "汇聚层交换机"),
+    ("switch_core", "核心交换机", "核心层交换机"),
+    ("gpu", "GPU", "GPU 加速卡/GPU 服务器"),
+    ("router", "路由器", "路由器/网关"),
+    ("security", "安全设备", "防火墙/安全设备"),
+    ("other", "其他", "其他未分类设备"),
+    ("network", "网络（通用）", "未细分的网络设备；新建设备请选用千兆/万兆等具体类型"),
 ]
 
 DEFAULT_ADMIN = {
@@ -109,7 +118,25 @@ async def seed_rack_templates(session: AsyncSession) -> None:
 async def seed_device_types(session: AsyncSession) -> None:
     for code, name, description in DEFAULT_DEVICE_TYPES:
         stmt = select(DeviceType).where(DeviceType.code == code)
-        if (await session.execute(stmt)).scalar_one_or_none():
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+        if existing:
+            # 同步预置名称/说明（兼容旧短名：计算/存储/安全）
+            existing.name = name
+            existing.description = description
+            if existing.is_system is False and code in {
+                "compute",
+                "storage",
+                "security",
+                "other",
+                "gpu",
+                "switch_1g",
+                "switch_10g",
+                "switch_bmc_1g",
+                "switch_ai",
+                "switch_agg",
+                "switch_core",
+            }:
+                existing.is_system = True
             continue
         session.add(
             DeviceType(
@@ -119,7 +146,69 @@ async def seed_device_types(session: AsyncSession) -> None:
                 description=description,
             )
         )
+    await session.flush()
+    await _reclassify_coarse_network_devices(session)
     await session.commit()
+
+
+def _infer_device_type_code(text: str) -> str | None:
+    import re
+
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    compact = re.sub(r"[\s_\-/]+", "", lower)
+    if re.search(r"安全|防火墙|firewall|waf", lower):
+        return "security"
+    if re.search(r"存储|storage|san|nas", lower):
+        return "storage"
+    if re.search(r"服务器|server|compute|host", lower) and not re.search(
+        r"交换|switch", lower
+    ):
+        return "compute"
+    if "核心" in raw and re.search(r"交换|switch", lower):
+        return "switch_core"
+    if "汇聚" in raw and re.search(r"交换|switch", lower):
+        return "switch_agg"
+    if re.search(r"路由|router", lower):
+        return "router"
+    if "万兆" in raw or re.search(r"10g|10ge|10gb|tengig|ten_gigabit", compact):
+        return "switch_10g"
+    if "千兆" in raw or re.search(r"千兆|1ge|gigabit", lower):
+        return "switch_1g"
+    return None
+
+
+async def _reclassify_coarse_network_devices(session: AsyncSession) -> None:
+    """将仍挂在「网络（通用）」的设备按名称细分为千兆/万兆等。"""
+    types = (
+        await session.execute(select(DeviceType).where(DeviceType.deleted_at.is_(None)))
+    ).scalars().all()
+    by_code = {t.code: t for t in types}
+    network = by_code.get("network")
+    if not network:
+        return
+    devices = (
+        await session.execute(
+            select(Device).where(
+                Device.deleted_at.is_(None),
+                Device.device_type_id == network.id,
+            )
+        )
+    ).scalars().all()
+    for device in devices:
+        model_name = ""
+        if device.model is not None:
+            model_name = device.model.name or ""
+        elif device.device_model_id:
+            model = await session.get(DeviceModel, device.device_model_id)
+            model_name = model.name if model else ""
+        hay = f"{device.name or ''} {device.hostname or ''} {model_name}"
+        inferred = _infer_device_type_code(hay)
+        target = by_code.get(inferred or "")
+        if target:
+            device.device_type_id = target.id
 
 
 async def seed_device_catalog(session: AsyncSession) -> None:

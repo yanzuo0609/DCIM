@@ -598,7 +598,7 @@ export function defaultWiringConfig(): WiringRuleConfig {
     lag: true,
     lag_count: 1,
     lag_mode: 'LACP',
-    media: 'CUSTOM_SYNC',
+    media: 'MPO_MPO_OS2',
     fiber_type: 'OS2',
     connector: 'LC',
     distance_mode: 'AUTO',

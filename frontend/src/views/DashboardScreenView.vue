@@ -4,18 +4,17 @@ import { useRouter } from 'vue-router'
 import type { EChartsOption } from 'echarts'
 import { fetchDashboardAnalytics, type DashboardAnalytics } from '@/api/dashboard'
 import ScreenChart from '@/components/screen/ScreenChart.vue'
-import ScreenConfigDrawer from '@/components/screen/ScreenConfigDrawer.vue'
 import Room3DMonitor from '@/components/screen/Room3DMonitor.vue'
 import { useAuthStore } from '@/stores/auth'
 import {
   loadScreenLayout,
-  resetScreenLayout,
-  saveScreenLayout,
   type ScreenLayoutConfig,
 } from '@/utils/screenLayout'
+import { useScreenStore } from '@/stores/screen'
 
 const router = useRouter()
 const auth = useAuthStore()
+const screenStore = useScreenStore()
 
 const loading = ref(true)
 const refreshing = ref(false)
@@ -23,7 +22,6 @@ const errorMsg = ref('')
 const analytics = ref<DashboardAnalytics | null>(null)
 const now = ref(new Date())
 const lastUpdated = ref<Date | null>(null)
-const configOpen = ref(false)
 const layout = ref<ScreenLayoutConfig>(loadScreenLayout())
 const roomMonitorRef = ref<InstanceType<typeof Room3DMonitor> | null>(null)
 
@@ -320,22 +318,6 @@ function restartRefreshTimer() {
   refreshTimer = window.setInterval(() => void loadData(true), layout.value.refreshSec * 1000)
 }
 
-function onSaveLayout(next: ScreenLayoutConfig) {
-  layout.value = saveScreenLayout({
-    ...next,
-    title: next.title || '智慧机房管理驾驶舱',
-  })
-  restartRefreshTimer()
-}
-
-function onResetLayout() {
-  const base = resetScreenLayout()
-  base.title = '智慧机房管理驾驶舱'
-  base.theme = 'teal'
-  layout.value = saveScreenLayout(base)
-  restartRefreshTimer()
-}
-
 async function enterFullscreen() {
   try {
     if (!document.fullscreenElement) await document.documentElement.requestFullscreen?.()
@@ -354,14 +336,15 @@ async function exitScreen() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && !configOpen.value) void exitScreen()
+  if (e.key === 'Escape') void exitScreen()
   if (e.key === 'f' || e.key === 'F') void enterFullscreen()
-  if (e.key === 'c' || e.key === 'C') configOpen.value = true
 }
 
 onMounted(async () => {
+  screenStore.reloadLayout()
+  layout.value = screenStore.layout
   if (!layout.value.title || layout.value.title === '数据中心运营大屏') {
-    layout.value = saveScreenLayout({ ...layout.value, title: '智慧机房管理驾驶舱' })
+    layout.value = screenStore.applyLayout({ ...layout.value, title: '智慧机房管理驾驶舱' })
   }
   clockTimer = window.setInterval(() => {
     now.value = new Date()
@@ -395,7 +378,6 @@ onUnmounted(() => {
       </h1>
       <div class="top-right">
         <span class="clock">{{ clockText }}</span>
-        <button type="button" class="btn ghost" @click="configOpen = true">自定义</button>
         <button type="button" class="btn ghost" @click="enterFullscreen">全屏</button>
         <button type="button" class="btn" @click="loadData(true)">刷新</button>
         <button type="button" class="btn ghost" @click="exitScreen">退出</button>
@@ -499,13 +481,6 @@ onUnmounted(() => {
         </article>
       </section>
     </main>
-
-    <ScreenConfigDrawer
-      v-model="configOpen"
-      :config="layout"
-      @save="onSaveLayout"
-      @reset="onResetLayout"
-    />
   </div>
 </template>
 

@@ -34,6 +34,7 @@ import RackRangePicker from '@/components/RackRangePicker.vue'
 import {
   clampPerRackCount,
   getPerRackLimitForType,
+  resolveDeviceTypeByInfer,
   setPerRackLimitForType,
   type DeviceTypeLike,
 } from '@/utils/batchMountTypeLimits'
@@ -301,7 +302,10 @@ const suggestedPerRackCount = computed(() => {
   const estimates = racks.map((r) => {
     const total = r.total_u || 1
     const free = r.free_u ?? Math.max(0, total - (r.occupied_u || 0))
-    const fromStart = Math.max(0, total - startU + 1)
+    // 向上补位可用跨度 + 自起始 U 向下放置跨度，取较大者（与后端选位一致）
+    const upwardSpan = Math.max(0, total - startU + 1)
+    const downwardSpan = Math.max(0, startU)
+    const fromStart = Math.max(upwardSpan, downwardSpan)
     const usable = Math.min(free, fromStart)
     if (usable < heightU) return 0
     return Math.floor((usable + gapU) / unit)
@@ -491,6 +495,12 @@ async function onBatchContractItemChange(key: string | null) {
       if (!form.manufacturer_id && hit.manufacturer_id) {
         form.manufacturer_id = hit.manufacturer_id
       }
+      applyInferredDeviceType(
+        item.device_name,
+        item.device_model_name,
+        hit.name,
+        form.name_prefix,
+      )
     }
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
@@ -767,6 +777,13 @@ function applyPerRackLimitFromType() {
   form.per_rack_count = getPerRackLimitForType(type)
 }
 
+function applyInferredDeviceType(...parts: Array<string | null | undefined>) {
+  const hit = resolveDeviceTypeByInfer(props.types as DeviceTypeLike[], ...parts)
+  if (!hit) return
+  form.device_type_id = hit.id
+  applyPerRackLimitFromType()
+}
+
 function persistCurrentTypePerRackLimit(count = form.per_rack_count) {
   const type = currentDeviceType.value
   if (!type) return
@@ -823,6 +840,15 @@ watch(
     if (!visible.value) return
     startIndexManual.value = false
     void syncStartIndexFromPrefixes()
+    const model =
+      localModels.value.find((m) => m.id === form.device_model_id)
+      || props.models.find((m) => m.id === form.device_model_id)
+    applyInferredDeviceType(
+      form.name_prefix,
+      model?.name,
+      model?.code,
+      selectedContractItem.value?.device_name,
+    )
   },
 )
 
@@ -884,6 +910,7 @@ async function onModelChange(value: string | null) {
       if (!form.manufacturer_id && model.manufacturer_id) {
         form.manufacturer_id = model.manufacturer_id
       }
+      applyInferredDeviceType(model.name, model.code, form.name_prefix)
     }
     return
   }
@@ -905,6 +932,7 @@ async function onModelChange(value: string | null) {
     if (!form.manufacturer_id && existed.manufacturer_id) {
       form.manufacturer_id = existed.manufacturer_id
     }
+    applyInferredDeviceType(existed.name, existed.code, form.name_prefix)
     return
   }
   try {
@@ -932,6 +960,7 @@ async function onModelChange(value: string | null) {
     if (created.manufacturer_id && !form.manufacturer_id) {
       form.manufacturer_id = created.manufacturer_id
     }
+    applyInferredDeviceType(created.name, created.code, form.name_prefix)
     ElMessage.success(`已新建型号「${created.name}」`)
   } catch (error: unknown) {
     form.device_model_id = ''
@@ -1111,7 +1140,7 @@ function buildPreview() {
     `业务IP：${biz.length} 条${biz.length ? `（${biz[0].system_ip} … ${biz.at(-1)?.system_ip}）` : '（跳过）'}`,
     `BMC地址：${bmc.length} 条${bmc.length ? `（${bmc[0].system_ip} … ${bmc.at(-1)?.system_ip}）` : '（跳过）'}`,
     `目标机柜：${targets.length} 台（已有设备 ${rackOccupancySummary.value.occupiedRacks} 台 / 已上架 ${rackOccupancySummary.value.totalDevices} 台 / 空闲 ${rackOccupancySummary.value.totalFreeU}U）`,
-    `起始 U：${form.start_u}，设备间隔：${form.gap_u}U，每柜最多：${form.per_rack_count} 台（类型「${currentTypeLabel.value}」，含已上架同类型 · 空闲U建议 ${suggestedPerRackCount.value}）`,
+    `起始 U：${form.start_u}，设备间隔：${form.gap_u}U，本批每柜最多：${form.per_rack_count} 台（类型「${currentTypeLabel.value}」，不含已上架 · 空闲U建议 ${suggestedPerRackCount.value}）`,
   ]
 }
 
@@ -1500,7 +1529,7 @@ async function submit() {
         </el-form-item>
         <el-form-item label="设备间隔">
           <el-input-number v-model="form.gap_u" :min="0" :max="10" />
-          <span class="field-tip">U（遇已占用 U 时先留出间隔再向后放置；同柜多台之间同样留空）</span>
+          <span class="field-tip">U（遇已占用 U 时跳过占用块并留间隔；同柜多台自起始 U 向下放置。空闲的指定 U 即使紧邻下方设备也可上架）</span>
         </el-form-item>
         <el-form-item label="每柜最多">
           <div class="per-rack-field">
@@ -1512,7 +1541,7 @@ async function submit() {
                 @change="onPerRackCountChange"
               />
               <span class="field-tip">
-                类型「{{ currentTypeLabel }}」每柜最多 {{ form.per_rack_count }} 台（含已上架同类型）· 空闲U建议
+                类型「{{ currentTypeLabel }}」本批每柜最多 {{ form.per_rack_count }} 台（不含已上架）· 空闲U建议
                 {{ suggestedPerRackCount }}
                 <el-button link type="primary" @click="syncPerRackCountDefault">按计算填入</el-button>
                 <el-button link type="primary" @click="openTypeLimitEditor">
@@ -1522,7 +1551,7 @@ async function submit() {
             </div>
             <div v-if="showTypeLimitEditor" class="type-limit-editor">
               <p class="hint" style="margin-bottom: 8px">
-                按设备类型设置每柜同类型上限。上架时：已达上限整柜跳过；未达上限则占用 U 跳过并继续向后放置。
+                按设备类型设置本批每柜上限。各柜轮询上架：优先落在起始 U，再向下补位；不因柜内已有同类型设备而跳过空闲 U。
               </p>
               <el-table :data="typeLimitDraft" size="small" border>
                 <el-table-column prop="name" label="设备类型" min-width="120" />
@@ -1547,7 +1576,7 @@ async function submit() {
         :type="occupancyAlertType"
         :closable="false"
         :title="occupancyAlertTitle"
-        description="按设备类型设置每柜最多台数。同类型已达上限则跳过整柜；未达上限时若目标 U 已占用，则跳过占用块并按「设备间隔」留空后再向后放置（如 U3/U6/U9 为 2U 设备、间隔 1U 时从 U12 起放）。无柜可上时设备保留库存。"
+        description="「每柜最多」仅限制本批上架台数，不含柜内已有设备。各柜轮询：起始 U 空闲即上（如图 AA02 的 U44），再按间隔向下放置。无柜可上时设备保留库存。"
         show-icon
         style="margin-top: 8px"
       />

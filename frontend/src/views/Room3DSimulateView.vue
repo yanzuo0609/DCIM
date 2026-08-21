@@ -87,10 +87,10 @@ function onEditModeChange(editing: boolean) {
 }
 
 const stats = ref({
-  roomTitle: '3D 机房仿真',
+  roomTitle: '机房3D仿真',
   deviceTotal: 0,
-  danger: 0,
-  fault: 0,
+  onlineDevices: 0,
+  appPartitions: 0,
   spaceLabel: '0/0',
 })
 
@@ -121,8 +121,8 @@ function onStats(payload: {
   roomId: string
   roomTitle: string
   deviceTotal: number
-  danger: number
-  fault: number
+  onlineDevices: number
+  appPartitions: number
   occupied: number
   total: number
 }) {
@@ -130,8 +130,8 @@ function onStats(payload: {
   stats.value = {
     roomTitle: payload.roomTitle,
     deviceTotal: payload.deviceTotal,
-    danger: payload.danger,
-    fault: payload.fault,
+    onlineDevices: payload.onlineDevices,
+    appPartitions: payload.appPartitions,
     spaceLabel: `${payload.occupied}/${payload.total}`,
   }
 }
@@ -144,7 +144,7 @@ function goManageLayout() {
 }
 
 function goTemplates() {
-  void router.push({ name: 'room-rack-templates' })
+  void router.push({ name: 'rack-templates' })
 }
 
 function goDatacenters() {
@@ -265,23 +265,26 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="simulate-page">
-    <header class="sim-top">
-      <div class="sim-brand">
-        <strong>3D 机房</strong>
-        <span class="sim-crumb">{{ stats.roomTitle }}</span>
+  <div class="page">
+    <section class="hero">
+      <div class="hero-copy">
+        <h2>机房3D仿真</h2>
+        <p>
+          {{ stats.roomTitle }}
+          · 三维查看机柜布局与设备状态；右键旋转，滚轮缩放，单击选择，双击进入内部视图。
+        </p>
       </div>
-      <div class="sim-actions">
-        <el-select v-model="renderLevel" size="small" style="width: 148px">
+      <div class="hero-actions">
+        <el-select v-model="renderLevel" style="width: 160px">
           <el-option label="渲染质量 · 级别一" value="1" />
           <el-option label="渲染质量 · 级别二" value="2" />
         </el-select>
-        <el-checkbox v-model="showAllCards" size="small">显示全部卡片</el-checkbox>
-        <el-button size="small" @click="goDatacenters">数据中心</el-button>
-        <el-button type="primary" size="small" @click="goManageLayout">配置所在机房</el-button>
-        <el-button size="small" @click="goTemplates">机柜模板</el-button>
+        <el-checkbox v-model="showAllCards">显示全部卡片</el-checkbox>
+        <el-button @click="goDatacenters">数据中心管理</el-button>
+        <el-button @click="goManageLayout">中心机房管理</el-button>
+        <el-button @click="goTemplates">机柜模板管理</el-button>
       </div>
-    </header>
+    </section>
 
     <div class="sim-stage" :class="{ editing: sceneEditing }">
       <div class="sim-canvas" @dragover="onCanvasDragOver" @drop="onCanvasDrop">
@@ -368,15 +371,15 @@ onMounted(() => {
         <article class="stat-card">
           <i class="dot yellow" />
           <div>
-            <span>危险</span>
-            <strong>{{ stats.danger }}</strong>
+            <span>在线设备</span>
+            <strong>{{ stats.onlineDevices }}</strong>
           </div>
         </article>
         <article class="stat-card">
           <i class="dot red" />
           <div>
-            <span>故障</span>
-            <strong>{{ stats.fault }}</strong>
+            <span>应用分区</span>
+            <strong>{{ stats.appPartitions }}</strong>
           </div>
         </article>
         <article class="stat-card">
@@ -392,7 +395,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.simulate-page {
+.page {
   --sim-bg: #e8f0f8;
   --sim-panel: rgba(255, 255, 255, 0.92);
   --sim-line: #d7e3ef;
@@ -401,48 +404,43 @@ onMounted(() => {
   min-height: calc(100vh - 140px);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   color: var(--sim-text);
 }
 
-.sim-top {
+.hero {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  background: var(--sim-panel);
-  border: 1px solid var(--sim-line);
-  border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(31, 45, 61, 0.04);
+  gap: 16px;
+  padding: 20px 22px;
+  border-radius: 12px;
+  border: 1px solid #d7e3ef;
+  background:
+    radial-gradient(ellipse at 0% 0%, rgba(58, 160, 255, 0.12), transparent 50%),
+    linear-gradient(135deg, #f7fbff 0%, #e8f1fa 100%);
 }
 
-.sim-brand {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  min-width: 0;
+.hero-copy h2 {
+  margin: 0;
+  font-size: 22px;
+  color: #1f2d3d;
 }
 
-.sim-brand strong {
-  font-size: 18px;
-  letter-spacing: 0.04em;
-}
-
-.sim-crumb {
-  color: var(--sim-muted);
+.hero-copy p {
+  margin: 8px 0 0;
+  max-width: 640px;
+  color: #5f6b7a;
   font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.55;
 }
 
-.sim-actions {
+.hero-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .sim-stage {

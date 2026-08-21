@@ -251,20 +251,20 @@ onMounted(loadData)
   <div class="page">
     <section class="hero">
       <div class="hero-copy">
-        <h2>数据中心</h2>
+        <h2>数据中心管理</h2>
         <p>统一管理数据中心台账、机房布局、机柜模板与 3D 仿真视图。</p>
       </div>
       <div class="hero-actions">
-        <el-button @click="$router.push('/rooms/manage')">机房管理</el-button>
-        <el-button @click="$router.push('/rooms/simulate')">进入 3D 仿真</el-button>
-        <el-button type="primary" @click="$router.push('/rooms/templates')">机柜模板</el-button>
+        <el-button @click="$router.push('/rooms/manage')">中心机房管理</el-button>
+        <el-button @click="$router.push('/rooms/simulate')">机房3D仿真</el-button>
+        <el-button type="primary" @click="$router.push('/racks/templates')">机柜模板管理</el-button>
       </div>
     </section>
 
     <el-card shadow="never" class="dc-card">
       <template #header>
         <div class="card-header">
-          <span>数据中心台账</span>
+          <span>数据中心列表</span>
           <div class="actions">
             <el-input
               v-model="keyword"

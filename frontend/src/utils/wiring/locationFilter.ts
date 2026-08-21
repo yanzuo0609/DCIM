@@ -1,11 +1,46 @@
 import type { NetworkNode } from '@/api/network'
 import type { WiringRuleConfig } from '@/utils/wiringTypes'
+import { resolveWiringGroups } from '@/utils/wiringTypes'
 import { resolveWiringDeviceType } from '@/utils/wiringDeviceType'
 
 export type WiringEndpointSide = 'source' | 'target'
 
 function text(value: unknown): string {
   return String(value ?? '').trim()
+}
+
+/** 接入交换机硬件分类的软匹配：按实际端口能力，避免误判导致整侧匹配为空 */
+function accessSwitchSoftMatch(node: NetworkNode, deviceTypes: Set<string>): boolean {
+  if (node.kind === 'server' || node.kind === 'security') return false
+  const ports = node.port_layout?.ports || []
+  if (!ports.length) return false
+  const wants1g = deviceTypes.has('ACCESS_SWITCH_1G') || deviceTypes.has('BMC_SWITCH')
+  const wants10g = deviceTypes.has('ACCESS_SWITCH_10G')
+  if (wants1g) {
+    return ports.some((p) => {
+      const t = String(p.port_type || '').toLowerCase()
+      return t === '1g' || t === 'bmc'
+    })
+  }
+  if (wants10g) {
+    return ports.some((p) =>
+      ['10g', '25g', '40_100g'].includes(String(p.port_type || '').toLowerCase()),
+    )
+  }
+  return false
+}
+
+function sideHasExplicitSelection(cfg: WiringRuleConfig, side: WiringEndpointSide): boolean {
+  if (side === 'source') {
+    return (
+      (cfg.source_node_ids?.length || 0) > 0 ||
+      resolveWiringGroups(cfg.source_groups, cfg.source_group).length > 0
+    )
+  }
+  return (
+    (cfg.target_node_ids?.length || 0) > 0 ||
+    resolveWiringGroups(cfg.target_groups, cfg.target_group).length > 0
+  )
 }
 
 /**
@@ -28,6 +63,8 @@ export function filterWiringNodesByLocation(
       deviceTypes.add('BMC_SWITCH')
     }
   }
+  // 用户已显式选择设备/设备组时，不再用硬件分类硬过滤（尊重手选）
+  const skipDeviceTypeFilter = sideHasExplicitSelection(cfg, side)
   const rackStart = text(side === 'source' ? cfg.source_rack_start : cfg.target_rack_start)
   const rackEnd = text(side === 'source' ? cfg.source_rack_end : cfg.target_rack_end)
   const startU = side === 'source' ? cfg.source_start_u : cfg.target_start_u
@@ -36,7 +73,10 @@ export function filterWiringNodesByLocation(
   const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 
   const filtered = nodes.filter((node) => {
-    if (deviceTypes.size && !deviceTypes.has(resolveWiringDeviceType(node))) return false
+    if (deviceTypes.size && !skipDeviceTypeFilter) {
+      const resolved = resolveWiringDeviceType(node)
+      if (!deviceTypes.has(resolved) && !accessSwitchSoftMatch(node, deviceTypes)) return false
+    }
     const device = node.device
     if (rooms.size) {
       const roomId = text(device?.room_id)

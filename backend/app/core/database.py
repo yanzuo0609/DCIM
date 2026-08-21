@@ -45,6 +45,8 @@ from app.models import (  # noqa: F401
     Room,
     User,
     UserRole,
+    Warehouse,
+    WarehouseAsset,
 )
 from app.models.base import Base
 
@@ -317,6 +319,10 @@ async def _ensure_sqlite_device_columns(connection) -> None:
             "ALTER TABLE device ADD COLUMN network_panel_bound BOOLEAN NOT NULL DEFAULT 0",
         ),
         ("manufacturer_id", "ALTER TABLE device ADD COLUMN manufacturer_id CHAR(36)"),
+        ("project_scope", "ALTER TABLE device ADD COLUMN project_scope VARCHAR(200)"),
+        ("project_app", "ALTER TABLE device ADD COLUMN project_app VARCHAR(200)"),
+        ("warranty_years", "ALTER TABLE device ADD COLUMN warranty_years INTEGER"),
+        ("mounted_at", "ALTER TABLE device ADD COLUMN mounted_at DATETIME"),
     ]
     for col, sql in alters:
         if col not in columns:
@@ -947,6 +953,98 @@ async def _ensure_sqlite_network_project(connection) -> None:
         )
 
 
+async def _ensure_sqlite_warehouse_table(connection) -> None:
+    """Create warehouse / warehouse_asset tables and soft-add columns for SQLite."""
+    if not str(settings.database_url).startswith("sqlite"):
+        return
+    tables = await connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='warehouse'"
+    )
+    if not tables.fetchone():
+        await connection.exec_driver_sql(
+            """
+            CREATE TABLE warehouse (
+                room_id CHAR(32) NOT NULL,
+                code VARCHAR(50) NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                description TEXT,
+                asset_ledger_ready BOOLEAN NOT NULL DEFAULT 1,
+                id CHAR(32) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by CHAR(32),
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by CHAR(32),
+                deleted_at DATETIME,
+                deleted_by CHAR(32),
+                version INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (id),
+                CONSTRAINT uk_warehouse_code UNIQUE (code),
+                FOREIGN KEY(room_id) REFERENCES room (id)
+            )
+            """
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_warehouse_room_id ON warehouse (room_id)"
+        )
+    else:
+        cols = await connection.exec_driver_sql("PRAGMA table_info(warehouse)")
+        existing = {row[1] for row in cols.fetchall()}
+        if "asset_ledger_ready" not in existing:
+            await connection.exec_driver_sql(
+                "ALTER TABLE warehouse ADD COLUMN asset_ledger_ready BOOLEAN NOT NULL DEFAULT 1"
+            )
+
+    asset_tables = await connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='warehouse_asset'"
+    )
+    if not asset_tables.fetchone():
+        await connection.exec_driver_sql(
+            """
+            CREATE TABLE warehouse_asset (
+                warehouse_id CHAR(32) NOT NULL,
+                name VARCHAR(200) NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                unit VARCHAR(20) NOT NULL DEFAULT 'piece',
+                project VARCHAR(200),
+                application VARCHAR(200),
+                category VARCHAR(30) NOT NULL DEFAULT 'other',
+                status VARCHAR(30) NOT NULL DEFAULT 'new',
+                inbound_at DATETIME,
+                outbound_mode VARCHAR(20) NOT NULL DEFAULT 'undetermined',
+                outbound_at DATETIME,
+                owner_name VARCHAR(100),
+                owner_contact VARCHAR(100),
+                remark TEXT,
+                id CHAR(32) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by CHAR(32),
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by CHAR(32),
+                deleted_at DATETIME,
+                deleted_by CHAR(32),
+                version INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (id),
+                FOREIGN KEY(warehouse_id) REFERENCES warehouse (id)
+            )
+            """
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_warehouse_asset_warehouse_id ON warehouse_asset (warehouse_id)"
+        )
+        return
+
+    asset_cols = await connection.exec_driver_sql("PRAGMA table_info(warehouse_asset)")
+    asset_existing = {row[1] for row in asset_cols.fetchall()}
+    if "quantity" not in asset_existing:
+        await connection.exec_driver_sql(
+            "ALTER TABLE warehouse_asset ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1"
+        )
+    if "unit" not in asset_existing:
+        await connection.exec_driver_sql(
+            "ALTER TABLE warehouse_asset ADD COLUMN unit VARCHAR(20) NOT NULL DEFAULT 'piece'"
+        )
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -965,6 +1063,7 @@ async def init_db() -> None:
         await _ensure_sqlite_network_wiring_rule_project(conn)
         await _ensure_sqlite_uuid_hyphen_normalize(conn)
         await _ensure_sqlite_device_model_panel_columns(conn)
+        await _ensure_sqlite_warehouse_table(conn)
 
     async with async_session_factory() as session:
         await seed_defaults(session)

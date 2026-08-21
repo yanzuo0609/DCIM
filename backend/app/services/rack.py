@@ -607,12 +607,14 @@ class RackService:
     async def _power_by_rack_ids(self, rack_ids: list[uuid.UUID]) -> dict[uuid.UUID, float]:
         from sqlalchemy import func
 
-        from app.models.device import Device
+        from app.models.device import Device, DeviceModel
 
         if not rack_ids:
             return {}
+        power_expr = func.coalesce(Device.power, DeviceModel.power, 0)
         stmt = (
-            select(Device.rack_id, func.coalesce(func.sum(Device.power), 0))
+            select(Device.rack_id, func.coalesce(func.sum(power_expr), 0))
+            .outerjoin(DeviceModel, DeviceModel.id == Device.device_model_id)
             .where(
                 Device.rack_id.in_(rack_ids),
                 Device.deleted_at.is_(None),
@@ -621,6 +623,24 @@ class RackService:
         )
         rows = (await self.session.execute(stmt)).all()
         return {rid: float(power or 0) for rid, power in rows if rid is not None}
+
+    async def _device_count_by_rack_ids(self, rack_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+        from sqlalchemy import func
+
+        from app.models.device import Device
+
+        if not rack_ids:
+            return {}
+        stmt = (
+            select(Device.rack_id, func.count(Device.id))
+            .where(
+                Device.rack_id.in_(rack_ids),
+                Device.deleted_at.is_(None),
+            )
+            .group_by(Device.rack_id)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return {rid: int(count or 0) for rid, count in rows if rid is not None}
 
     async def list(
         self, params: PaginationParams, room_id: uuid.UUID | None = None
@@ -635,13 +655,18 @@ class RackService:
             filters=filters,
             search_fields=["code", "name"],
         )
-        stats = await self.position_repo.stats_for_rack_ids([item.id for item in items])
-        power_map = await self._power_by_rack_ids([item.id for item in items])
+        rack_ids = [item.id for item in items]
+        stats = await self.position_repo.stats_for_rack_ids(rack_ids)
+        power_map = await self._power_by_rack_ids(rack_ids)
+        device_map = await self._device_count_by_rack_ids(rack_ids)
         enriched = [
             _to_rack_response(
                 item,
                 occupied_u=stats.get(item.id, (0, 0))[0],
-                device_count=stats.get(item.id, (0, 0))[1],
+                device_count=max(
+                    stats.get(item.id, (0, 0))[1],
+                    device_map.get(item.id, 0),
+                ),
                 total_power=power_map.get(item.id, 0.0),
             )
             for item in items

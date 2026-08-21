@@ -330,7 +330,8 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
         asInt(isCoreAgg ? (attrs.eth_mgmt_ports ?? attrs.mgmt_ports) : attrs.mgmt_ports, 1),
       )
       if (ethMgmt > 0) {
-        const g = newInterfaceGroup('1g', ethMgmt, { role: 'mgmt', grid_cols: ethMgmt })
+        // 与服务器 BMC/IPMI 同型：port_type=bmc，role=mgmt，用途 MGMT
+        const g = newInterfaceGroup('bmc', ethMgmt, { role: 'mgmt', grid_cols: ethMgmt })
         g.id = 'eth-mgmt'
         g.id_ns = 'eth-mgmt'
         defs.push({
@@ -462,7 +463,7 @@ export function buildPortLayoutFromDesignModel(model: NetworkDesignModel): PortL
         zones.push({ label: 'HA', port_type: '10g', count: ha, zone_layout: 'single_row' })
       }
       if (mgmt > 0) {
-        zones.push({ label: 'MGMT', port_type: '1g', count: mgmt, zone_layout: 'single_row' })
+        zones.push({ label: 'MGMT', port_type: 'bmc', count: mgmt, zone_layout: 'single_row' })
       }
     }
     applySecurityLayoutConfig(layout, { heightU: heightSec, zones, preservePeers: false })
@@ -620,8 +621,12 @@ function applyServerIfaceSlotPortLabels(layout: PortLayout, attrs: Record<string
     p.code = spec.code
     p.label = spec.code
     p.media = spec.iface_type === 'optical' ? 'FIBER' : 'COPPER'
-    if (spec.kind === 'bmc' || spec.kind === 'ipmi' || spec.kind === 'vga' || spec.kind === 'usb') {
+    if (spec.kind === 'bmc' || spec.kind === 'ipmi') {
       p.purpose = 'MGMT'
+      p.port_type = 'bmc'
+      if (!p.media) p.media = 'COPPER'
+    } else if (spec.kind === 'vga' || spec.kind === 'usb') {
+      p.purpose = 'OTHER'
     } else {
       p.purpose = 'SERVER'
     }
@@ -651,7 +656,12 @@ function applySecurityIfacePortLabels(layout: PortLayout, _slots: SecurityIfaceS
       else if (kind === 'MGMT') {
         p.label = `slot${slotIdx}-MGMT-${n}`
         p.purpose = 'MGMT'
-      } else if (kind === 'USB') p.label = `slot${slotIdx}-USB-${n}`
+        p.port_type = 'bmc'
+        if (!p.media) p.media = 'COPPER'
+      } else if (kind === 'USB') {
+        p.label = `slot${slotIdx}-USB-${n}`
+        p.purpose = 'OTHER'
+      }
     })
   }
 }
@@ -736,7 +746,28 @@ export function annotatePortPurposes(
       continue
     }
     if (groupRole === 'mgmt') {
+      const lab = String(p.label || '').toUpperCase()
+      const id = String(p.id || '').toLowerCase()
+      // VGA/USB/Console 等 other 口：不当作 BMC/IPMI 管理网口
+      if (
+        pt === 'other' ||
+        id.includes('vga') ||
+        id.includes('usb') ||
+        id.includes('console') ||
+        lab.includes('HDMI') ||
+        lab.includes('VGA') ||
+        lab.includes('USB') ||
+        lab.includes('CON')
+      ) {
+        p.purpose = 'OTHER'
+        continue
+      }
+      // 交换机 ETH 管理口与服务器 BMC/IPMI：统一 MGMT + bmc 口型
       p.purpose = 'MGMT'
+      if (pt === '1g' || !pt || id.includes('eth-mgmt') || id.includes('bmc') || id.includes('ipmi')) {
+        p.port_type = 'bmc'
+        if (!p.media) p.media = 'COPPER'
+      }
       continue
     }
     if (groupRole === 'main' || groupRole === 'card') {
@@ -765,7 +796,13 @@ export function annotatePortPurposes(
     const hay = `${p.group_id || ''} ${slot?.zone_label || ''} ${slot?.server_slot_kind || ''}`.toUpperCase()
     if (hay.includes('PEER')) p.purpose = 'PEER'
     else if (hay.includes('UPLINK') || hay.includes('上联')) p.purpose = 'UPLINK'
-    else if (hay.includes('MGMT') || hay.includes('管理')) p.purpose = 'MGMT'
+    else if (hay.includes('MGMT') || hay.includes('MGT') || hay.includes('BMC') || hay.includes('IPMI') || hay.includes('管理')) {
+      p.purpose = 'MGMT'
+      if (String(p.port_type || '').toLowerCase() === '1g' || !p.port_type) {
+        p.port_type = 'bmc'
+        if (!p.media) p.media = 'COPPER'
+      }
+    }
     else if (
       hay.includes('SERVER') ||
       hay.includes('NIC') ||
@@ -919,7 +956,16 @@ function applySwitchSystemPortIdentities(layout: PortLayout, systemPorts: Switch
     p.label = spec.code
     p.media = spec.iface_type === 'copper' ? 'COPPER' : 'FIBER'
     p.media_kind = moduleToMediaKind(spec.module)
-    p.purpose = spec.kind === 'stack' ? 'PEER' : spec.kind === 'usb' ? 'OTHER' : 'MGMT'
+    if (spec.kind === 'stack') {
+      p.purpose = 'PEER'
+    } else if (spec.kind === 'usb' || spec.kind === 'console') {
+      p.purpose = 'OTHER'
+    } else {
+      // eth_mgmt：与服务器 BMC/IPMI 同功能
+      p.purpose = 'MGMT'
+      p.port_type = 'bmc'
+      p.media = 'COPPER'
+    }
     p.port_group = spec.kind.toUpperCase()
   }
 }

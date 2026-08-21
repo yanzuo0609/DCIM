@@ -21,6 +21,7 @@ from app.api.v1.endpoints import (
     rooms,
     svg_audit,
     users,
+    warehouses,
 )
 
 api_router = APIRouter()
@@ -31,6 +32,7 @@ api_router.include_router(datacenters.router, tags=["datacenters"])
 api_router.include_router(buildings.router, tags=["buildings"])
 api_router.include_router(floors.router, tags=["floors"])
 api_router.include_router(rooms.router, tags=["rooms"])
+api_router.include_router(warehouses.router, tags=["warehouses"])
 api_router.include_router(racks.router, tags=["racks"])
 api_router.include_router(rack_templates.router, tags=["rack-templates"])
 api_router.include_router(devices.router, tags=["devices"])

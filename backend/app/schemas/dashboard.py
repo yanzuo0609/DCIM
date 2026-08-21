@@ -120,6 +120,8 @@ class RoomMonitorRack(BaseModel):
     occupied_u: int = 0
     utilization: float = 0.0
     device_count: int = 0
+    online_device_count: int = 0
+    app_usage: str | None = None
     status: str = "active"
 
 

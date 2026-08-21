@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { fetchDashboardSummary, type DashboardSummary } from '@/api/dashboard'
 import { useAuthStore } from '@/stores/auth'
+import { useScreenStore } from '@/stores/screen'
 
 const router = useRouter()
 const auth = useAuthStore()
+const screen = useScreenStore()
 const loading = ref(true)
 const health = ref<{ status: string; version?: string } | null>(null)
 const summary = ref<DashboardSummary | null>(null)
@@ -30,6 +33,11 @@ onMounted(async () => {
 })
 
 function openScreen(blank = false) {
+  if (!screen.menuEnabled) {
+    ElMessage.warning('运营大屏入口已关闭，请在「系统管理 → 大屏管理」中开启')
+    void router.push({ name: 'system-screen' })
+    return
+  }
   if (blank) {
     window.open(router.resolve({ name: 'dashboard-screen' }).href, '_blank')
     return
@@ -46,9 +54,12 @@ function openScreen(blank = false) {
           <template #header>
             <div class="card-head">
               <span>系统概览</span>
-              <div class="actions">
+              <div v-if="screen.menuEnabled" class="actions">
                 <el-button type="primary" @click="openScreen(false)">打开运营大屏</el-button>
                 <el-button @click="openScreen(true)">新窗口大屏</el-button>
+              </div>
+              <div v-else class="actions">
+                <el-button @click="$router.push('/system/screen')">大屏管理</el-button>
               </div>
             </div>
           </template>
@@ -59,7 +70,13 @@ function openScreen(blank = false) {
             </el-tag>
             <p v-if="health?.version">RackDCIM Pro v{{ health.version }}</p>
             <p v-if="auth.profile">欢迎，{{ auth.profile.full_name || auth.profile.username }}</p>
-            <p class="hint">运营大屏支持模块化自定义：可开关图表模块、调整布局列宽与 KPI 指标，适合投屏 / 值班室展示。</p>
+            <p class="hint">
+              {{
+                screen.menuEnabled
+                  ? '运营大屏用于投屏 / 值班展示。主题、布局模块与 KPI 请在「系统管理 → 大屏管理」中配置。'
+                  : '运营大屏入口当前已关闭。可在「系统管理 → 大屏管理」开启，并配置主题、布局与 KPI。'
+              }}
+            </p>
           </div>
         </el-card>
       </el-col>

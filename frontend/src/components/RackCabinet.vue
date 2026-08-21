@@ -25,6 +25,8 @@ const props = withDefaults(
     slots?: RackLayoutSlot[]
     totalPower?: number
     compact?: boolean
+    /** 整体缩放比例（如完整机柜布局 0.8） */
+    scale?: number
     selectable?: boolean
     selectedU?: number | null
     highlightDeviceId?: string | null
@@ -35,6 +37,7 @@ const props = withDefaults(
     slots: () => [],
     totalPower: 0,
     compact: false,
+    scale: 1,
     selectable: false,
     selectedU: null,
     highlightDeviceId: null,
@@ -80,10 +83,18 @@ const displaySlots = computed(() => {
   return empty
 })
 
+const scaleFactor = computed(() => {
+  const s = Number(props.scale)
+  if (!Number.isFinite(s) || s <= 0) return 1
+  return Math.min(2, Math.max(0.4, s))
+})
+
 const unitPx = computed(() => {
-  if (styleKey.value === 'grid') return props.compact ? 16 : 20
-  if (styleKey.value === 'realistic') return props.compact ? 18 : 24
-  return props.compact ? 22 : 28
+  let base = 28
+  if (styleKey.value === 'grid') base = props.compact ? 16 : 20
+  else if (styleKey.value === 'realistic') base = props.compact ? 18 : 24
+  else base = props.compact ? 22 : 28
+  return Math.max(10, Math.round(base * scaleFactor.value))
 })
 
 /**
@@ -209,13 +220,19 @@ const adaptiveWidthPx = computed(() => {
   const byName = nameCol / 0.5
   const byIp = ipCol / 0.34
   const bySide = sideCol / 0.08
-  const width = Math.ceil(Math.max(byName, byIp, bySide))
-  return Math.min(props.compact ? 420 : 580, Math.max(props.compact ? 420 : 340, width))
+  const width = Math.ceil(Math.max(byName, byIp, bySide) * scaleFactor.value)
+  const compactMax = Math.round(420 * scaleFactor.value)
+  const normalMax = Math.round(580 * scaleFactor.value)
+  const compactMin = Math.round(420 * scaleFactor.value)
+  const normalMin = Math.round(340 * scaleFactor.value)
+  return Math.min(props.compact ? compactMax : normalMax, Math.max(props.compact ? compactMin : normalMin, width))
 })
 
 const cabinetStyle = computed(() => ({
   width: props.compact ? '100%' : `${adaptiveWidthPx.value}px`,
-  maxWidth: props.compact ? '420px' : '580px',
+  maxWidth: props.compact
+    ? `${Math.round(420 * scaleFactor.value)}px`
+    : `${Math.round(580 * scaleFactor.value)}px`,
 }))
 
 function formatPower(value: number | null | undefined) {

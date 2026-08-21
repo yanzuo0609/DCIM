@@ -8,8 +8,7 @@ import DeviceParamProfilesPanel from '@/components/DeviceParamProfilesPanel.vue'
       <div>
         <h2>设备参数</h2>
         <p>
-          按采购汇总「设备名称」自动生成空的待填参数列表（与汇总一一对应）；完善 CPU / 内存 / 系统盘 /
-          数据盘后可供资源统计与设备台账关联
+          按采购汇总「设备名称」关联同步设备参数（同名一一对应）；完善参数后可供资源统计与设备台账关联
         </p>
       </div>
     </header>

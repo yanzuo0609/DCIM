@@ -5,9 +5,20 @@ import uuid
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -18,10 +29,38 @@ if TYPE_CHECKING:
 
 
 class DeviceStatus(str, enum.Enum):
+    """设备业务状态。
+
+    - stock: 库存
+    - mounted: 上架加电（历史兼容码，原「已上架」）
+    - mounted_nopower: 上架无电
+    - app_online: 应用上线
+    - app_offline: 应用下线
+    - fault: 故障
+    - maintenance / retired: 兼容旧数据
+    """
+
     STOCK = "stock"
     MOUNTED = "mounted"
+    MOUNTED_NOPOWER = "mounted_nopower"
+    APP_ONLINE = "app_online"
+    APP_OFFLINE = "app_offline"
+    FAULT = "fault"
     MAINTENANCE = "maintenance"
     RETIRED = "retired"
+
+
+# 需已上架（有机柜位置）才可直接设置的状态
+DEVICE_ON_RACK_STATUSES = frozenset(
+    {
+        DeviceStatus.MOUNTED.value,
+        DeviceStatus.MOUNTED_NOPOWER.value,
+        DeviceStatus.APP_ONLINE.value,
+        DeviceStatus.APP_OFFLINE.value,
+    }
+)
+
+DEVICE_STATUS_VALUES = frozenset(s.value for s in DeviceStatus)
 
 
 class Manufacturer(BaseModel):
@@ -200,6 +239,11 @@ class Device(BaseModel):
     power: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default=DeviceStatus.STOCK.value, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 表单扩展：项目归属 / 项目应用 / 维保年限 / 上架时间
+    project_scope: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    project_app: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    warranty_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mounted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 是否已绑定网络设备定义面板；已绑定仅允许修改面板，不可重复应用
     network_panel_bound: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 

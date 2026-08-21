@@ -37,7 +37,7 @@ const MODE_TITLE: Record<BatchEditMode, string> = {
   model: '型号',
   manufacturer: '厂商',
   unmount: '批量下架',
-  mount: '改位置',
+  mount: '移动设备',
   ip: '改 IP',
 }
 

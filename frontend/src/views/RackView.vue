@@ -467,14 +467,23 @@ onMounted(() => {
 
 <template>
   <div class="page">
-    <el-card shadow="never">
+    <section class="hero">
+      <div class="hero-copy">
+        <h2>机柜模板管理</h2>
+        <p>维护机柜外观与 U 位规格，可批量应用到单个或多个机房。</p>
+      </div>
+      <div class="hero-actions">
+        <el-button @click="$router.push('/datacenters')">数据中心管理</el-button>
+        <el-button @click="$router.push('/rooms/manage')">中心机房管理</el-button>
+        <el-button @click="$router.push('/rooms/simulate')">机房3D仿真</el-button>
+      </div>
+    </section>
+
+    <el-card shadow="never" class="list-card">
       <template #header>
         <div class="card-header">
-          <div>
-            <span>机柜样式模板</span>
-            <p class="header-hint">维护机柜外观与 U 位规格，可批量应用到单个或多个机房</p>
-          </div>
-          <div class="header-actions">
+          <span>机柜模板列表</span>
+          <div class="actions">
             <el-button v-if="canUpdate" @click="openApply()">应用到机房</el-button>
             <el-button v-if="canCreate" type="primary" @click="openCreateTemplate">新建模板</el-button>
           </div>
@@ -707,6 +716,41 @@ onMounted(() => {
   gap: 16px;
 }
 
+.hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px;
+  border-radius: 12px;
+  border: 1px solid #d7e3ef;
+  background:
+    radial-gradient(ellipse at 0% 0%, rgba(58, 160, 255, 0.12), transparent 50%),
+    linear-gradient(135deg, #f7fbff 0%, #e8f1fa 100%);
+}
+
+.hero-copy h2 {
+  margin: 0;
+  font-size: 22px;
+  color: #1f2d3d;
+}
+
+.hero-copy p {
+  margin: 8px 0 0;
+  color: #5f6b7a;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.list-card :deep(.el-card__header) {
+  padding: 12px 16px;
+}
+
 .card-header {
   display: flex;
   align-items: center;
@@ -714,24 +758,16 @@ onMounted(() => {
   gap: 12px;
 }
 
-.header-actions {
+.actions {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  flex-shrink: 0;
 }
 
 .field-hint {
   margin-top: 6px;
   font-size: 12px;
   color: #909399;
-}
-
-.header-hint {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: #909399;
-  font-weight: normal;
 }
 
 .mono-id {

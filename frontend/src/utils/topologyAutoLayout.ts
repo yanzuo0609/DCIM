@@ -24,12 +24,13 @@ function primaryGroup(node: NetworkNode): string {
   return nodeGroupList(node)[0] || '未分组'
 }
 
-function connectedWeight(node: NetworkNode, links: NetworkLink[]): number {
-  let total = 0
+function buildDegreeMap(links: NetworkLink[]): Map<string, number> {
+  const degree = new Map<string, number>()
   for (const link of links) {
-    if (link.source_node_id === node.id || link.target_node_id === node.id) total += 1
+    degree.set(link.source_node_id, (degree.get(link.source_node_id) || 0) + 1)
+    degree.set(link.target_node_id, (degree.get(link.target_node_id) || 0) + 1)
   }
-  return total
+  return degree
 }
 
 /**
@@ -49,6 +50,7 @@ export function layoutTopologyByRole(
   const maxColumns = Math.max(4, options.maxColumns ?? 14)
   const visible = nodes.filter((node) => node.on_canvas !== false)
   const layers = new Map<number, NetworkNode[]>()
+  const degree = buildDegreeMap(links)
 
   for (const node of visible) {
     const role = resolveNodeFabricRole(node)
@@ -77,7 +79,7 @@ export function layoutTopologyByRole(
     let colCount = 0
     for (const [group, members] of orderedGroups) {
       members.sort((a, b) => {
-        const weight = connectedWeight(b, links) - connectedWeight(a, links)
+        const weight = (degree.get(b.id) || 0) - (degree.get(a.id) || 0)
         return weight || a.name.localeCompare(b.name, 'zh-CN')
       })
       if (colCount && colCount + members.length > maxColumns) {

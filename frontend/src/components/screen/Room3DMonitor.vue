@@ -30,8 +30,8 @@ const emit = defineEmits<{
       roomId: string
       roomTitle: string
       deviceTotal: number
-      danger: number
-      fault: number
+      onlineDevices: number
+      appPartitions: number
       occupied: number
       total: number
       avgUtil: number
@@ -597,19 +597,23 @@ function emitStats() {
   const data = layout.value
   const racks = data?.racks || []
   const deviceTotal = racks.reduce((s, r) => s + (r.device_count || 0), 0)
-  const danger = racks.filter((r) => (r.utilization || 0) >= 85).length
-  const fault = racks.filter((r) => {
-    const st = (r.status || '').toLowerCase()
-    return st.includes('fault') || st.includes('error') || st.includes('故障') || st === 'alarm'
-  }).length
+  const onlineDevices = racks.reduce(
+    (s, r) => s + (r.online_device_count ?? r.device_count ?? 0),
+    0,
+  )
+  const usageSet = new Set<string>()
+  for (const r of racks) {
+    const usage = (r.app_usage || '').trim()
+    if (usage) usageSet.add(usage)
+  }
   emit('stats', {
     roomId: selectedRoomId.value,
     roomTitle:
       [data?.datacenter_name, data?.location, data?.room_name].filter(Boolean).join(' / ') ||
       '3D 机房仿真',
     deviceTotal,
-    danger,
-    fault,
+    onlineDevices,
+    appPartitions: usageSet.size,
     occupied: layoutStats.value.occupied,
     total: layoutStats.value.total,
     avgUtil: layoutStats.value.avgUtil,

@@ -64,17 +64,48 @@ def test_one_u_devices_with_gap():
     assert u == 5
 
 
-def test_pick_mount_u_exact_respects_gap():
-    occupied = _block(45, 1)
+def test_pick_mount_u_exact_allows_adjacent_when_free():
+    """指定 U 空闲即可上架，不因下方邻位已有设备而拒绝（顶部 U44 场景）。"""
+    occupied = _block(43, 1)
     u = pick_mount_u(
-        total_u=49,
+        total_u=44,
         height_u=1,
         occupied_map=occupied,
-        start_u=46,
+        start_u=44,
         gap_u=1,
         prefer_exact=True,
     )
-    assert u is None
+    assert u == 44
+
+
+def test_top_u44_free_with_u43_occupied_and_gap():
+    """44U 机柜：U43 有设备、U44 空闲、间隔 1 —— 仍应能上到 U44。"""
+    occupied = _block(43, 1)
+    u = pick_mount_u(
+        total_u=44,
+        height_u=1,
+        occupied_map=occupied,
+        start_u=44,
+        gap_u=1,
+        prefer_exact=False,
+        direction="down",
+    )
+    assert u == 44
+
+
+def test_downward_from_u44_with_gap_places_second_at_u42():
+    """顶置后向下：U44 已占用，间隔 1、1U → 下一台 U42。"""
+    occupied = _block(44, 1)
+    u = pick_mount_u(
+        total_u=44,
+        height_u=1,
+        occupied_map=occupied,
+        start_u=44,
+        gap_u=1,
+        prefer_exact=False,
+        direction="down",
+    )
+    assert u == 42
 
 
 def test_find_first_available_basic():

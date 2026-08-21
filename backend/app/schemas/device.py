@@ -674,6 +674,10 @@ class DeviceCreate(BaseModel):
     weight: Decimal | None = None
     power: Decimal | None = None
     description: str | None = None
+    project_scope: str | None = Field(default=None, max_length=200, description="项目归属")
+    project_app: str | None = Field(default=None, max_length=200, description="项目应用")
+    warranty_years: int | None = Field(default=None, ge=0, le=50, description="维保年限")
+    mounted_at: datetime | None = Field(default=None, description="上架时间")
     # IP 分配：业务 / 带外 / 虚拟（虚拟 IP 可被多台设备共用）
     system_ip_id: str | None = Field(default=None, description="业务 IP 记录 ID（须空闲）")
     bmc_ip_id: str | None = Field(default=None, description="带外管理 IP 记录 ID（须空闲）")
@@ -698,6 +702,10 @@ class DeviceUpdate(BaseModel):
     power: Decimal | None = None
     status: str | None = None
     description: str | None = None
+    project_scope: str | None = Field(default=None, max_length=200)
+    project_app: str | None = Field(default=None, max_length=200)
+    warranty_years: int | None = Field(default=None, ge=0, le=50)
+    mounted_at: datetime | None = None
     system_ip_id: str | None = Field(default=None, description="业务 IP；传入空串表示清除")
     bmc_ip_id: str | None = Field(default=None, description="带外 IP；传入空串表示清除")
     vip_ip_id: str | None = Field(default=None, description="虚拟 IP；传入空串表示清除")
@@ -742,6 +750,10 @@ class DeviceResponse(BaseModel):
     power: Decimal | None
     status: str
     description: str | None
+    project_scope: str | None = None
+    project_app: str | None = None
+    warranty_years: int | None = None
+    mounted_at: datetime | None = None
     port_layout: dict | None = None
     network_kind: str | None = None
     panel_apply_device_name: str | None = None
@@ -840,7 +852,7 @@ class BatchMountRequest(BaseModel):
         default=1,
         ge=1,
         le=200,
-        description="每柜同类型设备上限（含已上架；本批可上架数=上限-已有同类型数）",
+        description="本批每柜最多上架台数（不含柜内历史已上架设备；各柜轮询优先落起始 U）",
     )
     start_u: int = Field(default=1, ge=1, le=100, description="每柜上架起始 U 位")
     gap_u: int = Field(default=1, ge=0, le=10, description="设备间空闲 U 间隔，默认 1U")

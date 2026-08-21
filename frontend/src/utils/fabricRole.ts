@@ -124,7 +124,18 @@ export function normalizePortPurposeAlias(
   ) {
     return kind === 'server' || kind === 'security' ? 'SERVER' : 'DOWNLINK'
   }
-  if (upper.includes('MGMT') || upper.includes('BMC') || compact.includes('管理')) return 'MGMT'
+  if (
+    upper.includes('MGMT') ||
+    upper.includes('BMC') ||
+    upper.includes('IPMI') ||
+    compact.includes('管理') ||
+    compact === 'MGT' ||
+    compact.startsWith('MGT') ||
+    compact.includes('ETHMGMT') ||
+    compact.includes('ETH管理')
+  ) {
+    return 'MGMT'
+  }
   if (upper.includes('SERVER') || compact.includes('服务器')) return 'SERVER'
   return upper
 }
@@ -147,7 +158,9 @@ export function resolvePortPurpose(
   if (hay.includes('DOWNLINK') || hay.includes('下联') || hay.includes('业务接口')) {
     return kind === 'server' || kind === 'security' ? 'SERVER' : 'DOWNLINK'
   }
-  if (hay.includes('MGMT') || hay.includes('管理')) return 'MGMT'
+  if (hay.includes('MGMT') || hay.includes('MGT') || hay.includes('BMC') || hay.includes('IPMI') || hay.includes('管理')) {
+    return 'MGMT'
+  }
   if (hay.includes('SERVER') || hay.includes('业务') || hay.includes('DOWN')) return 'SERVER'
   return null
 }

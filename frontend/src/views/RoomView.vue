@@ -64,6 +64,8 @@ const CREATE_STEPS = [
   { title: '机房轮廓' },
   { title: '机柜编排' },
   { title: '编号设置' },
+  { title: '应用模板' },
+  { title: '确认创建' },
 ]
 
 function attributeLabel(value: string) {
@@ -86,6 +88,7 @@ const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 const keyword = ref('')
 const dialogVisible = ref(false)
 const detailVisible = ref(false)
+const detailLoading = ref(false)
 const detailRow = ref<Room | null>(null)
 const rackInfoVisible = ref(false)
 const rackInfoLoading = ref(false)
@@ -293,6 +296,62 @@ const form = reactive({
   /** 与 slot_codes 同形：rack=机柜位，pillar=立柱（不占编号） */
   slot_kinds: [] as Array<Array<'rack' | 'pillar'>>,
   description: '',
+  /** 新建时选用的机柜模板；空表示创建后暂不应用 */
+  template_id: '',
+  fill_empty_slots: true,
+})
+
+const createSaving = ref(false)
+
+const selectedCreateTemplate = computed(
+  () => templates.value.find((t) => t.id === form.template_id) || null,
+)
+
+const plannedRackSlots = computed(() => {
+  if (form.code_mode === 'custom' && form.slot_kinds.length) {
+    return form.slot_kinds.flat().filter((k) => k === 'rack').length
+  }
+  return rackCapacity.value
+})
+
+const createSummaryRows = computed(() => {
+  const dc = datacenters.value.find((d) => d.id === form.datacenter_id)
+  const tpl = selectedCreateTemplate.value
+  return [
+    { label: '数据中心', value: dc ? datacenterLabel(dc) : '—' },
+    { label: '机房楼号', value: form.building_no || '—' },
+    { label: '机房门牌号', value: form.room_no || '—' },
+    { label: '机房编号', value: form.code.trim() || '（自动生成 CR…）' },
+    {
+      label: '机房属性',
+      value: form.attributes.map(attributeLabel).join('、') || '—',
+    },
+    { label: '重要性', value: importanceLabel(form.importance) },
+    { label: '机房轮廓', value: `${form.outline_cols} 列 × ${form.outline_rows} 排` },
+    { label: '机柜编排', value: layoutSummary.value },
+    {
+      label: '编号方式',
+      value: form.code_mode === 'custom' ? '手动编号' : '自动编号',
+    },
+    { label: '编号前缀', value: form.code_prefix || '—' },
+    { label: '编号预览', value: codePreview.value },
+    { label: '计划机柜位', value: `${plannedRackSlots.value} 个` },
+    {
+      label: '机柜模板',
+      value: tpl
+        ? `${tpl.name}（${tpl.total_u}U · ${tpl.width}×${tpl.depth}）`
+        : '暂不应用（可稍后在布局中应用）',
+    },
+    {
+      label: '建柜策略',
+      value: !tpl
+        ? '—'
+        : form.fill_empty_slots
+          ? '按编号布局自动建柜并应用模板'
+          : '仅关联模板，不自动建柜',
+    },
+    { label: '描述', value: form.description || '—' },
+  ]
 })
 
 const activeLayout = computed(() =>
@@ -1039,6 +1098,9 @@ function openCreate() {
   form.slot_kinds = buildSlotKinds(activeLayout.value, false)
   regenerateCodes(false)
   form.description = ''
+  form.template_id = ''
+  form.fill_empty_slots = true
+  void refreshTemplates()
   dialogVisible.value = true
 }
 
@@ -1123,8 +1185,25 @@ function validateStep(step: number): boolean {
       ElMessage.warning(rowPrefixResult.value.message)
       return false
     }
+    if (form.code_mode === 'custom') {
+      ensureSlotMatricesAligned()
+      for (let i = 0; i < form.slot_kinds.length; i += 1) {
+        if (rowRackCount(i) < 1) {
+          ElMessage.warning(`第 ${i + 1} 排至少保留一个机柜编号位`)
+          return false
+        }
+      }
+      const missing = form.slot_kinds.some((kinds, ri) =>
+        kinds.some((kind, ci) => kind === 'rack' && !String(form.slot_codes[ri]?.[ci] || '').trim()),
+      )
+      if (missing) {
+        ElMessage.warning('请填写全部机柜编号（立柱空白框可留空）')
+        return false
+      }
+    }
     return true
   }
+  // step 4 应用模板：可选；step 5 摘要确认
   return true
 }
 
@@ -1253,6 +1332,7 @@ async function handleSubmit() {
         await reloadLayoutRacks()
       }
     } else {
+      createSaving.value = true
       const created = await createRoomQuick({
         datacenter_id: form.datacenter_id,
         building_no: form.building_no,
@@ -1264,7 +1344,32 @@ async function handleSubmit() {
         ...codePayload,
         ...pillarPayload,
       })
-      ElMessage.success('创建成功')
+
+      let templateMsg = ''
+      if (form.template_id) {
+        try {
+          const result = await applyTemplateToRoom(
+            form.template_id,
+            created.id,
+            form.fill_empty_slots,
+          )
+          templateMsg =
+            `，模板应用：更新 ${result.updated}、新建 ${result.created}` +
+            (result.skipped ? `、跳过 ${result.skipped}` : '')
+          if (result.errors?.length) {
+            ElMessage.warning(result.errors.slice(0, 3).join('；'))
+          }
+        } catch (error: unknown) {
+          const err = error as { response?: { data?: { message?: string } }; message?: string }
+          ElMessage.warning(
+            err.response?.data?.message ||
+              err.message ||
+              '机房已创建，但应用模板失败，可稍后在布局中应用',
+          )
+        }
+      }
+
+      ElMessage.success(`创建成功${templateMsg}`)
       dialogVisible.value = false
       await loadData()
       await openLayout(created)
@@ -1281,6 +1386,8 @@ async function handleSubmit() {
     const detailMsg = details?.map((e) => e.msg).filter(Boolean).join('；')
     const message = detailMsg || err.response?.data?.message || err.message || '操作失败'
     ElMessage.error(message)
+  } finally {
+    createSaving.value = false
   }
 }
 
@@ -1295,24 +1402,46 @@ function rowIndex(index: number) {
 }
 
 async function openDetail(row: Room) {
-  detailRow.value = row
+  detailRow.value = { ...row }
   detailVisible.value = true
+  detailLoading.value = true
   try {
     const [latest, rackPage] = await Promise.all([
       getRoom(row.id).catch(() => null),
-      listRacks({ room_id: row.id, page: 1, page_size: 500 }),
+      listRacks({ room_id: row.id, page: 1, page_size: 500 }).catch(() => null),
     ])
+    const base = latest || row
     const rackItems = rackPage?.items || []
+    const rackTotal = Number(rackPage?.pagination?.total)
+    const rackCountFromList = Number.isFinite(rackTotal) && rackTotal > 0
+      ? rackTotal
+      : rackItems.length
     const rackDeviceTotal = rackItems.reduce(
       (sum, rack) => sum + (Number(rack.device_count) || 0),
       0,
     )
-    const base = latest || row
-    const apiCount = Number(base.device_count) || 0
+    const rackPowerTotal = rackItems.reduce(
+      (sum, rack) => sum + (Number(rack.total_power) || 0),
+      0,
+    )
+    const usedFromRacks = rackItems.filter(
+      (rack) => (Number(rack.device_count) || 0) > 0 || (Number(rack.occupied_u) || 0) > 0,
+    ).length
+
+    const rackCount = Math.max(Number(base.rack_count) || 0, rackCountFromList)
+    const deviceCount = Math.max(Number(base.device_count) || 0, rackDeviceTotal)
+    const totalPower = Math.max(Number(base.total_power) || 0, rackPowerTotal)
+    const usedCount = Math.max(Number(base.used_count) || 0, usedFromRacks)
+    const freeCount = Math.max(0, rackCount - usedCount)
+
     detailRow.value = {
       ...base,
-      // 打开详情时按机柜汇总已上架设备，保证与布局图一致
-      device_count: rackItems.length ? rackDeviceTotal : apiCount,
+      rack_count: rackCount,
+      used_count: usedCount,
+      free_count: freeCount,
+      device_count: deviceCount,
+      total_power: totalPower,
+      total_u: Math.max(Number(base.total_u) || 0, 0),
     }
     const idx = tableData.value.findIndex((r) => r.id === row.id)
     if (idx >= 0) {
@@ -1323,6 +1452,8 @@ async function openDetail(row: Room) {
     }
   } catch {
     /* 使用列表缓存数据 */
+  } finally {
+    detailLoading.value = false
   }
 }
 
@@ -1338,6 +1469,7 @@ function roomDetailFields(row: Room) {
     { label: '已分配使用', value: String(row.used_count ?? 0) },
     { label: '空机柜数量', value: String(row.free_count ?? 0) },
     { label: '设备总数', value: String(row.device_count ?? 0) },
+    { label: 'U位容量', value: `${row.total_u ?? 0} U` },
     { label: '设备总功率', value: formatPower(row.total_power) },
   ]
 }
@@ -1883,6 +2015,18 @@ function contractLabel(d: Device) {
   return parts.length ? parts.join(' / ') : '—'
 }
 
+function deviceRackCodeLabel(d: Device) {
+  return d.rack_code?.trim() || '—'
+}
+
+function deviceUPositionLabel(d: Device) {
+  if (d.u_position == null || Number.isNaN(Number(d.u_position))) return '—'
+  const start = Number(d.u_position)
+  const height = Math.max(1, Number(d.height_u) || 1)
+  if (height <= 1) return `U${start}`
+  return `U${start}-U${start + height - 1}`
+}
+
 async function openMountedDeviceDetail(deviceId?: string) {
   const id = deviceId || deviceCtxMenu.deviceId
   hideDeviceCtxMenu()
@@ -1979,7 +2123,7 @@ watch(
   <div class="page">
     <section class="hero">
       <div class="hero-copy">
-        <h2>机房管理</h2>
+        <h2>中心机房管理</h2>
         <p v-if="hasDcFilter">
           当前数据中心：
           <strong>{{ filteredDatacenter ? filteredDatacenter.name : '已指定' }}</strong>
@@ -1991,7 +2135,7 @@ watch(
         </p>
       </div>
       <div class="hero-actions">
-        <el-button @click="$router.push('/datacenters')">数据中心</el-button>
+        <el-button @click="$router.push('/datacenters')">数据中心管理</el-button>
         <el-button v-if="hasDcFilter" @click="clearDatacenterFilter">显示全部机房</el-button>
         <el-button @click="$router.push('/rooms/simulate')">3D 仿真</el-button>
         <el-button v-if="canCreate" type="primary" @click="openCreate">新建机房</el-button>
@@ -2163,15 +2307,17 @@ watch(
     </el-card>
 
     <el-dialog v-model="detailVisible" title="查看详细信息" width="560px">
-      <el-descriptions v-if="detailRow" :column="1" border>
-        <el-descriptions-item
-          v-for="item in roomDetailFields(detailRow)"
-          :key="item.label"
-          :label="item.label"
-        >
-          <span :class="{ 'mono-id': item.label === '机房ID(唯一)' }">{{ item.value }}</span>
-        </el-descriptions-item>
-      </el-descriptions>
+      <div v-loading="detailLoading">
+        <el-descriptions v-if="detailRow" :column="1" border>
+          <el-descriptions-item
+            v-for="item in roomDetailFields(detailRow)"
+            :key="item.label"
+            :label="item.label"
+          >
+            <span :class="{ 'mono-id': item.label === '机房ID(唯一)' }">{{ item.value }}</span>
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
       <template #footer>
         <el-button type="primary" @click="detailVisible = false">关闭</el-button>
       </template>
@@ -2445,6 +2591,7 @@ watch(
                       :total-power="layoutDetails[slot.rack.id].totalPower"
                       :visual-style="(slot.rack.visual_style as any) || 'classic'"
                       compact
+                      :scale="0.8"
                       @device-contextmenu="(p) => onMountedDeviceContextMenu(p, slot.rack)"
                     />
                     <div v-else class="rack-cell-loading">加载中…</div>
@@ -2555,6 +2702,12 @@ watch(
               <td colspan="3">{{ deviceDetail.vip || '—' }}</td>
             </tr>
             <tr>
+              <th>机柜号</th>
+              <td>{{ deviceRackCodeLabel(deviceDetail) }}</td>
+              <th>U位置</th>
+              <td>{{ deviceUPositionLabel(deviceDetail) }}</td>
+            </tr>
+            <tr>
               <th>厂商</th>
               <td>{{ deviceDetail.manufacturer_name || '—' }}</td>
               <th>合同信息</th>
@@ -2646,7 +2799,7 @@ watch(
     <el-dialog
       v-model="dialogVisible"
       :title="editingId ? '编辑机房' : '新建机房'"
-      :width="editingId ? '760px' : '920px'"
+      :width="editingId ? '760px' : '980px'"
       class="room-form-dialog"
       destroy-on-close
     >
@@ -3146,12 +3299,80 @@ watch(
             <el-input :model-value="codePreview" disabled />
           </el-form-item>
         </section>
+
+        <!-- Step 5: 应用机柜模板 -->
+        <section v-show="createStep === 4" class="form-section">
+          <el-form-item label="机柜模板">
+            <el-select
+              v-model="form.template_id"
+              clearable
+              filterable
+              placeholder="可选：选择模板，创建后自动建柜"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="t in templates"
+                :key="t.id"
+                :label="`${t.name}（${t.total_u}U · ${t.width}×${t.depth}）`"
+                :value="t.id"
+              />
+            </el-select>
+            <div class="field-hint">
+              可不选。选中后将按当前编号布局在有效机柜位建柜并套用规格（跳过立柱）。
+            </div>
+          </el-form-item>
+          <el-form-item v-if="form.template_id" label="建柜策略">
+            <el-checkbox v-model="form.fill_empty_slots">
+              按机房布局自动建柜（推荐）
+            </el-checkbox>
+            <div class="field-hint">
+              勾选：按编号位创建机柜并应用模板；不勾选：仅创建空机房，稍后在布局中再建柜。
+            </div>
+          </el-form-item>
+          <el-form-item v-if="selectedCreateTemplate" label="模板摘要">
+            <div class="create-template-card">
+              <div><strong>{{ selectedCreateTemplate.name }}</strong>（{{ selectedCreateTemplate.code }}）</div>
+              <div>
+                U位 {{ selectedCreateTemplate.total_u }} · 宽深
+                {{ selectedCreateTemplate.width }}×{{ selectedCreateTemplate.depth }} · 样式
+                {{ rackStyleLabel(selectedCreateTemplate.visual_style) }}
+              </div>
+              <div v-if="selectedCreateTemplate.description" class="field-hint">
+                {{ selectedCreateTemplate.description }}
+              </div>
+              <div class="field-hint">预计建柜约 {{ plannedRackSlots }} 台</div>
+            </div>
+          </el-form-item>
+          <el-empty
+            v-if="!templates.length"
+            description="暂无可用机柜模板，可跳过此步，创建后在布局中应用"
+            :image-size="72"
+          />
+        </section>
+
+        <!-- Step 6: 确认摘要 -->
+        <section v-show="createStep === 5" class="form-section">
+          <div class="field-hint" style="margin-bottom: 12px">
+            请核对以下信息，确认无误后点击「确认创建」。
+          </div>
+          <el-descriptions :column="1" border class="create-summary">
+            <el-descriptions-item
+              v-for="item in createSummaryRows"
+              :key="item.label"
+              :label="item.label"
+            >
+              {{ item.value }}
+            </el-descriptions-item>
+          </el-descriptions>
+        </section>
       </el-form>
 
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <template v-if="!editingId">
-          <el-button v-if="createStep > 0" @click="prevCreateStep">上一步</el-button>
+          <el-button v-if="createStep > 0" :disabled="createSaving" @click="prevCreateStep">
+            上一步
+          </el-button>
           <el-button
             v-if="createStep < CREATE_STEPS.length - 1"
             type="primary"
@@ -3159,7 +3380,14 @@ watch(
           >
             下一步
           </el-button>
-          <el-button v-else type="primary" @click="handleSubmit">创建</el-button>
+          <el-button
+            v-else
+            type="primary"
+            :loading="createSaving"
+            @click="handleSubmit"
+          >
+            确认创建
+          </el-button>
         </template>
         <el-button v-else type="primary" @click="handleSubmit">保存</el-button>
       </template>
@@ -4025,10 +4253,10 @@ watch(
 }
 
 .rack-cell-full {
-  flex: 0 0 420px;
-  width: 420px;
-  min-width: 420px;
-  min-height: 120px;
+  flex: 0 0 336px;
+  width: 336px;
+  min-width: 336px;
+  min-height: 96px;
 }
 
 .rack-cell-full.empty {
@@ -4056,6 +4284,21 @@ watch(
 
 .create-steps {
   margin-bottom: 18px;
+}
+
+.create-template-card {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid #dbe7f3;
+  background: #f7fbff;
+  line-height: 1.6;
+  color: #334155;
+}
+
+.create-summary :deep(.el-descriptions__label) {
+  width: 120px;
+  color: #64748b;
 }
 
 .form-section + .form-section {

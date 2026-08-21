@@ -11,6 +11,7 @@ import {
 } from '@/utils/wiringTypes'
 import { derivePortMedia } from '@/utils/wiringDeviceType'
 import {
+  isBmcPort,
   mediaOf,
   portSpeedLabel,
   speedRank,
@@ -62,6 +63,7 @@ function matchesPurpose(p: RulePortView, purpose: string | null | undefined): bo
   const isDedicatedUplinkLabel = /^U\d+/i.test(label)
 
   if (want === 'DOWNLINK') {
+    if (isBmcPort(p.port)) return false
     if (role === 'PEER' || role === 'DAD' || role === 'MGMT') return false
     // 专用上联区（U1/U2…）不作下联
     if (role === 'UPLINK' && isDedicatedUplinkLabel) return false
@@ -73,7 +75,8 @@ function matchesPurpose(p: RulePortView, purpose: string | null | undefined): bo
     return false
   }
   if (want === 'SERVER') {
-    // 业务 NIC：容忍误标 UPLINK（服务器口常见历史脏数据）
+    // 业务 NIC：排除与 BMC/IPMI/交换机 MGMT 同功能的带外管理口
+    if (isBmcPort(p.port)) return false
     if (label.toUpperCase().includes('IPMI') || label.toUpperCase().includes('BMC')) return false
     if (pt !== '1g' && pt !== '10g' && pt !== '25g') return false
     if (role === 'MGMT' || role === 'PEER' || role === 'DAD') return false
@@ -83,16 +86,17 @@ function matchesPurpose(p: RulePortView, purpose: string | null | undefined): bo
     return role === 'UPLINK' || pt === '40_100g' || isDedicatedUplinkLabel
   }
   if (want === 'MGMT') {
+    // 与 isBmcPort 对齐：交换机 MGMT / 服务器 BMC·IPMI 同属管理口
+    if (isBmcPort(p.port)) return true
     const lab = label.toUpperCase()
-    if (
+    return (
       pt === 'bmc' ||
       role === 'MGMT' ||
       lab.includes('IPMI') ||
-      lab.includes('BMC')
-    ) {
-      return true
-    }
-    return (role === 'DOWNLINK' || !role) && pt === '1g'
+      lab.includes('BMC') ||
+      lab.includes('MGMT') ||
+      lab.startsWith('MGT')
+    )
   }
   if (want === 'PEER' || want === 'DAD') {
     return role === want || (!!p.port.reserved && role === want)

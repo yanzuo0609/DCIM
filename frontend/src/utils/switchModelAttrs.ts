@@ -488,7 +488,7 @@ export function systemPortId(kind: SwitchSystemPortKind, portIndex: number) {
 
 export function systemPortCode(kind: SwitchSystemPortKind, portIndex: number) {
   const prefix =
-    kind === 'eth_mgmt' ? 'MGT' : kind === 'console' ? 'CON' : kind === 'usb' ? 'USB' : 'STACK'
+    kind === 'eth_mgmt' ? 'MGMT' : kind === 'console' ? 'CON' : kind === 'usb' ? 'USB' : 'STACK'
   return `${prefix}${portIndex + 1}`
 }
 

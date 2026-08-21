@@ -94,6 +94,10 @@ export interface RoomMonitorRack {
   occupied_u: number
   utilization: number
   device_count: number
+  /** 已上架（mounted）设备数，视为在线 */
+  online_device_count?: number
+  /** 机柜用途 / 应用分区标签 */
+  app_usage?: string | null
   status: string
 }
 

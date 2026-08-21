@@ -25,6 +25,7 @@ import {
   type DeviceContractSummary,
   type PriceUnit,
 } from '@/api/contract'
+import { syncParamProfilesFromContracts } from '@/api/device'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -430,6 +431,17 @@ async function handleSubmit() {
     } catch (error: unknown) {
       ElMessage.warning(extractErrorMessage(error, '合同已保存，但刷新列表失败'))
     }
+    // 合同明细变更后，按设备名称同步关联设备参数
+    try {
+      const syncResult = await syncParamProfilesFromContracts()
+      if (syncResult.created > 0 || syncResult.updated > 0) {
+        ElMessage.success(
+          `已同步设备参数：新建 ${syncResult.created}，对齐 ${syncResult.updated}`,
+        )
+      }
+    } catch {
+      /* 无权限或参数模块异常时不阻断合同保存 */
+    }
   } catch (error: unknown) {
     ElMessage.error(extractErrorMessage(error, '保存失败'))
   } finally {
@@ -528,6 +540,13 @@ onMounted(() => {
       size="small"
       class="contract-table"
     >
+      <el-table-column
+        type="index"
+        label="序号"
+        width="64"
+        align="center"
+        :index="(i: number) => (pagination.page - 1) * pagination.page_size + i + 1"
+      />
       <el-table-column prop="contract_no" label="合同编号" min-width="150" show-overflow-tooltip />
       <el-table-column prop="project_no" label="项目编号" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">{{ row.project_no || '—' }}</template>

@@ -48,18 +48,28 @@ export function buildGroupGlyphs(
 ): CanvasGroupGlyph[] {
   const onCanvas = nodes.filter((n) => n.on_canvas !== false)
   const byGroup = new Map<string, NetworkNode[]>()
+  const nodePrimaryGroup = new Map<string, string>()
   for (const n of onCanvas) {
     for (const g of canvasGroupNamesOf(n)) {
       const list = byGroup.get(g) || []
       list.push(n)
       byGroup.set(g, list)
+      if (!nodePrimaryGroup.has(n.id)) nodePrimaryGroup.set(n.id, g)
     }
+  }
+
+  // 一次扫描连线统计组内边数，避免 O(groups × links)
+  const intraByGroup = new Map<string, number>()
+  for (const l of links) {
+    const a = nodePrimaryGroup.get(l.source_node_id)
+    const b = nodePrimaryGroup.get(l.target_node_id)
+    if (!a || a !== b) continue
+    intraByGroup.set(a, (intraByGroup.get(a) || 0) + 1)
   }
 
   const glyphs: CanvasGroupGlyph[] = []
   for (const [name, members] of byGroup) {
     const ids = members.map((m) => m.id)
-    const idSet = new Set(ids)
     let sx = 0
     let sy = 0
     for (const m of members) {
@@ -67,22 +77,17 @@ export function buildGroupGlyphs(
       sy += m.pos_y
     }
     const stored = positions?.[name]
-    const intraLinkCount = links.filter(
-      (l) => idSet.has(l.source_node_id) && idSet.has(l.target_node_id),
-    ).length
+    const role = roleByGroup?.get(name) ?? (members[0]?.network_role as FabricRole) ?? null
     glyphs.push({
       id: name,
       name,
       pos_x: stored ? stored.x : Math.round(sx / members.length),
       pos_y: stored ? stored.y : Math.round(sy / members.length),
       count: members.length,
-      role: roleByGroup?.get(name) ?? (members[0]?.network_role as FabricRole) ?? null,
-      kind: resolveDeviceGroupKind({
-        role: roleByGroup?.get(name) ?? (members[0]?.network_role as FabricRole) ?? null,
-        members,
-      }),
+      role,
+      kind: resolveDeviceGroupKind({ role, members }),
       memberIds: ids,
-      intraLinkCount,
+      intraLinkCount: intraByGroup.get(name) || 0,
     })
   }
   return glyphs.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))

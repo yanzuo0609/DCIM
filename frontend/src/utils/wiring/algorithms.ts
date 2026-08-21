@@ -123,6 +123,7 @@ function rolePred(role: string | string[]): (p: RulePortView) => boolean {
     const isDedicatedUplinkLabel = /^U\d+/i.test(label)
 
     if (set.has('DOWNLINK')) {
+      if (isBmcPort(p.port)) return false
       if (r === 'PEER' || r === 'DAD' || r === 'MGMT') return false
       if (r === 'UPLINK' && isDedicatedUplinkLabel) return false
       if (r === 'DOWNLINK' || r === 'SERVER' || !r) {

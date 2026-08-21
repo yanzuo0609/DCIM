@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import NetworkModelLibraryPane from '@/components/NetworkModelLibraryPane.vue'
@@ -48,7 +48,7 @@ import {
   normalizeLineStyle,
   type TopologyLineStyle,
 } from '@/utils/topologyLinkStyle'
-import { applyWiringRule, previewWiringPairs, previewWiringScenario, listFreePortOptions, type ProposedPair } from '@/utils/wiringRuleApply'
+import { applyWiringRule, previewWiringPairs, previewWiringScenario, listFreePortOptions, type ProposedPair, type WiringPreviewResult } from '@/utils/wiringRuleApply'
 import {
   ALLOCATION_MODE_OPTIONS,
   CONNECTION_TYPE_OPTIONS,
@@ -436,7 +436,25 @@ const detectedWiringScenario = computed(() => {
   } as NetworkWiringRule
   return previewWiringScenario(rule, nodes.value)
 })
-const modelMatchedPairPreview = computed(() => {
+
+function emptyPairPreview(): WiringPreviewResult {
+  return {
+    scenario: 'CUSTOM',
+    scenario_label: '',
+    pairs: [],
+    issues: [],
+    matched_sources: 0,
+    matched_targets: 0,
+    ok: true,
+  }
+}
+
+/** 端口对预览改为防抖刷新，避免规则分类/切换手动时同步重算卡死 */
+const modelMatchedPairPreview = shallowRef<WiringPreviewResult>(emptyPairPreview())
+let pairPreviewTimer: ReturnType<typeof setTimeout> | null = null
+let pairPreviewSeq = 0
+
+function computeModelMatchedPairPreview(): WiringPreviewResult {
   const rule = {
     id: wiringEditingId.value || 'model-match-preview',
     topology_id: currentId.value || '',
@@ -448,10 +466,53 @@ const modelMatchedPairPreview = computed(() => {
     config: { ...wiringForm.config, pairs: [] },
   } as NetworkWiringRule
   return previewWiringPairs(rule, nodes.value, links.value)
-})
+}
+
+function scheduleModelMatchedPairPreview(delay = 180) {
+  if (pairPreviewTimer) clearTimeout(pairPreviewTimer)
+  const seq = ++pairPreviewSeq
+  pairPreviewTimer = setTimeout(() => {
+    pairPreviewTimer = null
+    void nextTick(() => {
+      if (seq !== pairPreviewSeq) return
+      try {
+        modelMatchedPairPreview.value = computeModelMatchedPairPreview()
+      } catch {
+        modelMatchedPairPreview.value = emptyPairPreview()
+      }
+    })
+  }, delay)
+}
+
 const previewSourceCount = computed(() => previewSourceNodes.value.length)
 const previewTargetCount = computed(() => previewTargetNodes.value.length)
 
+watch(
+  () =>
+    [
+      String(wiringForm.config.allocation_mode || ''),
+      String(wiringForm.config.rule_category || ''),
+      String(wiringForm.config.connection_type || ''),
+      String(wiringForm.config.source_role || ''),
+      String(wiringForm.config.target_role || ''),
+      String(wiringForm.config.link_count || ''),
+      String(wiringForm.config.speed || ''),
+      String(wiringForm.config.port_speed || ''),
+      String(wiringForm.config.media || ''),
+      (wiringForm.config.source_groups || []).join(','),
+      (wiringForm.config.target_groups || []).join(','),
+      (wiringForm.config.source_node_ids || []).join(','),
+      (wiringForm.config.target_node_ids || []).join(','),
+      (wiringForm.config.source_roles || []).join(','),
+      (wiringForm.config.target_roles || []).join(','),
+      previewSourceCount.value,
+      previewTargetCount.value,
+      links.value.length,
+      nodes.value.length,
+    ].join('|'),
+  () => scheduleModelMatchedPairPreview(),
+  { flush: 'post' },
+)
 const isManualAlloc = computed(
   () => String(wiringForm.config.allocation_mode || '').toUpperCase() === 'MANUAL',
 )
@@ -627,16 +688,19 @@ function onAllocationModeChange() {
   wiringForm.mode = mode === 'MANUAL' ? 'manual' : 'sequential'
   if (mode === 'AUTO') {
     applyAutomaticRuleCategory()
+    scheduleModelMatchedPairPreview(60)
     return
   }
   if (mode === 'MANUAL') {
-    wiringForm.config.source_roles = []
-    wiringForm.config.target_roles = []
-    wiringForm.config.source_device_types = []
-    wiringForm.config.target_device_types = []
-    // 手动定义规则：只填参数，由系统自动配对；可选 pairs 作为覆盖
+    // 按当前规则分类回填本端/对端类型、速率、介质（不再清空类型）
+    applyRuleCategoryEndpointDefaults()
     if (!Array.isArray(wiringForm.config.pairs)) wiringForm.config.pairs = []
-    void hydrateWiringLocationOptions()
+    // 先让手动表单挂载完成，再拉机房机柜与预览，减轻切换卡顿
+    void nextTick(async () => {
+      await hydrateWiringLocationOptions()
+      onDeviceMatchChange()
+      scheduleModelMatchedPairPreview(120)
+    })
   }
 }
 
@@ -686,7 +750,7 @@ function pruneManualPairsAgainstDevices() {
   if (!Array.isArray(wiringForm.config.pairs)) return
   const srcIds = new Set(previewSourceNodes.value.map((n) => n.id))
   const tgtIds = new Set(previewTargetNodes.value.map((n) => n.id))
-  wiringForm.config.pairs = wiringForm.config.pairs.filter((p) => {
+  const next = wiringForm.config.pairs.filter((p) => {
     if (!p.source_node_id || !p.target_node_id) return false
     if (!srcIds.has(p.source_node_id) || !tgtIds.has(p.target_node_id)) return false
     // 组内：禁止自己连自己
@@ -699,6 +763,9 @@ function pruneManualPairsAgainstDevices() {
     }
     return true
   })
+  if (next.length !== wiringForm.config.pairs.length) {
+    wiringForm.config.pairs = next
+  }
   // 端口若已不属于该设备空闲口则清空口号，留给用户重选
   for (const p of wiringForm.config.pairs) {
     const srcPorts = portsForNodeInForm(p.source_node_id).map((o) => o.id)
@@ -781,10 +848,29 @@ const isIntraInterconnect = computed(
 function syncIntraGroupTargets() {
   if (!peerSectionEnabled.value || !isIntraInterconnect.value) return
   const cfg = wiringForm.config
-  cfg.target_groups = [...(cfg.source_groups || [])]
-  cfg.target_group = cfg.source_groups?.[0] ?? null
-  cfg.target_role = cfg.source_role
-  cfg.target_node_ids = [...(cfg.source_node_ids || [])]
+  const nextGroups = cfg.source_groups || []
+  const nextNodes = cfg.source_node_ids || []
+  const nextGroup = nextGroups[0] ?? null
+  const nextRole = cfg.source_role
+  const prevGroups = cfg.target_groups || []
+  const prevNodes = cfg.target_node_ids || []
+  const sameGroups =
+    prevGroups.length === nextGroups.length && prevGroups.every((g, i) => g === nextGroups[i])
+  const sameNodes =
+    prevNodes.length === nextNodes.length && prevNodes.every((id, i) => id === nextNodes[i])
+  // 内容未变时禁止写回新数组，否则会触发 watch 死循环卡死
+  if (
+    sameGroups &&
+    sameNodes &&
+    cfg.target_group === nextGroup &&
+    cfg.target_role === nextRole
+  ) {
+    return
+  }
+  cfg.target_groups = [...nextGroups]
+  cfg.target_group = nextGroup
+  cfg.target_role = nextRole
+  cfg.target_node_ids = [...nextNodes]
 }
 
 function onInterconnectScopeChange() {
@@ -901,18 +987,23 @@ function onDeviceMatchChange() {
   pruneManualPairsAgainstDevices()
 }
 
+/** 批量改写规则表单时抑制设备匹配 watch，避免中间态反复触发 */
+let suppressDeviceMatchWatch = false
+
 watch(
-  () => [
-    wiringForm.config.source_role,
-    wiringForm.config.target_role,
-    ...(wiringForm.config.source_groups || []),
-    ...(wiringForm.config.target_groups || []),
-    ...(wiringForm.config.source_node_ids || []),
-    ...(wiringForm.config.target_node_ids || []),
-    wiringForm.config.interconnect_scope,
-    wiringForm.config.connection_type,
-  ],
+  () =>
+    [
+      String(wiringForm.config.source_role || ''),
+      String(wiringForm.config.target_role || ''),
+      (wiringForm.config.source_groups || []).join('\0'),
+      (wiringForm.config.target_groups || []).join('\0'),
+      (wiringForm.config.source_node_ids || []).join('\0'),
+      (wiringForm.config.target_node_ids || []).join('\0'),
+      String(wiringForm.config.interconnect_scope || ''),
+      String(wiringForm.config.connection_type || ''),
+    ].join('|'),
   () => {
+    if (suppressDeviceMatchWatch) return
     onDeviceMatchChange()
   },
 )
@@ -1398,47 +1489,111 @@ function syncRuleConnectionTypeFromSheet() {
   cfg.scenario_template = 'CUSTOM'
 }
 
+/** 按规则分类自动匹配本端/对端类型、接口用途、速率与介质（保留已选设备范围） */
+function applyRuleCategoryEndpointDefaults() {
+  const cfg = wiringForm.config
+  const category = String(cfg.rule_category || '')
+  if (!category || category === 'CUSTOM') return
+  const patch = automaticCategoryPatches[category]
+  if (!patch) return
+
+  Object.assign(cfg, {
+    scenario_template: patch.scenario_template ?? cfg.scenario_template,
+    connection_type: patch.connection_type ?? cfg.connection_type,
+    source_role: patch.source_role ?? cfg.source_role,
+    target_role: patch.target_role ?? cfg.target_role,
+    source_roles: patch.source_roles ? [...patch.source_roles] : cfg.source_roles,
+    target_roles: patch.target_roles ? [...patch.target_roles] : cfg.target_roles,
+    source_device_types: patch.source_device_types
+      ? [...patch.source_device_types]
+      : cfg.source_device_types,
+    target_device_types: patch.target_device_types
+      ? [...patch.target_device_types]
+      : cfg.target_device_types,
+    source_port_purpose: patch.source_port_purpose ?? cfg.source_port_purpose,
+    target_port_purpose: patch.target_port_purpose ?? cfg.target_port_purpose,
+    speed: patch.speed ?? cfg.speed,
+    port_speed: patch.port_speed ?? patch.speed ?? cfg.port_speed,
+    speed_mode: patch.speed_mode ?? cfg.speed_mode,
+    media: patch.media ?? cfg.media,
+    port_media: patch.port_media ?? cfg.port_media,
+    link_count: patch.link_count ?? cfg.link_count,
+    min_link_count: patch.min_link_count ?? patch.link_count ?? cfg.min_link_count,
+    max_link_count: patch.max_link_count ?? patch.link_count ?? cfg.max_link_count,
+    device_diversity: patch.device_diversity ?? cfg.device_diversity,
+    card_diversity: patch.card_diversity ?? cfg.card_diversity,
+    redundancy_mode: patch.redundancy_mode ?? cfg.redundancy_mode,
+    lag: patch.lag ?? cfg.lag,
+    peer_link: patch.peer_link ?? cfg.peer_link,
+    enable_peer_link: patch.enable_peer_link ?? cfg.enable_peer_link,
+    enable_dad: patch.enable_dad ?? cfg.enable_dad,
+    interconnect_scope: patch.interconnect_scope ?? cfg.interconnect_scope,
+  })
+  cfg.source_port_pool = poolFromPurpose(cfg.source_port_purpose)
+  cfg.target_port_pool = poolFromPurpose(cfg.target_port_purpose)
+}
+
 function applyAutomaticRuleCategory() {
   const cfg = wiringForm.config
   const category = String(cfg.rule_category || '')
-  if (category === 'CUSTOM') {
-    cfg.allocation_mode = 'MANUAL'
-    wiringForm.mode = 'manual'
-    cfg.source_roles = []
-    cfg.target_roles = []
-    cfg.source_device_types = []
-    cfg.target_device_types = []
-    if (!Array.isArray(cfg.pairs)) cfg.pairs = []
-    void hydrateWiringLocationOptions()
-    return
+  suppressDeviceMatchWatch = true
+  try {
+    if (category === 'CUSTOM') {
+      cfg.allocation_mode = 'MANUAL'
+      wiringForm.mode = 'manual'
+      cfg.source_roles = []
+      cfg.target_roles = []
+      cfg.source_device_types = []
+      cfg.target_device_types = []
+      if (!Array.isArray(cfg.pairs)) cfg.pairs = []
+      void nextTick(() => {
+        void hydrateWiringLocationOptions()
+        scheduleModelMatchedPairPreview(120)
+      })
+      return
+    }
+    const patch = automaticCategoryPatches[category]
+    if (!patch) return
+    Object.assign(cfg, {
+      allocation_mode: 'AUTO',
+      source_groups: [], target_groups: [], source_group: null, target_group: null,
+      source_node_ids: [], target_node_ids: [], pairs: [],
+      source_room_ids: [], target_room_ids: [],
+      source_rack_start: null, source_rack_end: null, target_rack_start: null, target_rack_end: null,
+      source_devices_per_rack: null, target_devices_per_rack: null,
+      source_start_u: null, target_start_u: null, source_u_interval: 1, target_u_interval: 1,
+      source_port_limit_per_device: null,
+      source_connection_strategy: 'ROUND_ROBIN_ASC',
+      target_connection_strategy: 'SLOT_ROUND_ROBIN',
+      port_media: 'AUTO', media: 'AUTO', peer_link: false, enable_peer_link: false, enable_dad: false,
+      interconnect_scope: 'INTRA_GROUP', lag: true, redundancy_mode: 'A_B',
+    }, patch, { rule_category: category })
+    cfg.source_port_pool = poolFromPurpose(cfg.source_port_purpose)
+    cfg.target_port_pool = poolFromPurpose(cfg.target_port_purpose)
+    wiringForm.mode = 'sequential'
+  } finally {
+    suppressDeviceMatchWatch = false
+    onDeviceMatchChange()
+    scheduleModelMatchedPairPreview(120)
   }
-  const patch = automaticCategoryPatches[category]
-  if (!patch) return
-  Object.assign(cfg, {
-    allocation_mode: 'AUTO',
-    source_groups: [], target_groups: [], source_group: null, target_group: null,
-    source_node_ids: [], target_node_ids: [], pairs: [],
-    source_room_ids: [], target_room_ids: [],
-    source_rack_start: null, source_rack_end: null, target_rack_start: null, target_rack_end: null,
-    source_devices_per_rack: null, target_devices_per_rack: null,
-    source_start_u: null, target_start_u: null, source_u_interval: 1, target_u_interval: 1,
-    source_port_limit_per_device: null,
-    source_connection_strategy: 'ROUND_ROBIN_ASC',
-    target_connection_strategy: 'SLOT_ROUND_ROBIN',
-    port_media: 'AUTO', media: 'AUTO', peer_link: false, enable_peer_link: false, enable_dad: false,
-    interconnect_scope: 'INTRA_GROUP', lag: true, redundancy_mode: 'A_B',
-  }, patch, { rule_category: category })
-  cfg.source_port_pool = poolFromPurpose(cfg.source_port_purpose)
-  cfg.target_port_pool = poolFromPurpose(cfg.target_port_purpose)
-  wiringForm.mode = 'sequential'
 }
 
 function onRuleCategoryChange() {
-  if (String(wiringForm.config.allocation_mode || 'AUTO').toUpperCase() === 'AUTO') {
-    applyAutomaticRuleCategory()
-  } else {
-    syncRuleConnectionTypeFromSheet()
-  }
+  // 先让 el-select 完成关闭动画，避免同步重算堵死点击
+  void nextTick(() => {
+    const mode = String(wiringForm.config.allocation_mode || 'AUTO').toUpperCase()
+    if (mode === 'AUTO') {
+      applyAutomaticRuleCategory()
+      return
+    }
+    // 手动定义：选择规则分类后自动匹配本端/对端类型、速率、介质
+    applyRuleCategoryEndpointDefaults()
+    onSourcePurposeChange()
+    onTargetPurposeChange()
+    onCableMediaChange()
+    onDeviceMatchChange()
+    scheduleModelMatchedPairPreview(120)
+  })
 }
 
 /** 检视器仅展示父组名（子组由放置时自动打标） */
@@ -1838,6 +1993,8 @@ function loadGroupViewPositions() {
   }
 }
 
+let persistGroupPosTimer: ReturnType<typeof setTimeout> | null = null
+
 function persistGroupViewPositions() {
   const key = groupViewPosKey()
   if (!key) return
@@ -1846,6 +2003,14 @@ function persistGroupViewPositions() {
   } catch {
     /* ignore quota */
   }
+}
+
+function schedulePersistGroupViewPositions() {
+  if (persistGroupPosTimer) clearTimeout(persistGroupPosTimer)
+  persistGroupPosTimer = setTimeout(() => {
+    persistGroupPosTimer = null
+    persistGroupViewPositions()
+  }, 280)
 }
 
 function lineStyleKey() {
@@ -1887,11 +2052,13 @@ function setSelectedLineStyle(style: TopologyLineStyle | '') {
 }
 
 function moveGroupGlyph(name: string, x: number, y: number) {
-  groupViewPositions.value = {
-    ...groupViewPositions.value,
-    [name]: { x: Math.max(0, x), y: Math.max(0, y) },
-  }
-  persistGroupViewPositions()
+  const nextX = Math.max(0, x)
+  const nextY = Math.max(0, y)
+  const prev = groupViewPositions.value[name]
+  if (prev && prev.x === nextX && prev.y === nextY) return
+  // 就地更新，避免每帧展开新对象触发整页大重绘；落盘防抖
+  groupViewPositions.value[name] = { x: nextX, y: nextY }
+  schedulePersistGroupViewPositions()
 }
 
 async function onBindDeviceGroupDevices(payload: {
@@ -2119,10 +2286,18 @@ watch(currentId, (id) => {
 
 /** 拓扑节点异步加载完成后，再按节点组名补齐目录（避免列表空白） */
 watch(
-  () =>
-    nodes.value
-      .map((n) => `${n.id}:${nodeGroupList(n).join(',')}`)
-      .join('|'),
+  () => {
+    // 轻量指纹：避免每次拼超长字符串造成主线程卡顿
+    const list = nodes.value
+    let sig = list.length
+    for (let i = 0; i < list.length; i += 1) {
+      const n = list[i]
+      const groups = nodeGroupList(n)
+      sig = (sig * 33 + n.id.length + groups.length * 17) | 0
+      if (groups.length) sig = (sig * 17 + groups[0].length) | 0
+    }
+    return sig
+  },
   () => {
     if (!groupScopeId() || !nodes.value.length) return
     syncCatalogFromNodes()
@@ -3206,6 +3381,8 @@ function resetWiringForm() {
   wiringForm.mode = 'sequential'
   wiringForm.description = ''
   wiringForm.config = defaultWiringConfig()
+  // 按默认规则分类同步本端/对端类型、速率、介质
+  applyRuleCategoryEndpointDefaults()
 }
 
 async function openWiringDrawer(createNew = true) {
@@ -3275,8 +3452,10 @@ async function saveWiringRule() {
       ElMessage.warning('当前模型实例没有满足 Purpose、速率、介质和 Slot 条件的空闲端口')
       return
     }
-    if (!modelMatchedPairPreview.value.pairs.length) {
-      ElMessage.warning(modelMatchedPairPreview.value.issues[0]?.message || '当前参数无法生成任何有效端口对')
+    const pairPreview = computeModelMatchedPairPreview()
+    modelMatchedPairPreview.value = pairPreview
+    if (!pairPreview.pairs.length) {
+      ElMessage.warning(pairPreview.issues[0]?.message || '当前参数无法生成任何有效端口对')
       return
     }
     const distributionIssues = validateAutomaticUplinkDistribution(cfg, previewSourceNodes.value.length)
@@ -4189,6 +4368,15 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onCanvasKeydown)
+  if (persistGroupPosTimer) {
+    clearTimeout(persistGroupPosTimer)
+    persistGroupPosTimer = null
+    persistGroupViewPositions()
+  }
+  if (pairPreviewTimer) {
+    clearTimeout(pairPreviewTimer)
+    pairPreviewTimer = null
+  }
 })
 
 function nodeNameById(id: string) {
@@ -4920,9 +5108,9 @@ function nodeNameById(id: string) {
           <el-button size="small" style="margin-top:8px" @click="addManualPairRow">添加端口对</el-button>
         </div>
 
-        <div v-else class="rule-auto-summary">
+        <div v-else-if="!isManualAlloc" class="rule-auto-summary">
           <strong>{{ selectedRuleCategoryLabel }}</strong>
-          <span>系统已自动确定设备硬件分类、两端角色、Purpose、接口速率、介质和冗余方式。</span>
+          <span>系统已按规则分类自动匹配本端/对端类型、接口用途、速率与介质。</span>
           <div class="auto-rule-limits">
             <label>
               最多使用交换机数量

@@ -12,7 +12,7 @@ from app.models.device import (
     Manufacturer,
 )
 from app.models.ip_address import IpAddress, IpSegment
-from app.models.infrastructure import Building, DataCenter, Floor, Room
+from app.models.infrastructure import Building, DataCenter, Floor, Room, Warehouse, WarehouseAsset
 from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology, NetworkLabSession
 from app.models.network_model_design import (
     NetworkDesignModel,
@@ -43,6 +43,8 @@ __all__ = [
     "Building",
     "Floor",
     "Room",
+    "Warehouse",
+    "WarehouseAsset",
     "RackTemplate",
     "Rack",
     "RackPosition",

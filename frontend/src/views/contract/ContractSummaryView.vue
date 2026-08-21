@@ -8,10 +8,17 @@ import {
   type ContractItemKind,
   type DeviceContractSummary,
 } from '@/api/contract'
+import { listParamProfiles, syncParamProfilesFromContracts } from '@/api/device'
 import { ElMessage } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const canSync = auth.hasPermission('device:update') || auth.hasPermission('device:create')
 
 const loading = ref(false)
+const syncing = ref(false)
 const summaryData = ref<DeviceContractSummary[]>([])
+const paramNameKeys = ref<Set<string>>(new Set())
 const kindFilter = ref<'all' | ContractItemKind>('all')
 const keyword = ref('')
 
@@ -51,15 +58,61 @@ function remainOf(row: DeviceContractSummary) {
   return row.remaining_quantity ?? Math.max((row.purchase_quantity || 0) - (row.linked_count || 0), 0)
 }
 
+function isParamLinked(row: DeviceContractSummary) {
+  const key = (row.device_name || '').trim().toLowerCase()
+  return !!key && paramNameKeys.value.has(key)
+}
+
+async function loadParamNameKeys() {
+  try {
+    const profiles = await listParamProfiles()
+    const keys = new Set<string>()
+    for (const p of profiles) {
+      for (const raw of [p.name, p.source_device_name, p.payload?.source_device_name]) {
+        const key = (raw || '').trim().toLowerCase()
+        if (key) keys.add(key)
+      }
+    }
+    paramNameKeys.value = keys
+  } catch {
+    paramNameKeys.value = new Set()
+  }
+}
+
 async function loadSummary() {
   loading.value = true
   try {
-    summaryData.value = await getContractSummary()
+    const [summary] = await Promise.all([getContractSummary(), loadParamNameKeys()])
+    summaryData.value = summary
   } catch {
     summaryData.value = []
     ElMessage.error('加载采购汇总失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function handleSyncParams() {
+  syncing.value = true
+  try {
+    const result = await syncParamProfilesFromContracts()
+    if (result.total_summary === 0) {
+      ElMessage.warning('采购汇总中暂无设备名称可同步')
+    } else if (result.created === 0 && result.updated === 0) {
+      ElMessage.info(`设备参数已全部关联，共 ${result.skipped} 项`)
+    } else {
+      const parts = [
+        result.created ? `新建参数 ${result.created}` : '',
+        result.updated ? `对齐 ${result.updated}` : '',
+      ].filter(Boolean)
+      ElMessage.success(`关联同步完成：${parts.join('，')}`)
+    }
+    await loadParamNameKeys()
+  } catch (error: unknown) {
+    const err = error as { message?: string }
+    ElMessage.error(err.message || '同步设备参数失败')
+  } finally {
+    syncing.value = false
   }
 }
 
@@ -73,9 +126,23 @@ onMounted(() => {
     <header class="page-head">
       <div>
         <h2>采购汇总</h2>
-        <p>按硬件 / 软件分类汇总采购数量；「已关联」按设备管理中同「设备名称」的已上架台数统计</p>
+        <p>
+          按硬件 / 软件分类汇总采购数量；「已关联」按设备管理同名已上架台数统计；「参数关联」对齐合同设备参数名称
+        </p>
       </div>
-      <el-button size="small" :loading="loading" @click="loadSummary">刷新</el-button>
+      <div class="head-actions">
+        <el-button
+          v-if="canSync"
+          size="small"
+          type="primary"
+          plain
+          :loading="syncing"
+          @click="handleSyncParams"
+        >
+          同步设备参数
+        </el-button>
+        <el-button size="small" :loading="loading" @click="loadSummary">刷新</el-button>
+      </div>
     </header>
 
     <div class="toolbar">
@@ -117,8 +184,16 @@ onMounted(() => {
             height="100%"
             empty-text="暂无硬件采购记录"
           >
+            <el-table-column type="index" label="序号" width="64" align="center" />
             <el-table-column prop="device_name" label="设备名称" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">{{ row.device_name || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="参数关联" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag :type="isParamLinked(row) ? 'success' : 'warning'" size="small" effect="plain">
+                  {{ isParamLinked(row) ? '已关联' : '未关联' }}
+                </el-tag>
+              </template>
             </el-table-column>
             <el-table-column prop="device_model_name" label="型号" min-width="130" show-overflow-tooltip />
             <el-table-column prop="manufacturer_name" label="厂商" min-width="100" show-overflow-tooltip>
@@ -164,8 +239,16 @@ onMounted(() => {
             height="100%"
             empty-text="暂无软件采购记录"
           >
+            <el-table-column type="index" label="序号" width="64" align="center" />
             <el-table-column prop="device_name" label="设备名称" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">{{ row.device_name || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="参数关联" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag :type="isParamLinked(row) ? 'success' : 'warning'" size="small" effect="plain">
+                  {{ isParamLinked(row) ? '已关联' : '未关联' }}
+                </el-tag>
+              </template>
             </el-table-column>
             <el-table-column prop="device_model_name" label="型号" min-width="130" show-overflow-tooltip />
             <el-table-column prop="manufacturer_name" label="厂商" min-width="100" show-overflow-tooltip>
@@ -225,6 +308,13 @@ onMounted(() => {
   margin: 4px 0 0;
   font-size: 12px;
   color: #6b7c8f;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .toolbar {

@@ -204,10 +204,23 @@ export function resolveWiringDeviceType(node: NetworkNode): WiringDeviceType {
   if (sub === 'ten_gigabit') return 'ACCESS_SWITCH_10G'
   if (sub === 'gigabit') return node.is_bmc_switch ? 'BMC_SWITCH' : 'ACCESS_SWITCH_1G'
   if (role === 'ACCESS') {
-    // 无 subtype 时按下行口类型猜测
+    // 无 subtype 时按下联口主导速率判断，避免「少量未标用途的 10G 口」把千兆交换机误判为万兆
     const ports = node.port_layout?.ports || []
-    const has10 = ports.some((p) => p.port_type === '10g' && (p.purpose === 'DOWNLINK' || !p.purpose))
-    return has10 ? 'ACCESS_SWITCH_10G' : 'ACCESS_SWITCH_1G'
+    const downlinks = ports.filter((p) => {
+      const purpose = String(p.purpose || '').toUpperCase()
+      return !purpose || purpose === 'DOWNLINK' || purpose === 'SERVER'
+    })
+    const pool = downlinks.length ? downlinks : ports
+    const countHi = pool.filter((p) =>
+      ['10g', '25g', '40_100g'].includes(String(p.port_type || '').toLowerCase()),
+    ).length
+    const count1g = pool.filter((p) => {
+      const t = String(p.port_type || '').toLowerCase()
+      return t === '1g' || t === 'bmc'
+    }).length
+    if (count1g > 0 && count1g >= countHi) return 'ACCESS_SWITCH_1G'
+    if (countHi > 0) return 'ACCESS_SWITCH_10G'
+    return 'ACCESS_SWITCH_1G'
   }
   if (role === 'FIREWALL') return 'SECURITY_DEVICE'
   if (role === 'SERVER') return 'SERVER'

@@ -24,6 +24,7 @@ from app.services.infrastructure import (
     FloorService,
     RoomService,
 )
+from app.services.warehouse import WarehouseService
 from app.services.layout import LayoutService
 from app.services.network import NetworkDesignService
 from app.services.network_interface_export import NetworkInterfaceExportService
@@ -64,6 +65,12 @@ async def get_room_service(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> RoomService:
     return RoomService(session)
+
+
+async def get_warehouse_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> WarehouseService:
+    return WarehouseService(session)
 
 
 async def get_rack_service(

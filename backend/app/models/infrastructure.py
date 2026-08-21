@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -93,6 +94,7 @@ class Room(BaseModel):
     floor: Mapped[Floor] = relationship(back_populates="rooms")
     # Avoid selectin: room list would otherwise hydrate every rack under each room.
     racks: Mapped[list["Rack"]] = relationship(back_populates="room", lazy="select")
+    warehouses: Mapped[list["Warehouse"]] = relationship(back_populates="room", lazy="select")
 
     def get_row_layout(self) -> list[int]:
         if self.row_layout and isinstance(self.row_layout, list) and len(self.row_layout) > 0:
@@ -140,3 +142,53 @@ class Room(BaseModel):
             self.pillar_layout if isinstance(self.pillar_layout, dict) else None,
             code_mode=self.code_mode or "auto",
         )
+
+
+class Warehouse(BaseModel):
+    """库房台账：必须关联具体机房。"""
+
+    __tablename__ = "warehouse"
+    __table_args__ = (UniqueConstraint("code", name="uk_warehouse_code"),)
+
+    room_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("room.id"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 创建库房时自动初始化为 True，表示已挂接资产出入库清单
+    asset_ledger_ready: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    room: Mapped[Room] = relationship(back_populates="warehouses")
+    assets: Mapped[list["WarehouseAsset"]] = relationship(
+        back_populates="warehouse", lazy="select"
+    )
+
+
+class WarehouseAsset(BaseModel):
+    """库房资产出入库记录。"""
+
+    __tablename__ = "warehouse_asset"
+
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("warehouse.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # piece=个 | unit=台 | box=箱 | set=套 | other=其他
+    unit: Mapped[str] = mapped_column(String(20), nullable=False, default="piece")
+    project: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    application: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # complete | accessory | material | tool | other
+    category: Mapped[str] = mapped_column(String(30), nullable=False, default="other")
+    # new | replace | fault | scrap
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="new")
+    inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # undetermined | fixed
+    outbound_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="undetermined")
+    outbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    owner_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    owner_contact: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    warehouse: Mapped[Warehouse] = relationship(back_populates="assets")

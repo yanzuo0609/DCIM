@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.device import Device, DeviceContract, DeviceType
+from app.models.device import Device, DeviceContract, DeviceStatus, DeviceType
 from app.models.infrastructure import Building, DataCenter, Floor, Room
 from app.models.network import NetworkLink, NetworkNode, NetworkProject, NetworkTopology
 from app.models.rack import Rack, RackPosition
@@ -27,7 +27,11 @@ from app.schemas.dashboard import (
 
 STATUS_LABELS = {
     "stock": "库存",
-    "mounted": "已上架",
+    "mounted": "上架加电",
+    "mounted_nopower": "上架无电",
+    "app_online": "应用上线",
+    "app_offline": "应用下线",
+    "fault": "故障",
     "maintenance": "维护中",
     "retired": "已退役",
     "active": "在用",
@@ -158,9 +162,14 @@ class DashboardService:
         self, status_rows: list[NamedMetric], total: int
     ) -> DeviceRuntimeStats:
         by_code = {(r.code or "").lower(): int(r.value) for r in status_rows}
-        running = by_code.get("mounted", 0) + by_code.get("active", 0)
-        fault = by_code.get("maintenance", 0)
-        offline = by_code.get("retired", 0)
+        running = (
+            by_code.get("mounted", 0)
+            + by_code.get("mounted_nopower", 0)
+            + by_code.get("app_online", 0)
+            + by_code.get("active", 0)
+        )
+        fault = by_code.get("fault", 0) + by_code.get("maintenance", 0)
+        offline = by_code.get("app_offline", 0) + by_code.get("retired", 0)
         repair = by_code.get("stock", 0)
         total = total or (running + fault + offline + repair)
         ratio = round((running / total) * 100, 1) if total else 0.0
@@ -317,12 +326,17 @@ class DashboardService:
 
     async def _type_online_status(self) -> list[DualMetric]:
         normal_case = case(
-            (Device.status.in_(["mounted", "active"]), 1),
+            (
+                Device.status.in_(
+                    ["mounted", "mounted_nopower", "app_online", "app_offline", "active"]
+                ),
+                1,
+            ),
             (Device.rack_id.is_not(None), 1),
             else_=0,
         )
         abnormal_case = case(
-            (Device.status.in_(["maintenance", "retired"]), 1),
+            (Device.status.in_(["fault", "maintenance", "retired"]), 1),
             else_=0,
         )
         stmt = (
@@ -450,7 +464,31 @@ class DashboardService:
             .order_by(Rack.row_no, Rack.column_no, Rack.code)
         )
         racks = list((await self.session.execute(rack_stmt)).scalars().all())
-        stats = await RackPositionRepository(self.session).stats_for_rack_ids([r.id for r in racks])
+        rack_ids = [r.id for r in racks]
+        stats = await RackPositionRepository(self.session).stats_for_rack_ids(rack_ids)
+
+        online_by_rack: dict = {}
+        if rack_ids:
+            online_stmt = (
+                select(Device.rack_id, func.count())
+                .where(
+                    Device.rack_id.in_(rack_ids),
+                    Device.deleted_at.is_(None),
+                    Device.status.in_(
+                        [
+                            DeviceStatus.MOUNTED.value,
+                            DeviceStatus.MOUNTED_NOPOWER.value,
+                            DeviceStatus.APP_ONLINE.value,
+                            DeviceStatus.APP_OFFLINE.value,
+                        ]
+                    ),
+                )
+                .group_by(Device.rack_id)
+            )
+            online_by_rack = {
+                rid: int(cnt or 0)
+                for rid, cnt in (await self.session.execute(online_stmt)).all()
+            }
 
         monitor_racks: list[RoomMonitorRack] = []
         for rack in racks:
@@ -467,6 +505,8 @@ class DashboardService:
                     occupied_u=occupied,
                     utilization=util,
                     device_count=device_count,
+                    online_device_count=online_by_rack.get(rack.id, 0),
+                    app_usage=getattr(rack, "app_usage", None),
                     status=rack.status,
                 )
             )

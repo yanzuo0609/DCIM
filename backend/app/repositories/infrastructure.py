@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.infrastructure import Building, DataCenter, Floor, Room
+from app.models.infrastructure import Building, DataCenter, Floor, Room, Warehouse, WarehouseAsset
 from app.repositories.base import BaseRepository
 
 DEFAULT_FLOOR_NAME = "1F"
@@ -217,3 +217,149 @@ class RoomRepository(BaseRepository[Room]):
         stmt = select(Room.code).where(Room.deleted_at.is_(None))
         result = await self.session.execute(stmt)
         return [str(c) for c in result.scalars().all() if c]
+
+
+class WarehouseRepository(BaseRepository[Warehouse]):
+    model = Warehouse
+
+    async def get_by_code(self, code: str) -> Warehouse | None:
+        key = str(code or "").strip()
+        if not key:
+            return None
+        stmt = select(Warehouse).where(Warehouse.code == key, Warehouse.deleted_at.is_(None))
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_codes(self) -> list[str]:
+        stmt = select(Warehouse.code).where(Warehouse.deleted_at.is_(None))
+        result = await self.session.execute(stmt)
+        return [str(c) for c in result.scalars().all() if c]
+
+    async def get_by_id_with_hierarchy(self, warehouse_id: uuid.UUID) -> Warehouse | None:
+        stmt = (
+            select(Warehouse)
+            .options(
+                selectinload(Warehouse.room)
+                .selectinload(Room.floor)
+                .selectinload(Floor.building)
+                .selectinload(Building.datacenter)
+            )
+            .where(Warehouse.id == warehouse_id, Warehouse.deleted_at.is_(None))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_by_ids_with_hierarchy(self, ids: list[uuid.UUID]) -> list[Warehouse]:
+        if not ids:
+            return []
+        stmt = (
+            select(Warehouse)
+            .options(
+                selectinload(Warehouse.room)
+                .selectinload(Room.floor)
+                .selectinload(Floor.building)
+                .selectinload(Building.datacenter)
+            )
+            .where(Warehouse.id.in_(ids), Warehouse.deleted_at.is_(None))
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def list_paginated_filtered(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        keyword: str | None = None,
+        room_id: uuid.UUID | None = None,
+        datacenter_id: uuid.UUID | None = None,
+        sort: str = "created_at",
+        order: str = "desc",
+    ) -> tuple[list[Warehouse], int]:
+        from sqlalchemy import asc, desc, func, or_
+
+        stmt = (
+            select(Warehouse)
+            .join(Room, Room.id == Warehouse.room_id)
+            .join(Floor, Floor.id == Room.floor_id)
+            .join(Building, Building.id == Floor.building_id)
+            .where(
+                Warehouse.deleted_at.is_(None),
+                Room.deleted_at.is_(None),
+                Floor.deleted_at.is_(None),
+                Building.deleted_at.is_(None),
+            )
+        )
+        if room_id is not None:
+            stmt = stmt.where(Warehouse.room_id == room_id)
+        if datacenter_id is not None:
+            stmt = stmt.where(Building.datacenter_id == datacenter_id)
+        if keyword:
+            stmt = stmt.where(
+                or_(
+                    Warehouse.name.ilike(f"%{keyword}%"),
+                    Warehouse.code.ilike(f"%{keyword}%"),
+                    Room.name.ilike(f"%{keyword}%"),
+                )
+            )
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total = (await self.session.execute(count_stmt)).scalar_one()
+        sort_column = getattr(Warehouse, sort, Warehouse.created_at)
+        order_fn = desc if order.lower() == "desc" else asc
+        stmt = stmt.order_by(order_fn(sort_column))
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all()), total
+
+    async def asset_counts_for_ids(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+        from sqlalchemy import func
+
+        if not ids:
+            return {}
+        stmt = (
+            select(WarehouseAsset.warehouse_id, func.count(WarehouseAsset.id))
+            .where(
+                WarehouseAsset.warehouse_id.in_(ids),
+                WarehouseAsset.deleted_at.is_(None),
+            )
+            .group_by(WarehouseAsset.warehouse_id)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return {wid: int(count or 0) for wid, count in rows}
+
+
+class WarehouseAssetRepository(BaseRepository[WarehouseAsset]):
+    model = WarehouseAsset
+
+    async def list_by_warehouse_paginated(
+        self,
+        warehouse_id: uuid.UUID,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        keyword: str | None = None,
+        sort: str = "created_at",
+        order: str = "desc",
+    ) -> tuple[list[WarehouseAsset], int]:
+        from sqlalchemy import asc, desc, func, or_
+
+        stmt = select(WarehouseAsset).where(
+            WarehouseAsset.warehouse_id == warehouse_id,
+            WarehouseAsset.deleted_at.is_(None),
+        )
+        if keyword:
+            stmt = stmt.where(
+                or_(
+                    WarehouseAsset.name.ilike(f"%{keyword}%"),
+                    WarehouseAsset.project.ilike(f"%{keyword}%"),
+                    WarehouseAsset.application.ilike(f"%{keyword}%"),
+                    WarehouseAsset.owner_name.ilike(f"%{keyword}%"),
+                )
+            )
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total = (await self.session.execute(count_stmt)).scalar_one()
+        sort_column = getattr(WarehouseAsset, sort, WarehouseAsset.created_at)
+        order_fn = desc if order.lower() == "desc" else asc
+        stmt = stmt.order_by(order_fn(sort_column))
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all()), total

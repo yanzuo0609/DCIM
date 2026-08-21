@@ -234,8 +234,12 @@ class RackRepository(BaseRepository[Rack]):
 
         容量 total_u：每个已建机柜按其应用模板的 U 位数累计
         （无模板时回退为机柜自身 total_u）。
+
+        设备数 / 功率：优先 Device.rack_id 归属本机房机柜；功率取
+        coalesce(设备功率, 型号功率)。
+        已分配使用：至少有一台在架设备的机柜数。
         """
-        from app.models.device import Device
+        from app.models.device import Device, DeviceModel
 
         if not room_ids:
             return {}
@@ -266,33 +270,29 @@ class RackRepository(BaseRepository[Rack]):
             for rid in room_ids
         }
         for room_id, count, total_u in rack_rows:
+            if room_id not in stats:
+                # SQLite 偶发字符串/UUID 键不一致时兜底建项
+                stats[room_id] = {
+                    "rack_count": 0,
+                    "total_u": 0,
+                    "used_count": 0,
+                    "device_count": 0,
+                    "total_power": 0.0,
+                }
             stats[room_id]["rack_count"] = int(count)
             stats[room_id]["total_u"] = int(total_u or 0)
 
-        used_stmt = (
-            select(Rack.room_id, func.count(func.distinct(Rack.id)))
-            .select_from(Rack)
-            .join(Device, Device.rack_id == Rack.id)
-            .where(
-                Rack.room_id.in_(room_ids),
-                Rack.deleted_at.is_(None),
-                Device.deleted_at.is_(None),
-                Device.rack_id.is_not(None),
-            )
-            .group_by(Rack.room_id)
-        )
-        for room_id, count in (await self.session.execute(used_stmt)).all():
-            stats[room_id]["used_count"] = int(count)
-
-        # 机房内已上架设备总数：Device.rack_id 归属本机房机柜（与「已分配使用」同源）
+        power_expr = func.coalesce(Device.power, DeviceModel.power, 0)
         device_stmt = (
             select(
                 Rack.room_id,
-                func.count(Device.id),
-                func.coalesce(func.sum(Device.power), 0),
+                func.count(func.distinct(Rack.id)),
+                func.count(func.distinct(Device.id)),
+                func.coalesce(func.sum(power_expr), 0),
             )
             .select_from(Device)
             .join(Rack, Rack.id == Device.rack_id)
+            .outerjoin(DeviceModel, DeviceModel.id == Device.device_model_id)
             .where(
                 Rack.room_id.in_(room_ids),
                 Rack.deleted_at.is_(None),
@@ -301,11 +301,32 @@ class RackRepository(BaseRepository[Rack]):
             )
             .group_by(Rack.room_id)
         )
-        for room_id, devices, power in (await self.session.execute(device_stmt)).all():
-            stats[room_id]["device_count"] = int(devices or 0)
-            stats[room_id]["total_power"] = float(power or 0)
+        for room_id, used, devices, power in (await self.session.execute(device_stmt)).all():
+            target = stats.get(room_id)
+            if target is None:
+                continue
+            target["used_count"] = int(used or 0)
+            target["device_count"] = int(devices or 0)
+            target["total_power"] = float(power or 0)
 
-        return stats
+        # 归一化：查询结果键若与入参 UUID 类型不一致，合并回调用方期望的键
+        normalized: dict[uuid.UUID, dict[str, float | int]] = {}
+        for rid in room_ids:
+            hit = stats.get(rid)
+            if hit is None:
+                compact = str(rid).replace("-", "")
+                for key, val in stats.items():
+                    if str(key).replace("-", "") == compact:
+                        hit = val
+                        break
+            normalized[rid] = hit or {
+                "rack_count": 0,
+                "total_u": 0,
+                "used_count": 0,
+                "device_count": 0,
+                "total_power": 0.0,
+            }
+        return normalized
 
 
 class RackPositionRepository(BaseRepository[RackPosition]):

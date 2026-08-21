@@ -508,7 +508,13 @@ export function previewWiringPairs(
   report.matched_targets = targetNodes.length
 
   if (!sourceNodes.length || !targetNodes.length) {
-    pushIssue(report, 'error', 'ERR_UNSUPPORTED_TOPOLOGY', '预览：未匹配到源/目标设备')
+    const detail =
+      !sourceNodes.length && !targetNodes.length
+        ? '本端与对端均未匹配到设备'
+        : !sourceNodes.length
+          ? '本端未匹配到设备（请检查本端类型/设备选择，或千兆规则是否误过滤了万兆判定设备）'
+          : '对端未匹配到设备（请检查对端类型/设备选择）'
+    pushIssue(report, 'error', 'ERR_UNSUPPORTED_TOPOLOGY', `预览：未匹配到源/目标设备 — ${detail}`)
     return {
       scenario: 'UNSUPPORTED',
       scenario_label: SCENARIO_LABELS.UNSUPPORTED,

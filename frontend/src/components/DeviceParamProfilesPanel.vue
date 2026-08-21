@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  createDeviceType,
   createParamProfile,
   deleteParamProfile,
   downloadParamProfilesTemplate,
@@ -10,6 +11,7 @@ import {
   listDeviceTypes,
   listParamProfiles,
   syncParamProfilesFromContracts,
+  updateDeviceType,
   updateParamProfile,
   type DeviceType,
   type DiskRole,
@@ -17,7 +19,15 @@ import {
   type ParamProfile,
   type ParamProfilePayload,
 } from '@/api/device'
+import { getContractSummary } from '@/api/contract'
 import { useAuthStore } from '@/stores/auth'
+import {
+  DEVICE_TYPE_CODES,
+  DEVICE_TYPE_FALLBACK_NAMES,
+  buildDeviceTypeOptions,
+  displayDeviceTypeName,
+  type DeviceTypeCode,
+} from '@/utils/deviceTypeCatalog'
 
 const auth = useAuthStore()
 const canUpdate = auth.hasPermission('device:update')
@@ -31,10 +41,15 @@ const importing = ref(false)
 const saving = ref(false)
 const profiles = ref<ParamProfile[]>([])
 const deviceTypes = ref<DeviceType[]>([])
+/** 采购汇总设备名称（小写）集合，用于展示关联状态 */
+const summaryNameKeys = ref<Set<string>>(new Set())
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
 const editingPayload = ref<ParamProfilePayload | null>(null)
 const importInput = ref<HTMLInputElement | null>(null)
+
+/** 与设备管理同一组设备类型（标准名称 + 下拉样式） */
+const deviceTypeOptions = computed(() => buildDeviceTypeOptions(deviceTypes.value))
 
 const filters = reactive({
   keyword: '',
@@ -73,9 +88,63 @@ function isDiskRowFilled(d: ParamDiskSpec): boolean {
 }
 
 function deviceTypeName(typeId: string | null | undefined) {
-  if (!typeId) return '—'
-  const hit = deviceTypes.value.find((t) => t.id === typeId)
-  return hit?.name || '—'
+  return displayDeviceTypeName(deviceTypes.value, typeId)
+}
+
+async function ensureDeviceTypeOption(code: DeviceTypeCode) {
+  const existed = deviceTypes.value.find((t) => t.code === code)
+  if (existed) return existed
+  const created = await createDeviceType({
+    code,
+    name: DEVICE_TYPE_FALLBACK_NAMES[code],
+    description: DEVICE_TYPE_FALLBACK_NAMES[code],
+  })
+  deviceTypes.value = [...deviceTypes.value, created].sort((a, b) =>
+    a.code.localeCompare(b.code),
+  )
+  return created
+}
+
+async function onParamDeviceTypePick(typeId: string | null) {
+  if (!typeId) {
+    form.device_type_id = ''
+    return
+  }
+  const opt = deviceTypeOptions.value.find((o) => o.id === typeId || o.code === typeId)
+  if (opt?.missing) {
+    const created = await ensureDeviceTypeOption(opt.code)
+    form.device_type_id = created.id
+    return
+  }
+  form.device_type_id = typeId
+}
+
+/** 将库中旧短名同步为与设备管理一致的标准名称，并补齐缺失类型 */
+async function syncCanonicalDeviceTypes() {
+  const byCode = new Map(deviceTypes.value.map((t) => [t.code, t]))
+  for (const code of DEVICE_TYPE_CODES) {
+    const want = DEVICE_TYPE_FALLBACK_NAMES[code]
+    const hit = byCode.get(code)
+    if (!hit) {
+      try {
+        const created = await createDeviceType({ code, name: want, description: want })
+        deviceTypes.value = [...deviceTypes.value, created]
+        byCode.set(code, created)
+      } catch {
+        // ignore
+      }
+      continue
+    }
+    if (hit.name !== want) {
+      try {
+        const updated = await updateDeviceType(hit.id, { name: want, description: want })
+        deviceTypes.value = deviceTypes.value.map((t) => (t.id === updated.id ? updated : t))
+        byCode.set(code, updated)
+      } catch {
+        // ignore
+      }
+    }
+  }
 }
 
 function detailOf(row: ParamProfile) {
@@ -88,6 +157,31 @@ function modelOf(row: ParamProfile) {
 
 function typeIdOf(row: ParamProfile) {
   return row.device_type_id || row.payload?.device_type_id || ''
+}
+
+function profileNameKey(row: ParamProfile) {
+  return (row.source_device_name || row.payload?.source_device_name || row.name || '')
+    .trim()
+    .toLowerCase()
+}
+
+function isLinkedToSummary(row: ParamProfile) {
+  const key = profileNameKey(row)
+  return !!key && summaryNameKeys.value.has(key)
+}
+
+async function loadSummaryNames() {
+  try {
+    const summary = await getContractSummary()
+    const keys = new Set<string>()
+    for (const row of summary || []) {
+      const name = (row.device_name || '').trim().toLowerCase()
+      if (name) keys.add(name)
+    }
+    summaryNameKeys.value = keys
+  } catch {
+    summaryNameKeys.value = new Set()
+  }
 }
 
 function legacyOtherParams(p: ParamProfilePayload): string {
@@ -286,6 +380,7 @@ function rowClassName({ row }: { row: ParamProfile }) {
 async function loadDeviceTypes() {
   try {
     deviceTypes.value = await listDeviceTypes()
+    await syncCanonicalDeviceTypes()
   } catch {
     deviceTypes.value = []
   }
@@ -294,7 +389,8 @@ async function loadDeviceTypes() {
 async function loadData(opts?: { silent?: boolean }) {
   loading.value = true
   try {
-    profiles.value = await listParamProfiles()
+    const [list] = await Promise.all([listParamProfiles(), loadSummaryNames()])
+    profiles.value = list
   } catch {
     profiles.value = []
     if (!opts?.silent) ElMessage.error('加载设备参数失败')
@@ -309,13 +405,15 @@ async function handleSync() {
     const result = await syncParamProfilesFromContracts()
     if (result.total_summary === 0) {
       ElMessage.warning('采购汇总中暂无设备名称可同步')
-    } else if (result.created === 0 && result.skipped > 0) {
-      ElMessage.info(`采购汇总设备名称均已存在，已跳过 ${result.skipped} 项`)
+    } else if (result.created === 0 && result.updated === 0 && result.skipped > 0) {
+      ElMessage.info(`采购汇总设备名称均已关联，已对齐 ${result.skipped} 项`)
     } else {
-      ElMessage.success(
-        `同步完成：新建待完善 ${result.created} 项` +
-          (result.skipped ? `，跳过已有 ${result.skipped} 项` : ''),
-      )
+      const parts = [
+        result.created ? `新建 ${result.created}` : '',
+        result.updated ? `同步 ${result.updated}` : '',
+        result.skipped ? `已对齐 ${result.skipped}` : '',
+      ].filter(Boolean)
+      ElMessage.success(`关联同步完成：${parts.join('，')}`)
     }
     await loadData({ silent: true })
   } catch (error: unknown) {
@@ -389,7 +487,7 @@ function openEdit(row: ParamProfile) {
   dialogVisible.value = true
 }
 
-/** 新建时若尚未手填设备ID，随名称自动生成建议值 */
+/** 新建时若尚未手填设备参数ID，随名称自动生成建议值 */
 function onNameChangeForCode() {
   if (editingId.value) return
   const name = form.name.trim()
@@ -406,7 +504,7 @@ async function handleSave() {
   }
   const code = form.code.trim() || makeCode(form.name.trim())
   if (!code) {
-    ElMessage.warning('请填写设备ID')
+    ElMessage.warning('请填写设备参数ID')
     return
   }
   saving.value = true
@@ -469,7 +567,9 @@ onMounted(async () => {
       <span>共 {{ stats.total }} 项</span>
       <span class="stat-incomplete">待完善 {{ stats.incomplete }}</span>
       <span class="stat-complete">已完善 {{ stats.complete }}</span>
-      <span class="hint">同步采购汇总：按设备名称新建空表（红字待完善）；已存在同名则跳过</span>
+      <span class="hint">
+        与采购汇总按「设备名称」关联同步：缺则新建、同名则对齐名称/型号/厂商
+      </span>
     </div>
 
     <div class="toolbar">
@@ -490,9 +590,14 @@ onMounted(async () => {
         clearable
         size="small"
         placeholder="设备类型"
-        style="width: 140px"
+        style="width: 160px"
       >
-        <el-option v-for="t in deviceTypes" :key="t.id" :label="t.name" :value="t.id" />
+        <el-option
+          v-for="t in deviceTypeOptions.filter((o) => o.id)"
+          :key="t.code"
+          :label="t.name"
+          :value="t.id"
+        />
       </el-select>
       <el-select
         v-model="filters.manufacturer"
@@ -559,14 +664,25 @@ onMounted(async () => {
         align="center"
         :index="(i: number) => i + 1"
       />
-      <el-table-column prop="code" label="设备ID" min-width="150" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.code }}</span>
-        </template>
-      </el-table-column>
       <el-table-column prop="name" label="设备名称" min-width="140" show-overflow-tooltip>
         <template #default="{ row }">
           <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.name }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="采购关联" width="110" align="center">
+        <template #default="{ row }">
+          <el-tag
+            :type="isLinkedToSummary(row) ? 'success' : 'info'"
+            size="small"
+            effect="plain"
+          >
+            {{ isLinkedToSummary(row) ? '已关联' : '未在汇总' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="code" label="设备参数ID" min-width="150" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.code }}</span>
         </template>
       </el-table-column>
       <el-table-column label="配置摘要" min-width="240" show-overflow-tooltip>
@@ -642,20 +758,20 @@ onMounted(async () => {
       <el-form label-width="100px" class="param-form" size="small">
         <el-row :gutter="12">
           <el-col :span="8">
-            <el-form-item label="设备ID" required>
-              <el-input
-                v-model="form.code"
-                maxlength="50"
-                placeholder="唯一设备ID，可手动修改"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
             <el-form-item label="设备名称" required>
               <el-input
                 v-model="form.name"
                 placeholder="对应采购汇总设备名称"
                 @change="onNameChangeForCode"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="设备参数ID" required>
+              <el-input
+                v-model="form.code"
+                maxlength="50"
+                placeholder="唯一设备参数ID，可手动修改"
               />
             </el-form-item>
           </el-col>
@@ -669,13 +785,19 @@ onMounted(async () => {
           <el-col :span="8">
             <el-form-item label="设备类型">
               <el-select
-                v-model="form.device_type_id"
+                :model-value="form.device_type_id || undefined"
                 clearable
                 filterable
-                placeholder="选择关联档案设备类型"
+                placeholder="选择设备类型"
                 style="width: 100%"
+                @change="onParamDeviceTypePick"
               >
-                <el-option v-for="t in deviceTypes" :key="t.id" :label="t.name" :value="t.id" />
+                <el-option
+                  v-for="t in deviceTypeOptions"
+                  :key="t.code"
+                  :label="t.name"
+                  :value="t.id || t.code"
+                />
               </el-select>
             </el-form-item>
           </el-col>

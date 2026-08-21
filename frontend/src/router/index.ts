@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useScreenStore } from '@/stores/screen'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -60,15 +61,37 @@ const router = createRouter({
             },
             {
               path: 'templates',
-              name: 'room-rack-templates',
+              redirect: '/racks/templates',
+            },
+          ],
+        },
+        {
+          path: 'racks',
+          component: () => import('@/layouts/RackSectionLayout.vue'),
+          children: [
+            {
+              path: '',
+              redirect: '/racks/templates',
+            },
+            {
+              path: 'templates',
+              name: 'rack-templates',
               component: () => import('@/views/RackView.vue'),
               meta: { permission: 'rack:view' },
             },
           ],
         },
         {
-          path: 'racks',
-          redirect: '/rooms/templates',
+          path: 'warehouses',
+          name: 'warehouses',
+          component: () => import('@/views/WarehouseView.vue'),
+          meta: { permission: 'datacenter:view' },
+        },
+        {
+          path: 'warehouses/:id/assets',
+          name: 'warehouse-assets',
+          component: () => import('@/views/WarehouseAssetView.vue'),
+          meta: { permission: 'datacenter:view' },
         },
         {
           path: 'devices',
@@ -181,6 +204,12 @@ const router = createRouter({
           component: () => import('@/views/AuditView.vue'),
           meta: { permission: 'audit:view' },
         },
+        {
+          path: 'system/screen',
+          name: 'system-screen',
+          component: () => import('@/views/ScreenManageView.vue'),
+          meta: { screenManage: true },
+        },
       ],
     },
   ],
@@ -224,9 +253,32 @@ router.beforeEach(async (to) => {
       && !auth.hasPermission('datacenter:view')
       && auth.hasPermission('rack:view')
     ) {
-      return { name: 'room-rack-templates' }
+      return { name: 'rack-templates' }
     }
     return '/'
+  }
+
+  const needsScreenManage = [...to.matched].some((record) => record.meta.screenManage)
+  if (needsScreenManage) {
+    const canManageScreen =
+      auth.hasPermission('user:view') ||
+      auth.hasPermission('role:view') ||
+      auth.hasPermission('audit:view') ||
+      auth.hasPermission('dashboard:view')
+    if (!canManageScreen) return '/'
+  }
+
+  if (to.name === 'dashboard-screen') {
+    const screen = useScreenStore()
+    const isPreview = String(to.query.preview || '') === '1'
+    if (!screen.menuEnabled && !isPreview) {
+      const canManageScreen =
+        auth.hasPermission('user:view') ||
+        auth.hasPermission('role:view') ||
+        auth.hasPermission('audit:view') ||
+        auth.hasPermission('dashboard:view')
+      return canManageScreen ? { name: 'system-screen' } : { name: 'dashboard' }
+    }
   }
 
   return true
