@@ -462,7 +462,7 @@ async function onBatchContractItemChange(key: string | null) {
     form.manufacturer_id = mfg?.id || null
     const modelName = (item.device_model_name || item.device_name || '').trim()
     if (!modelName) {
-      ElMessage.warning('该合同设备未填写型号，请手动选择设备型号')
+      ElMessage.warning('该合同设备未填写型号，请手动选择产品型号')
       return
     }
     let hit = findModelForContract(modelName, mfg)
@@ -1147,7 +1147,7 @@ function buildPreview() {
 async function nextStep() {
   if (step.value === 0) {
     if (!form.device_model_id) {
-      ElMessage.warning('请输入或选择设备型号')
+      ElMessage.warning('请输入或选择产品型号')
       return
     }
     if (form.count < 1) {
@@ -1327,7 +1327,7 @@ async function submit() {
             </template>
           </span>
         </el-form-item>
-        <el-form-item label="厂商">
+        <el-form-item label="产品厂商">
           <el-select
             v-model="form.manufacturer_id"
             clearable
@@ -1335,7 +1335,7 @@ async function submit() {
             allow-create
             default-first-option
             style="width: 100%"
-            placeholder="选择或输入厂商；选合同设备时可自动匹配"
+            placeholder="选择或输入产品厂商；选合同设备时可自动匹配"
             @change="onManufacturerChange"
           >
             <el-option
@@ -1366,13 +1366,13 @@ async function submit() {
             <span v-if="startIndexHint" class="field-tip">{{ startIndexHint }}</span>
           </div>
         </el-form-item>
-        <el-form-item label="设备型号" required>
+        <el-form-item label="产品型号" required>
           <el-select
             v-model="form.device_model_id"
             filterable
             allow-create
             default-first-option
-            placeholder="输入自定义型号或选择已有"
+            placeholder="输入自定义产品型号或选择已有"
             style="width: 100%"
             @change="onModelChange"
           >

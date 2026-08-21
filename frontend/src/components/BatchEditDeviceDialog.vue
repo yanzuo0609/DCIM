@@ -35,7 +35,7 @@ const MODE_TITLE: Record<BatchEditMode, string> = {
   contract: '合同 / 合同设备',
   type: '类型',
   model: '型号',
-  manufacturer: '厂商',
+  manufacturer: '产品厂商',
   unmount: '批量下架',
   mount: '移动设备',
   ip: '改 IP',
@@ -536,7 +536,7 @@ function validate(): string | null {
     if (!form.contract_item_key) return '请选择合同内的设备名称'
   }
   if (apply.type && !form.device_type_id) return '请选择设备类型'
-  if (apply.model && !form.device_model_id) return '请选择设备型号'
+  if (apply.model && !form.device_model_id) return '请选择产品型号'
   if (apply.mount) {
     if (!form.rack_id) return '请选择目标机柜'
     if (!form.start_u || form.start_u < 1) return '请填写起始 U'
@@ -686,7 +686,7 @@ async function submit() {
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-checkbox v-model="apply.linkedModelMfg">选合同设备时一并匹配型号与厂商</el-checkbox>
+          <el-checkbox v-model="apply.linkedModelMfg">选合同设备时一并匹配产品型号与产品厂商</el-checkbox>
         </el-form-item>
       </el-form>
     </div>
@@ -698,7 +698,7 @@ async function submit() {
     </div>
 
     <div v-else-if="mode === 'model'" class="panel">
-      <el-select v-model="form.device_model_id" filterable clearable placeholder="设备型号" style="width: 100%">
+      <el-select v-model="form.device_model_id" filterable clearable placeholder="产品型号" style="width: 100%">
         <el-option v-for="m in localModels" :key="m.id" :label="m.name" :value="m.id" />
       </el-select>
     </div>
@@ -708,7 +708,7 @@ async function submit() {
         v-model="form.manufacturer_id"
         filterable
         clearable
-        placeholder="设备级厂商（清空则回退型号厂商）"
+        placeholder="产品厂商（清空则回退产品型号厂商）"
         style="width: 100%"
       >
         <el-option v-for="m in localManufacturers" :key="m.id" :label="m.name" :value="m.id" />

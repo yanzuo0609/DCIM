@@ -1172,10 +1172,10 @@ class DeviceService:
     async def sync_param_profiles_from_contracts(
         self, user_id: uuid.UUID | None = None
     ) -> ParamProfileSyncResult:
-        """采购汇总设备名称 ↔ 设备参数名称关联同步。
+        """资产汇总设备名称 ↔ 资产详细参数关联同步。
 
-        - 汇总有、参数无 → 新建空待完善
-        - 同名已存在 → 校正名称 / source 字段，回填空的型号与厂商
+        - 汇总有、参数无 → 新建空待完善（设备名称 / 产品型号 / 产品厂商）
+        - 同名已存在 → 校正名称，并以汇总为准同步产品型号、产品厂商
         - 参数有、汇总无 → 保留不删
         """
         from app.services.device_contract import DeviceContractService
@@ -1268,10 +1268,11 @@ class DeviceService:
             if (typed.source_device_name or "").strip() != device_name:
                 typed.source_device_name = device_name
                 changed = True
-            if not (typed.source_device_model or "").strip() and meta["model"]:
+            # 以资产汇总为准对齐产品型号 / 产品厂商
+            if meta["model"] and (typed.source_device_model or "").strip() != meta["model"]:
                 typed.source_device_model = meta["model"]
                 changed = True
-            if not (typed.source_manufacturer or "").strip() and meta["manufacturer"]:
+            if meta["manufacturer"] and (typed.source_manufacturer or "").strip() != meta["manufacturer"]:
                 typed.source_manufacturer = meta["manufacturer"]
                 changed = True
 

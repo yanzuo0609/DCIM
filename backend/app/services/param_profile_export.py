@@ -27,8 +27,8 @@ from app.schemas.device import (
 COLUMN_SPECS: list[tuple[str, str, tuple[str, ...]]] = [
     ("code", "编码", ("档案编码",)),
     ("name", "设备名称", ("名称", "采购设备名称")),
-    ("source_device_model", "设备型号", ("型号",)),
-    ("source_manufacturer", "厂商", ("制造商",)),
+    ("source_device_model", "产品型号", ("设备型号", "型号")),
+    ("source_manufacturer", "产品厂商", ("厂商", "制造商", "品牌")),
     ("cpu_cores", "CPU核心数", ("CPU核数", "核心数")),
     ("cpu_architecture", "CPU架构", ("架构",)),
     ("cpu_model", "CPU型号", ()),

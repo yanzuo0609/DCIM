@@ -193,6 +193,14 @@ class DeviceContract(BaseModel):
     price_unit: Mapped[str] = mapped_column(String(10), default="wan", nullable=False)
     purchase_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 合同扩展信息（新建合同表单）
+    project_budget: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    purchase_org: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    fund_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    using_org: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    winning_bidder: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    signed_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     device_model: Mapped[DeviceModel | None] = relationship(back_populates="contracts")
     devices: Mapped[list["Device"]] = relationship(back_populates="contract", lazy="select")

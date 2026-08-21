@@ -1,53 +1,86 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
-  getContractSummary,
+  formatMoney,
   itemKindLabel,
+  normalizeContractItems,
   normalizeItemKind,
+  normalizePriceUnit,
   type ContractItemKind,
-  type DeviceContractSummary,
+  type DeviceContract,
+  type DeviceContractItem,
 } from '@/api/contract'
 import {
   listDeviceTypes,
   listParamProfiles,
-  syncParamProfilesFromContracts,
   type DeviceType,
   type ParamProfile,
 } from '@/api/device'
 import { ElMessage } from 'element-plus'
-import { useAuthStore } from '@/stores/auth'
 import ParamProfileDetailDialog from '@/components/ParamProfileDetailDialog.vue'
 
-const auth = useAuthStore()
-const router = useRouter()
-const canSync = auth.hasPermission('device:update') || auth.hasPermission('device:create')
+const props = defineProps<{
+  contract: DeviceContract | null
+  loading?: boolean
+}>()
 
-const loading = ref(false)
-const syncing = ref(false)
-const summaryData = ref<DeviceContractSummary[]>([])
+const kindFilter = ref<'all' | ContractItemKind>('all')
+const keyword = ref('')
 const paramByName = ref<Map<string, ParamProfile>>(new Map())
 const deviceTypes = ref<DeviceType[]>([])
 const detailVisible = ref(false)
 const detailProfile = ref<ParamProfile | null>(null)
-const kindFilter = ref<'all' | ContractItemKind>('all')
-const keyword = ref('')
+
+watch(
+  () => props.contract?.id,
+  () => {
+    kindFilter.value = 'all'
+    keyword.value = ''
+  },
+)
+
+type DisplayRow = {
+  device_name?: string | null
+  device_model_name: string
+  manufacturer_name?: string | null
+  item_kind?: string
+  purchase_quantity: number
+  purchase_amount?: number | null
+  avg_unit_price: number | null
+  response_quote?: number | null
+  price_unit?: string
+}
+
+function itemToDisplayRow(item: DeviceContractItem): DisplayRow {
+  const qty = Number(item.quantity || 0)
+  const price = item.unit_price
+  const amount =
+    price != null && qty ? Math.round(qty * Number(price) * 100) / 100 : null
+  return {
+    device_name: item.device_name,
+    device_model_name: item.device_model_name,
+    manufacturer_name: item.manufacturer_name,
+    item_kind: normalizeItemKind(item.item_kind),
+    purchase_quantity: qty,
+    purchase_amount: amount,
+    avg_unit_price: price ?? null,
+    response_quote: item.response_quote ?? null,
+    price_unit: item.price_unit,
+  }
+}
+
+const sourceRows = computed(() =>
+  props.contract ? normalizeContractItems(props.contract).map(itemToDisplayRow) : [],
+)
 
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
-  return summaryData.value.filter((row) => {
+  return sourceRows.value.filter((row) => {
     if (kindFilter.value !== 'all' && normalizeItemKind(row.item_kind) !== kindFilter.value) {
       return false
     }
     if (!kw) return true
-    const contractHay = (row.contracts || []).map((c) => c.contract_no).join(' ')
-    const hay = [
-      row.device_name,
-      row.device_model_name,
-      row.manufacturer_name,
-      itemKindLabel(row.item_kind),
-      contractHay,
-    ]
+    const hay = [row.device_name, row.device_model_name, row.manufacturer_name, itemKindLabel(row.item_kind)]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()
@@ -72,31 +105,20 @@ const metaText = computed(() => {
   return `硬件 ${hwRows.value.length} · 软件 ${swRows.value.length}`
 })
 
+function moneyText(value: number | null | undefined, unit?: string | null) {
+  return formatMoney(value, normalizePriceUnit(unit || 'wan'))
+}
+
 function nameKey(name: string | null | undefined) {
   return (name || '').trim().toLowerCase()
 }
 
-function mountedOf(row: DeviceContractSummary) {
-  return Number(row.linked_count || 0)
-}
-
-function inventoryOf(row: DeviceContractSummary) {
-  return row.remaining_quantity ?? Math.max((row.purchase_quantity || 0) - mountedOf(row), 0)
-}
-
-function paramOf(row: DeviceContractSummary): ParamProfile | null {
+function paramOf(row: DisplayRow): ParamProfile | null {
   const key = nameKey(row.device_name)
   return key ? paramByName.value.get(key) || null : null
 }
 
-function openContractDetail(contractId: string) {
-  void router.push({
-    path: '/devices/contracts/details',
-    query: { contract_id: contractId },
-  })
-}
-
-function openParams(row: DeviceContractSummary) {
+function openParams(row: DisplayRow) {
   const profile = paramOf(row)
   if (!profile) {
     ElMessage.warning('该设备尚未关联参数档案，请先在资产详细参数中同步或新建')
@@ -123,70 +145,13 @@ async function loadParamMap() {
   }
 }
 
-async function loadSummary() {
-  loading.value = true
-  try {
-    const [summary] = await Promise.all([getContractSummary(), loadParamMap()])
-    summaryData.value = summary
-  } catch {
-    summaryData.value = []
-    ElMessage.error('加载资产汇总失败')
-  } finally {
-    loading.value = false
-  }
-}
-
-async function handleSyncParams() {
-  syncing.value = true
-  try {
-    const result = await syncParamProfilesFromContracts()
-    if (result.total_summary === 0) {
-      ElMessage.warning('暂无设备名称可同步')
-    } else if (result.created === 0 && result.updated === 0) {
-      ElMessage.info(`设备参数已全部关联，共 ${result.skipped} 项`)
-    } else {
-      const parts = [
-        result.created ? `新建参数 ${result.created}` : '',
-        result.updated ? `对齐 ${result.updated}` : '',
-      ].filter(Boolean)
-      ElMessage.success(`关联同步完成：${parts.join('，')}`)
-    }
-    await loadParamMap()
-  } catch (error: unknown) {
-    const err = error as { message?: string }
-    ElMessage.error(err.message || '同步设备参数失败')
-  } finally {
-    syncing.value = false
-  }
-}
-
 onMounted(() => {
-  void loadSummary()
+  void loadParamMap()
 })
 </script>
 
 <template>
-  <div class="summary-page" :class="{ single: isSingleKind }">
-    <header class="page-head">
-      <div>
-        <h2>资产汇总</h2>
-        <p>硬件 / 软件分表汇总；可筛选全部或单独查看，并跳转关联合同与设备参数</p>
-      </div>
-      <div class="head-actions">
-        <el-button
-          v-if="canSync"
-          size="small"
-          type="primary"
-          plain
-          :loading="syncing"
-          @click="handleSyncParams"
-        >
-          同步设备参数
-        </el-button>
-        <el-button size="small" :loading="loading" @click="loadSummary">刷新</el-button>
-      </div>
-    </header>
-
+  <div class="detail-panel" :class="{ single: isSingleKind }">
     <div class="toolbar">
       <el-radio-group v-model="kindFilter" size="small">
         <el-radio-button value="all">全部</el-radio-button>
@@ -197,7 +162,7 @@ onMounted(() => {
         v-model="keyword"
         clearable
         size="small"
-        placeholder="筛选设备名称 / 产品型号 / 产品厂商 / 合同"
+        placeholder="筛选设备名称 / 产品型号 / 产品厂商"
         style="width: 260px"
       />
       <span class="meta">{{ metaText }}</span>
@@ -225,7 +190,7 @@ onMounted(() => {
             size="small"
             height="100%"
             class="sheet-table"
-            empty-text="暂无硬件汇总"
+            empty-text="暂无硬件明细"
           >
             <el-table-column type="selection" width="40" />
             <el-table-column type="index" label="序号" width="56" align="center" />
@@ -239,40 +204,19 @@ onMounted(() => {
             <el-table-column label="设备数量" width="88" align="center">
               <template #default="{ row }">{{ row.purchase_quantity || 0 }}</template>
             </el-table-column>
-            <el-table-column label="完成上架" width="88" align="center">
-              <template #default="{ row }">{{ mountedOf(row) }}</template>
+            <el-table-column label="货物单价" min-width="110" align="right">
+              <template #default="{ row }">{{ moneyText(row.avg_unit_price, row.price_unit) }}</template>
             </el-table-column>
-            <el-table-column label="库存数量" width="88" align="center">
+            <el-table-column label="响应报价" min-width="110" align="right">
               <template #default="{ row }">
-                <span :class="{ warn: inventoryOf(row) > 0 }">{{ inventoryOf(row) }}</span>
+                {{ row.response_quote != null ? moneyText(row.response_quote, row.price_unit) : '—' }}
               </template>
             </el-table-column>
-            <el-table-column label="关联合同" min-width="140">
-              <template #default="{ row }">
-                <div v-if="row.contracts?.length" class="link-group">
-                  <el-button
-                    v-for="c in row.contracts"
-                    :key="c.id"
-                    link
-                    type="primary"
-                    @click="openContractDetail(c.id)"
-                  >
-                    {{ c.contract_no }}
-                  </el-button>
-                </div>
-                <span v-else class="muted">—</span>
-              </template>
+            <el-table-column label="采购额" min-width="120" align="right">
+              <template #default="{ row }">{{ moneyText(row.purchase_amount, row.price_unit) }}</template>
             </el-table-column>
-            <el-table-column label="关联跳转" width="130" fixed="right" align="center">
+            <el-table-column label="关联跳转" width="88" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button
-                  v-if="row.contracts?.[0]"
-                  link
-                  type="primary"
-                  @click="openContractDetail(row.contracts[0].id)"
-                >
-                  合同
-                </el-button>
                 <el-button link type="primary" @click="openParams(row)">参数</el-button>
               </template>
             </el-table-column>
@@ -301,7 +245,7 @@ onMounted(() => {
             size="small"
             height="100%"
             class="sheet-table"
-            empty-text="暂无软件汇总"
+            empty-text="暂无软件明细"
           >
             <el-table-column type="selection" width="40" />
             <el-table-column type="index" label="序号" width="56" align="center" />
@@ -315,40 +259,19 @@ onMounted(() => {
             <el-table-column label="设备数量" width="88" align="center">
               <template #default="{ row }">{{ row.purchase_quantity || 0 }}</template>
             </el-table-column>
-            <el-table-column label="完成上架" width="88" align="center">
-              <template #default="{ row }">{{ mountedOf(row) }}</template>
+            <el-table-column label="货物单价" min-width="110" align="right">
+              <template #default="{ row }">{{ moneyText(row.avg_unit_price, row.price_unit) }}</template>
             </el-table-column>
-            <el-table-column label="库存数量" width="88" align="center">
+            <el-table-column label="响应报价" min-width="110" align="right">
               <template #default="{ row }">
-                <span :class="{ warn: inventoryOf(row) > 0 }">{{ inventoryOf(row) }}</span>
+                {{ row.response_quote != null ? moneyText(row.response_quote, row.price_unit) : '—' }}
               </template>
             </el-table-column>
-            <el-table-column label="关联合同" min-width="140">
-              <template #default="{ row }">
-                <div v-if="row.contracts?.length" class="link-group">
-                  <el-button
-                    v-for="c in row.contracts"
-                    :key="c.id"
-                    link
-                    type="primary"
-                    @click="openContractDetail(c.id)"
-                  >
-                    {{ c.contract_no }}
-                  </el-button>
-                </div>
-                <span v-else class="muted">—</span>
-              </template>
+            <el-table-column label="采购额" min-width="120" align="right">
+              <template #default="{ row }">{{ moneyText(row.purchase_amount, row.price_unit) }}</template>
             </el-table-column>
-            <el-table-column label="关联跳转" width="130" fixed="right" align="center">
+            <el-table-column label="关联跳转" width="88" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button
-                  v-if="row.contracts?.[0]"
-                  link
-                  type="primary"
-                  @click="openContractDetail(row.contracts[0].id)"
-                >
-                  合同
-                </el-button>
                 <el-button link type="primary" @click="openParams(row)">参数</el-button>
               </template>
             </el-table-column>
@@ -366,40 +289,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.summary-page {
+.detail-panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  height: calc(100vh - 210px);
-  min-height: 420px;
+  flex: 1;
+  min-height: 0;
 }
-.summary-page.single {
-  height: auto;
-  min-height: calc(100vh - 210px);
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-  flex-shrink: 0;
-}
-.page-head h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: #1f2a37;
-}
-.page-head p {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: #6b7c8f;
-}
-.head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
+.detail-panel.single {
+  min-height: 360px;
 }
 .toolbar {
   display: flex;
@@ -466,14 +364,5 @@ onMounted(() => {
   --el-table-tr-bg-color: #eef4fb;
   --el-table-row-hover-bg-color: #dce8f7;
   --el-table-border-color: #8aa0b8;
-}
-.link-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 4px;
-}
-.warn {
-  color: #c2410c;
-  font-weight: 600;
 }
 </style>

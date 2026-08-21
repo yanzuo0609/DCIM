@@ -6,9 +6,9 @@ import DeviceParamProfilesPanel from '@/components/DeviceParamProfilesPanel.vue'
   <div class="params-page">
     <header class="page-head">
       <div>
-        <h2>设备参数</h2>
+        <h2>资产详细参数</h2>
         <p>
-          按采购汇总「设备名称」关联同步设备参数（同名一一对应）；完善参数后可供资源统计与设备台账关联
+          按设备名称关联采购汇总；配置参数统一展示于一列，完善后可供资源统计与设备台账关联
         </p>
       </div>
     </header>

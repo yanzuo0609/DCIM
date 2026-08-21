@@ -199,9 +199,7 @@ async def _reclassify_coarse_network_devices(session: AsyncSession) -> None:
     ).scalars().all()
     for device in devices:
         model_name = ""
-        if device.model is not None:
-            model_name = device.model.name or ""
-        elif device.device_model_id:
+        if device.device_model_id:
             model = await session.get(DeviceModel, device.device_model_id)
             model_name = model.name if model else ""
         hay = f"{device.name or ''} {device.hostname or ''} {model_name}"

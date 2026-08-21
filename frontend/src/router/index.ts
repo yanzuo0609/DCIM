@@ -117,6 +117,12 @@ const router = createRouter({
               meta: { permission: 'device:view' },
             },
             {
+              path: 'details',
+              name: 'device-contracts-details',
+              component: () => import('@/views/contract/ContractDetailView.vue'),
+              meta: { permission: 'device:view' },
+            },
+            {
               path: 'params',
               name: 'device-contracts-params',
               component: () => import('@/views/contract/ContractParamsView.vue'),

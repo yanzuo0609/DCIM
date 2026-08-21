@@ -1,14 +1,24 @@
 import api, { unwrap } from '@/api'
 import type { ApiResponse, PaginatedResponse } from '@/types/api'
 
-export type QuantityUnit = '台' | '个' | '件' | '套'
+export type QuantityUnit = '台' | '个' | '件' | '套' | '尺'
 export type ContractItemKind = 'hardware' | 'software'
 export type PriceUnit = 'yuan' | 'wan'
 
 /** 合同金额默认单位：万元 */
 export const DEFAULT_PRICE_UNIT: PriceUnit = 'wan'
 
-export const QUANTITY_UNIT_OPTIONS: QuantityUnit[] = ['台', '个', '件', '套']
+export const QUANTITY_UNIT_OPTIONS: QuantityUnit[] = ['台', '个', '件', '套', '尺']
+
+export const FUND_SOURCE_OPTIONS = [
+  '国家预算资金',
+  '地方财政资金',
+  '自筹资金',
+  '专项资金',
+  '其他',
+] as const
+
+export const USING_ORG_OPTIONS = ['内部', '公共', '其他'] as const
 
 export const ITEM_KIND_OPTIONS: Array<{ value: ContractItemKind; label: string }> = [
   { value: 'hardware', label: '硬件' },
@@ -72,6 +82,7 @@ export interface DeviceContractItem {
   quantity_unit?: QuantityUnit
   unit_price?: number | null
   price_unit?: 'yuan' | 'wan'
+  response_quote?: number | null
   line_amount?: number | null
 }
 
@@ -88,6 +99,8 @@ export interface DeviceContract {
   manufacturer_name: string | null
   device_model_id: string | null
   quantity: number
+  hardware_quantity?: number
+  software_quantity?: number
   linked_count: number
   unit_price: number | null
   contract_total: number | null
@@ -96,6 +109,13 @@ export interface DeviceContract {
   total_amount: number | null
   purchase_date: string | null
   description: string | null
+  project_budget?: number | null
+  purchase_org?: string | null
+  fund_source?: string | null
+  using_org?: string | null
+  winning_bidder?: string | null
+  signed_at?: string | null
+  archived_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -111,6 +131,7 @@ export interface DeviceContractSummary {
   contract_count: number
   avg_unit_price: number | null
   remaining_quantity?: number
+  contracts?: Array<{ id: string; contract_no: string }>
 }
 
 export interface DeviceContractPayload {
@@ -121,6 +142,27 @@ export interface DeviceContractPayload {
   price_unit?: 'yuan' | 'wan'
   purchase_date?: string | null
   description?: string | null
+  project_budget?: number | null
+  purchase_org?: string | null
+  fund_source?: string | null
+  using_org?: string | null
+  winning_bidder?: string | null
+  signed_at?: string | null
+  archived?: boolean | null
+}
+
+export function contractHwQty(row: DeviceContract): number {
+  if (row.hardware_quantity != null) return Number(row.hardware_quantity)
+  return normalizeContractItems(row)
+    .filter((i) => normalizeItemKind(i.item_kind) === 'hardware')
+    .reduce((s, i) => s + Number(i.quantity || 0), 0)
+}
+
+export function contractSwQty(row: DeviceContract): number {
+  if (row.software_quantity != null) return Number(row.software_quantity)
+  return normalizeContractItems(row)
+    .filter((i) => normalizeItemKind(i.item_kind) === 'software')
+    .reduce((s, i) => s + Number(i.quantity || 0), 0)
 }
 
 export interface BindResult {
@@ -225,6 +267,10 @@ export function normalizeContractItems(contract: {
       unit_price:
         i.unit_price === null || i.unit_price === undefined ? null : Number(i.unit_price),
       price_unit: normalizePriceUnit(i.price_unit),
+      response_quote:
+        i.response_quote === null || i.response_quote === undefined
+          ? null
+          : Number(i.response_quote),
       line_amount: i.line_amount ?? null,
     }))
   }
@@ -353,7 +399,7 @@ export async function syncContractModels() {
   return unwrap(response)
 }
 
-/** 将指定合同明细同步为设备型号 */
+/** 将指定合同明细同步为产品型号 */
 export async function syncContractModelsById(id: string) {
   const response = await api.post<ApiResponse<ContractModelSyncResult>>(
     `/device-contracts/${id}/sync-models`,

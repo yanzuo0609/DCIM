@@ -75,10 +75,11 @@ def _items_from_entity(entity: DeviceContract) -> list[DeviceContractItem]:
             if unit not in ("yuan", "wan"):
                 unit = "yuan"
             qty_unit = str(raw.get("quantity_unit") or "台").strip()
-            if qty_unit not in ("台", "个", "件", "套"):
+            if qty_unit not in ("台", "个", "件", "套", "尺"):
                 qty_unit = "台"
             kind_raw = str(raw.get("item_kind") or "hardware").strip().lower()
             item_kind = "software" if kind_raw in ("software", "软", "软件", "许可", "license") else "hardware"
+            response_quote = _to_decimal(raw.get("response_quote"))
             parsed.append(
                 DeviceContractItem(
                     device_name=name or model,
@@ -89,6 +90,7 @@ def _items_from_entity(entity: DeviceContract) -> list[DeviceContractItem]:
                     quantity_unit=qty_unit,
                     unit_price=price,
                     price_unit=unit,
+                    response_quote=response_quote,
                 )
             )
         return _normalize_items(parsed)
@@ -149,9 +151,10 @@ def _persist_items(
                 i.item_kind if i.item_kind in ("hardware", "software") else "hardware"
             ),
             "quantity": int(i.quantity or 0),
-            "quantity_unit": i.quantity_unit if i.quantity_unit in ("台", "个", "件", "套") else "台",
+            "quantity_unit": i.quantity_unit if i.quantity_unit in ("台", "个", "件", "套", "尺") else "台",
             "unit_price": str(i.unit_price) if i.unit_price is not None else None,
             "price_unit": i.price_unit if i.price_unit in ("yuan", "wan") else "wan",
+            "response_quote": str(i.response_quote) if i.response_quote is not None else None,
         }
         for i in items
     ]
@@ -401,6 +404,16 @@ class DeviceContractService:
         joined_mfg = _join_names(_normalize_name_list([m for m in mfgs if m])) or None
         items_amount = _items_subtotal(items)
         quantity = sum(int(i.quantity or 0) for i in items) or int(entity.quantity or 0)
+        hw_qty = sum(
+            int(i.quantity or 0)
+            for i in items
+            if (i.item_kind if i.item_kind in ("hardware", "software") else "hardware") == "hardware"
+        )
+        sw_qty = sum(
+            int(i.quantity or 0)
+            for i in items
+            if i.item_kind == "software"
+        )
         price_unit = getattr(entity, "price_unit", None) or "yuan"
         contract_total = getattr(entity, "contract_total", None)
         if contract_total is None:
@@ -423,6 +436,8 @@ class DeviceContractService:
             manufacturer_name=joined_mfg or entity.manufacturer_name,
             device_model_id=str(entity.device_model_id) if entity.device_model_id else None,
             quantity=quantity,
+            hardware_quantity=hw_qty,
+            software_quantity=sw_qty,
             linked_count=linked_count,
             unit_price=None,
             contract_total=contract_total,
@@ -431,6 +446,13 @@ class DeviceContractService:
             total_amount=contract_total,
             purchase_date=entity.purchase_date,
             description=entity.description,
+            project_budget=getattr(entity, "project_budget", None),
+            purchase_org=getattr(entity, "purchase_org", None),
+            fund_source=getattr(entity, "fund_source", None),
+            using_org=getattr(entity, "using_org", None),
+            winning_bidder=getattr(entity, "winning_bidder", None),
+            signed_at=getattr(entity, "signed_at", None),
+            archived_at=getattr(entity, "archived_at", None),
             created_at=entity.created_at,
             updated_at=entity.updated_at,
         )
@@ -494,6 +516,7 @@ class DeviceContractService:
             legacy_unit_price=payload.unit_price,
             legacy_quantity=int(payload.quantity or 0),
         )
+        signed_at = payload.signed_at or payload.purchase_date
         entity = DeviceContract(
             contract_no=payload.contract_no.strip(),
             project_no=payload.project_no.strip() if payload.project_no else None,
@@ -510,8 +533,14 @@ class DeviceContractService:
             unit_price=None,
             contract_total=contract_total,
             price_unit=payload.price_unit or "wan",
-            purchase_date=payload.purchase_date,
+            purchase_date=payload.purchase_date or signed_at,
             description=payload.description,
+            project_budget=payload.project_budget,
+            purchase_org=(payload.purchase_org or "").strip() or None,
+            fund_source=(payload.fund_source or "").strip() or None,
+            using_org=(payload.using_org or "").strip() or None,
+            winning_bidder=(payload.winning_bidder or "").strip() or None,
+            signed_at=signed_at,
             created_by=user_id,
             updated_by=user_id,
         )
@@ -576,6 +605,24 @@ class DeviceContractService:
             entity.purchase_date = payload.purchase_date
         if payload.description is not None:
             entity.description = payload.description
+        if payload.project_budget is not None:
+            entity.project_budget = payload.project_budget
+        if payload.purchase_org is not None:
+            entity.purchase_org = payload.purchase_org.strip() or None
+        if payload.fund_source is not None:
+            entity.fund_source = payload.fund_source.strip() or None
+        if payload.using_org is not None:
+            entity.using_org = payload.using_org.strip() or None
+        if payload.winning_bidder is not None:
+            entity.winning_bidder = payload.winning_bidder.strip() or None
+        if payload.signed_at is not None:
+            entity.signed_at = payload.signed_at
+            if entity.purchase_date is None:
+                entity.purchase_date = payload.signed_at
+        if payload.archived is not None:
+            from datetime import datetime, timezone
+
+            entity.archived_at = datetime.now(timezone.utc) if payload.archived else None
 
         entity.updated_by = user_id
         entity.version += 1
@@ -699,11 +746,13 @@ class DeviceContractService:
                         "price_sum": Decimal("0"),
                         "price_qty": 0,
                         "contract_ids": set(),
+                        "contracts": {},
                     },
                 )
                 qty = int(item.quantity or 0)
                 bucket["qty"] += qty
                 bucket["contract_ids"].add(entity.id)
+                bucket["contracts"][str(entity.id)] = entity.contract_no
                 unit = item.price_unit if item.price_unit in ("yuan", "wan") else "wan"
                 if item.unit_price is not None and qty > 0:
                     unit_yuan = (
@@ -767,6 +816,12 @@ class DeviceContractService:
                     contract_count=len(bucket["contract_ids"]),
                     avg_unit_price=avg_price,
                     remaining_quantity=remaining,
+                    contracts=[
+                        {"id": cid, "contract_no": cno}
+                        for cid, cno in sorted(
+                            bucket["contracts"].items(), key=lambda x: x[1]
+                        )
+                    ],
                 )
             )
         return result

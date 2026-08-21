@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createDeviceType,
@@ -21,15 +22,20 @@ import {
 } from '@/api/device'
 import { getContractSummary } from '@/api/contract'
 import { useAuthStore } from '@/stores/auth'
+import ParamProfileDetailDialog from '@/components/ParamProfileDetailDialog.vue'
 import {
   DEVICE_TYPE_CODES,
   DEVICE_TYPE_FALLBACK_NAMES,
+  RESOURCE_CLASS_LABELS,
   buildDeviceTypeOptions,
   displayDeviceTypeName,
+  resolveDeviceTypeCode,
+  resourceClassOf,
   type DeviceTypeCode,
 } from '@/utils/deviceTypeCatalog'
 
 const auth = useAuthStore()
+const route = useRoute()
 const canUpdate = auth.hasPermission('device:update')
 const canCreate = auth.hasPermission('device:create')
 const canDelete = auth.hasPermission('device:delete') || canUpdate
@@ -47,6 +53,8 @@ const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
 const editingPayload = ref<ParamProfilePayload | null>(null)
 const importInput = ref<HTMLInputElement | null>(null)
+const detailVisible = ref(false)
+const detailProfile = ref<ParamProfile | null>(null)
 
 /** 与设备管理同一组设备类型（标准名称 + 下拉样式） */
 const deviceTypeOptions = computed(() => buildDeviceTypeOptions(deviceTypes.value))
@@ -59,11 +67,15 @@ const filters = reactive({
 })
 
 const DISK_INTERFACE_OPTIONS = ['SATA', 'SAS', 'NVMe', 'PCIe', 'M.2', 'U.2']
+const INTERFACE_CARD_TYPE_OPTIONS = ['400G', '100G', '40G', '25G', '10G', '1G']
+const UPLINK_PORT_TYPE_OPTIONS = ['400G', '100G', '40G', '25G', '10G']
 const DISK_MEDIA_OPTIONS = [
   { value: 'ssd', label: 'SSD' },
-  { value: 'hdd', label: '机械盘' },
+  { value: 'hdd', label: 'HDD' },
   { value: 'nvme', label: 'NVMe' },
 ]
+const MEMORY_TYPE_OPTIONS = ['DDR4', 'DDR5', 'DDR4/5', 'LPDDR5']
+const ONBOARD_TYPE_OPTIONS = ['RJ45', 'SFP', 'SFP+', 'QSFP28', '光口', '电口']
 const MAX_DISK_SPEC_COUNT = 20
 
 function emptyDisk(role: DiskRole): ParamDiskSpec {
@@ -76,10 +88,39 @@ const form = reactive({
   description: '',
   device_type_id: '' as string,
   source_device_model: '',
-  detail_params: '',
   source_manufacturer: '',
+  cpu_model: '',
+  cpu_count: null as number | null,
+  cpu_cores: null as number | null,
+  memory_ddr: '',
+  memory_stick_gb: null as number | null,
+  memory_total_gb: null as number | null,
   systemDisk: emptyDisk('system'),
+  cacheDisk: emptyDisk('cache'),
   dataDisks: [emptyDisk('data'), emptyDisk('data')] as ParamDiskSpec[],
+  ge_nic_count: null as number | null,
+  ge_port_count: null as number | null,
+  xe_nic_count: null as number | null,
+  xe_port_count: null as number | null,
+  onboard_type: '',
+  onboard_count: null as number | null,
+  pcie_slot_count: null as number | null,
+  raid_model: '',
+  gpu_model: '',
+  gpu_count: null as number | null,
+  gpu_vram_gb: null as number | null,
+  gpu_bandwidth: '',
+  switching_capacity: '',
+  forwarding_rate: '',
+  service_card_count: null as number | null,
+  fabric_card_count: null as number | null,
+  interface_card_count: null as number | null,
+  interface_card_type: '' as string,
+  downlink_port_count: null as number | null,
+  uplink_port_type: '' as string,
+  uplink_port_count: null as number | null,
+  psu_power_w: null as number | null,
+  height_u: null as number | null,
   other_params: '',
 })
 
@@ -90,6 +131,98 @@ function isDiskRowFilled(d: ParamDiskSpec): boolean {
 function deviceTypeName(typeId: string | null | undefined) {
   return displayDeviceTypeName(deviceTypes.value, typeId)
 }
+
+function typeClassOf(row: ParamProfile) {
+  const typeId = typeIdOf(row)
+  const code = resolveDeviceTypeCode(deviceTypes.value, typeId)
+  return RESOURCE_CLASS_LABELS[resourceClassOf(code)]
+}
+
+function modelOf(row: ParamProfile) {
+  return row.source_device_model || row.payload?.source_device_model || ''
+}
+
+function formatDiskBrief(d: ParamDiskSpec) {
+  const bits: string[] = []
+  if (d.count != null && d.size_gb != null) bits.push(`${d.count}×${d.size_gb}GB`)
+  else if (d.size_gb != null) bits.push(`${d.size_gb}GB`)
+  else if (d.count != null) bits.push(`${d.count}块`)
+  if (d.interface) bits.push(d.interface)
+  if (d.media_type) bits.push(String(d.media_type).toUpperCase())
+  return bits.join(' ')
+}
+
+/** 配置参数：将全部明细合并到一个单元格文案 */
+function configParamsOf(row: ParamProfile) {
+  const p = row.payload || {}
+  const parts: string[] = []
+  if (p.psu_power_w != null) parts.push(`电源 ${Number(p.psu_power_w)}W`)
+  if (p.height_u != null) parts.push(`高度 ${p.height_u}U`)
+  if (p.cpu && (p.cpu.model || p.cpu.count != null || p.cpu.cores != null)) {
+    const bits = [
+      p.cpu.model || '',
+      p.cpu.count != null ? `${p.cpu.count}颗` : '',
+      p.cpu.cores != null ? `${p.cpu.cores}核` : '',
+    ].filter(Boolean)
+    if (bits.length) parts.push(`CPU ${bits.join(' ')}`)
+  }
+  if (p.memory && (p.memory.ddr_type || p.memory.stick_size_gb != null || p.memory.size_gb != null)) {
+    const bits = [
+      p.memory.ddr_type || '',
+      p.memory.stick_size_gb != null ? `单条${p.memory.stick_size_gb}GB` : '',
+      p.memory.size_gb != null ? `共${p.memory.size_gb}GB` : '',
+    ].filter(Boolean)
+    if (bits.length) parts.push(`内存 ${bits.join(' ')}`)
+  }
+  const disks = p.disks || []
+  const sys = disks.filter((d) => d.role === 'system').map(formatDiskBrief).filter(Boolean)
+  const cache = disks.filter((d) => d.role === 'cache').map(formatDiskBrief).filter(Boolean)
+  const data = disks.filter((d) => d.role === 'data').map(formatDiskBrief).filter(Boolean)
+  if (sys.length) parts.push(`系统盘 ${sys.join(' + ')}`)
+  if (cache.length) parts.push(`缓存盘 ${cache.join(' + ')}`)
+  if (data.length) parts.push(`数据盘 ${data.join(' + ')}`)
+  if (p.nic) {
+    const bits = [
+      p.nic.ge_nic_count != null ? `千兆网卡${p.nic.ge_nic_count}` : '',
+      p.nic.ge_port_count != null ? `千兆口${p.nic.ge_port_count}` : '',
+      p.nic.xe_nic_count != null ? `万兆网卡${p.nic.xe_nic_count}` : '',
+      p.nic.xe_port_count != null ? `万兆口${p.nic.xe_port_count}` : '',
+      p.nic.onboard_type ? `板载${p.nic.onboard_type}` : '',
+      p.nic.onboard_count != null ? `板载×${p.nic.onboard_count}` : '',
+      p.nic.pcie_slot_count != null ? `PCIe×${p.nic.pcie_slot_count}` : '',
+    ].filter(Boolean)
+    if (bits.length) parts.push(`网络 ${bits.join(' / ')}`)
+  }
+  if (p.raid?.model) parts.push(`RAID ${p.raid.model}`)
+  if (p.gpu && (p.gpu.model || p.gpu.count != null)) {
+    const bits = [
+      p.gpu.model || '',
+      p.gpu.count != null ? `×${p.gpu.count}` : '',
+      p.gpu.vram_gb != null ? `显存${p.gpu.vram_gb}GB` : '',
+      p.gpu.bandwidth || '',
+    ].filter(Boolean)
+    if (bits.length) parts.push(`GPU ${bits.join(' ')}`)
+  }
+  if (p.switch) {
+    const bits = [
+      p.switch.switching_capacity || '',
+      p.switch.forwarding_rate || '',
+      p.switch.service_card_count != null ? `业务板${p.switch.service_card_count}` : '',
+      p.switch.fabric_card_count != null ? `交换板${p.switch.fabric_card_count}` : '',
+      p.switch.interface_card_count != null ? `接口卡${p.switch.interface_card_count}` : '',
+      p.switch.interface_card_type ? `接口卡类型${p.switch.interface_card_type}` : '',
+      p.switch.downlink_port_count != null ? `DOWN×${p.switch.downlink_port_count}` : '',
+      p.switch.uplink_port_type ? `UP ${p.switch.uplink_port_type}` : '',
+      p.switch.uplink_port_count != null ? `UP×${p.switch.uplink_port_count}` : '',
+    ].filter(Boolean)
+    if (bits.length) parts.push(`交换 ${bits.join(' / ')}`)
+  }
+  if (p.detail_params?.trim()) parts.push(p.detail_params.trim())
+  if (p.other_params?.trim()) parts.push(p.other_params.trim())
+  if (row.summary && !parts.length) return row.summary
+  return parts.length ? parts.join('；') : '—'
+}
+
 
 async function ensureDeviceTypeOption(code: DeviceTypeCode) {
   const existed = deviceTypes.value.find((t) => t.code === code)
@@ -149,10 +282,6 @@ async function syncCanonicalDeviceTypes() {
 
 function detailOf(row: ParamProfile) {
   return row.detail_params || row.payload?.detail_params || ''
-}
-
-function modelOf(row: ParamProfile) {
-  return row.source_device_model || row.payload?.source_device_model || ''
 }
 
 function typeIdOf(row: ParamProfile) {
@@ -222,10 +351,39 @@ function resetForm() {
   form.description = ''
   form.device_type_id = ''
   form.source_device_model = ''
-  form.detail_params = ''
   form.source_manufacturer = ''
+  form.cpu_model = ''
+  form.cpu_count = null
+  form.cpu_cores = null
+  form.memory_ddr = ''
+  form.memory_stick_gb = null
+  form.memory_total_gb = null
   form.systemDisk = emptyDisk('system')
+  form.cacheDisk = emptyDisk('cache')
   form.dataDisks = [emptyDisk('data'), emptyDisk('data')]
+  form.ge_nic_count = null
+  form.ge_port_count = null
+  form.xe_nic_count = null
+  form.xe_port_count = null
+  form.onboard_type = ''
+  form.onboard_count = null
+  form.pcie_slot_count = null
+  form.raid_model = ''
+  form.gpu_model = ''
+  form.gpu_count = null
+  form.gpu_vram_gb = null
+  form.gpu_bandwidth = ''
+  form.switching_capacity = ''
+  form.forwarding_rate = ''
+  form.service_card_count = null
+  form.fabric_card_count = null
+  form.interface_card_count = null
+  form.interface_card_type = ''
+  form.downlink_port_count = null
+  form.uplink_port_type = ''
+  form.uplink_port_count = null
+  form.psu_power_w = null
+  form.height_u = null
   form.other_params = ''
   editingPayload.value = null
 }
@@ -238,79 +396,190 @@ function fillForm(row: ParamProfile) {
   form.description = row.description || ''
   form.device_type_id = typeIdOf(row)
   form.source_device_model = modelOf(row)
-  form.detail_params = detailOf(row)
   form.source_manufacturer = p.source_manufacturer || row.source_manufacturer || ''
+
+  form.cpu_model = p.cpu?.model || ''
+  form.cpu_count = p.cpu?.count ?? null
+  form.cpu_cores = p.cpu?.cores ?? null
+  form.memory_ddr = p.memory?.ddr_type || ''
+  form.memory_stick_gb = p.memory?.stick_size_gb ?? null
+  form.memory_total_gb = p.memory?.size_gb ?? null
 
   const disks = [...(p.disks || [])]
   const system = disks.find((d) => d.role === 'system')
+  const cache = disks.find((d) => d.role === 'cache')
   const dataRows = disks.filter((d) => d.role === 'data')
   const legacy = disks.filter((d) => !d.role)
-  if (system || dataRows.length) {
+  if (system || cache || dataRows.length) {
     form.systemDisk = system
       ? { ...emptyDisk('system'), ...system, role: 'system' }
       : emptyDisk('system')
+    form.cacheDisk = cache
+      ? { ...emptyDisk('cache'), ...cache, role: 'cache' }
+      : emptyDisk('cache')
     form.dataDisks = dataRows.length
       ? dataRows.map((d) => ({ ...emptyDisk('data'), ...d, role: 'data' as const }))
       : [emptyDisk('data'), emptyDisk('data')]
   } else if (legacy.length) {
     form.systemDisk = { ...emptyDisk('system'), ...legacy[0], role: 'system' }
+    form.cacheDisk = emptyDisk('cache')
     form.dataDisks = legacy.slice(1).length
       ? legacy.slice(1).map((d) => ({ ...emptyDisk('data'), ...d, role: 'data' as const }))
-      : [emptyDisk('data')]
+      : [emptyDisk('data'), emptyDisk('data')]
   } else {
     form.systemDisk = emptyDisk('system')
+    form.cacheDisk = emptyDisk('cache')
     form.dataDisks = [emptyDisk('data'), emptyDisk('data')]
   }
 
+  form.ge_nic_count = p.nic?.ge_nic_count ?? null
+  form.ge_port_count = p.nic?.ge_port_count ?? null
+  form.xe_nic_count = p.nic?.xe_nic_count ?? null
+  form.xe_port_count = p.nic?.xe_port_count ?? null
+  form.onboard_type = p.nic?.onboard_type || ''
+  form.onboard_count = p.nic?.onboard_count ?? null
+  form.pcie_slot_count = p.nic?.pcie_slot_count ?? null
+  form.raid_model = p.raid?.model || ''
+  form.gpu_model = p.gpu?.model || ''
+  form.gpu_count = p.gpu?.count ?? null
+  form.gpu_vram_gb = p.gpu?.vram_gb ?? null
+  form.gpu_bandwidth = p.gpu?.bandwidth || ''
+  form.switching_capacity = p.switch?.switching_capacity || ''
+  form.forwarding_rate = p.switch?.forwarding_rate || ''
+  form.service_card_count = p.switch?.service_card_count ?? null
+  form.fabric_card_count = p.switch?.fabric_card_count ?? null
+  form.interface_card_count = p.switch?.interface_card_count ?? null
+  form.interface_card_type = p.switch?.interface_card_type || ''
+  form.downlink_port_count = p.switch?.downlink_port_count ?? null
+  form.uplink_port_type = p.switch?.uplink_port_type || ''
+  form.uplink_port_count = p.switch?.uplink_port_count ?? null
+  form.psu_power_w = p.psu_power_w ?? null
+  form.height_u = p.height_u ?? null
   form.other_params = legacyOtherParams(p)
 }
 
-function buildPayload(): ParamProfilePayload {
-  const dataDisks = form.dataDisks
-    .filter(isDiskRowFilled)
-    .map((d) => ({
-      size_gb: d.size_gb,
-      count: d.count,
-      interface: d.interface || null,
-      media_type: d.media_type || null,
-      role: 'data' as const,
-    }))
-  const disks: ParamDiskSpec[] = []
-  if (isDiskRowFilled(form.systemDisk)) {
-    disks.push({
-      size_gb: form.systemDisk.size_gb,
-      count: form.systemDisk.count,
-      interface: form.systemDisk.interface || null,
-      media_type: form.systemDisk.media_type || null,
-      role: 'system',
-    })
-  } else {
-    disks.push({ role: 'system' })
+function packDisk(disk: ParamDiskSpec, role: DiskRole): ParamDiskSpec | null {
+  if (!isDiskRowFilled(disk)) return null
+  return {
+    size_gb: disk.size_gb,
+    count: disk.count,
+    interface: disk.interface || null,
+    media_type: disk.media_type || null,
+    role,
   }
+}
+
+function buildPayload(): ParamProfilePayload {
+  const disks: ParamDiskSpec[] = []
+  const system = packDisk(form.systemDisk, 'system')
+  const cache = packDisk(form.cacheDisk, 'cache')
+  const dataDisks = form.dataDisks
+    .map((d) => packDisk(d, 'data'))
+    .filter((d): d is ParamDiskSpec => !!d)
+  if (system) disks.push(system)
+  else disks.push({ role: 'system' })
+  if (cache) disks.push(cache)
   if (dataDisks.length) disks.push(...dataDisks)
   else disks.push({ role: 'data' })
 
-  const model = form.source_device_model.trim()
-  const detail = form.detail_params.trim()
   const prev = editingPayload.value
+  const hasCpu = !!(form.cpu_model.trim() || form.cpu_count != null || form.cpu_cores != null)
+  const hasMem = !!(
+    form.memory_ddr.trim() ||
+    form.memory_stick_gb != null ||
+    form.memory_total_gb != null
+  )
+  const hasNic = [
+    form.ge_nic_count,
+    form.ge_port_count,
+    form.xe_nic_count,
+    form.xe_port_count,
+    form.onboard_count,
+    form.pcie_slot_count,
+  ].some((v) => v != null) || !!form.onboard_type.trim()
+  const hasGpu = !!(
+    form.gpu_model.trim() ||
+    form.gpu_count != null ||
+    form.gpu_vram_gb != null ||
+    form.gpu_bandwidth.trim()
+  )
+  const hasSwitch = !!(
+    form.switching_capacity.trim() ||
+    form.forwarding_rate.trim() ||
+    form.service_card_count != null ||
+    form.fabric_card_count != null ||
+    form.interface_card_count != null ||
+    form.interface_card_type.trim() ||
+    form.downlink_port_count != null ||
+    form.uplink_port_type.trim() ||
+    form.uplink_port_count != null
+  )
+
   return {
     source_device_name: form.name || null,
-    source_device_model: model || null,
+    source_device_model: form.source_device_model.trim() || null,
     source_manufacturer: form.source_manufacturer.trim() || null,
     device_type_id: form.device_type_id || null,
-    detail_params: detail || null,
+    detail_params: prev?.detail_params ?? null,
     other_params: form.other_params.trim() || null,
-    // 保留历史 CPU/内存数据，表单不再编辑
-    cpu: prev?.cpu ?? null,
-    memory: prev?.memory ?? null,
+    cpu: hasCpu
+      ? {
+          model: form.cpu_model.trim() || null,
+          count: form.cpu_count,
+          cores: form.cpu_cores,
+          architecture: prev?.cpu?.architecture ?? null,
+        }
+      : null,
+    memory: hasMem
+      ? {
+          ddr_type: form.memory_ddr.trim() || null,
+          stick_size_gb: form.memory_stick_gb,
+          size_gb: form.memory_total_gb,
+          modules: prev?.memory?.modules ?? null,
+        }
+      : null,
     disks,
-    // 风扇/电源/RAID/OS 已合并到 other_params
-    fan_count: null,
-    fan_model: null,
-    psu_power_w: null,
-    raid: null,
-    supported_os: [],
-    custom: [],
+    nic: hasNic
+      ? {
+          ge_nic_count: form.ge_nic_count,
+          ge_port_count: form.ge_port_count,
+          xe_nic_count: form.xe_nic_count,
+          xe_port_count: form.xe_port_count,
+          onboard_type: form.onboard_type.trim() || null,
+          onboard_count: form.onboard_count,
+          pcie_slot_count: form.pcie_slot_count,
+        }
+      : null,
+    gpu: hasGpu
+      ? {
+          model: form.gpu_model.trim() || null,
+          count: form.gpu_count,
+          vram_gb: form.gpu_vram_gb,
+          bandwidth: form.gpu_bandwidth.trim() || null,
+        }
+      : null,
+    switch: hasSwitch
+      ? {
+          switching_capacity: form.switching_capacity.trim() || null,
+          forwarding_rate: form.forwarding_rate.trim() || null,
+          service_card_count: form.service_card_count,
+          fabric_card_count: form.fabric_card_count,
+          interface_card_count: form.interface_card_count,
+          interface_card_type: form.interface_card_type.trim() || null,
+          downlink_port_count: form.downlink_port_count,
+          uplink_port_type: form.uplink_port_type.trim() || null,
+          uplink_port_count: form.uplink_port_count,
+        }
+      : null,
+    fan_count: prev?.fan_count ?? null,
+    fan_model: prev?.fan_model ?? null,
+    psu_power_w: form.psu_power_w,
+    height_u: form.height_u,
+    raid: form.raid_model.trim()
+      ? { model: form.raid_model.trim(), params: prev?.raid?.params ?? null }
+      : prev?.raid ?? null,
+    supported_os: prev?.supported_os?.length ? [...prev.supported_os] : [],
+    custom: prev?.custom?.length ? [...prev.custom] : [],
   }
 }
 
@@ -487,6 +756,11 @@ function openEdit(row: ParamProfile) {
   dialogVisible.value = true
 }
 
+function openView(row: ParamProfile) {
+  detailProfile.value = row
+  detailVisible.value = true
+}
+
 /** 新建时若尚未手填设备参数ID，随名称自动生成建议值 */
 function onNameChangeForCode() {
   if (editingId.value) return
@@ -548,6 +822,7 @@ async function handleDelete(row: ParamProfile) {
 
 onMounted(async () => {
   await Promise.all([loadData(), loadDeviceTypes()])
+  applyRouteQuery()
   if (canUpdate) {
     try {
       const result = await syncParamProfilesFromContracts()
@@ -559,6 +834,21 @@ onMounted(async () => {
     }
   }
 })
+
+function applyRouteQuery() {
+  const kw = String(route.query.keyword || '').trim()
+  if (kw) filters.keyword = kw
+  const profileId = String(route.query.profile_id || '').trim()
+  if (profileId) {
+    const hit = profiles.value.find((p) => p.id === profileId)
+    if (hit) openView(hit)
+  }
+}
+
+watch(
+  () => [route.query.keyword, route.query.profile_id],
+  () => applyRouteQuery(),
+)
 </script>
 
 <template>
@@ -568,7 +858,7 @@ onMounted(async () => {
       <span class="stat-incomplete">待完善 {{ stats.incomplete }}</span>
       <span class="stat-complete">已完善 {{ stats.complete }}</span>
       <span class="hint">
-        与采购汇总按「设备名称」关联同步：缺则新建、同名则对齐名称/型号/厂商
+        与资产汇总按「设备名称」关联同步：缺则新建、同名则对齐设备名称 / 产品型号 / 产品厂商
       </span>
     </div>
 
@@ -577,8 +867,8 @@ onMounted(async () => {
         v-model="filters.keyword"
         clearable
         size="small"
-        placeholder="搜索设备名称 / 详细参数 / 类型 / 摘要"
-        style="width: 240px"
+        placeholder="搜索设备名称 / 产品型号 / 设备类型 / 摘要"
+        style="width: 260px"
       />
       <el-select v-model="filters.status" size="small" style="width: 120px">
         <el-option label="全部状态" value="all" />
@@ -603,7 +893,7 @@ onMounted(async () => {
         v-model="filters.manufacturer"
         clearable
         size="small"
-        placeholder="厂商"
+        placeholder="产品厂商"
         style="width: 130px"
       >
         <el-option v-for="m in manufacturerOptions" :key="m" :label="m" :value="m" />
@@ -649,147 +939,100 @@ onMounted(async () => {
       />
     </div>
 
-    <el-table
-      v-loading="loading"
-      :data="filteredProfiles"
-      stripe
-      size="small"
-      max-height="520"
-      :row-class-name="rowClassName"
-    >
-      <el-table-column
-        type="index"
-        label="序号"
-        width="64"
-        align="center"
-        :index="(i: number) => i + 1"
-      />
-      <el-table-column prop="name" label="设备名称" min-width="140" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.name }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="采购关联" width="110" align="center">
-        <template #default="{ row }">
-          <el-tag
-            :type="isLinkedToSummary(row) ? 'success' : 'info'"
-            size="small"
-            effect="plain"
-          >
-            {{ isLinkedToSummary(row) ? '已关联' : '未在汇总' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="code" label="设备参数ID" min-width="150" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">{{ row.code }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="配置摘要" min-width="240" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
-            {{ row.summary || '待补充系统盘 / 数据盘' }}
-          </span>
-        </template>
-      </el-table-column>
-      <el-table-column label="设备类型" min-width="120" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
-            {{ deviceTypeName(typeIdOf(row)) }}
-          </span>
-        </template>
-      </el-table-column>
-      <el-table-column label="设备型号" min-width="120" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
-            {{ modelOf(row) || '—' }}
-          </span>
-        </template>
-      </el-table-column>
-      <el-table-column label="厂商" min-width="90" show-overflow-tooltip>
-        <template #default="{ row }">
-          {{ row.source_manufacturer || row.payload?.source_manufacturer || '—' }}
-        </template>
-      </el-table-column>
-      <el-table-column label="状态" width="100" align="center">
-        <template #default="{ row }">
-          <el-tag :type="row.is_complete ? 'success' : 'danger'" size="small" effect="plain">
-            {{ row.is_complete ? '已完善' : '待完善' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="缺失字段" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span v-if="row.missing_fields?.length" class="text-incomplete">
-            {{ row.missing_fields.join('、') }}
-          </span>
-          <span v-else class="text-complete">—</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="详细参数" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span :class="row.is_complete ? 'text-complete' : 'text-incomplete'">
-            {{ detailOf(row) || '—' }}
-          </span>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="88" fixed="right" align="center">
-        <template #default="{ row }">
-          <el-dropdown trigger="click">
-            <el-button type="primary" link>操作</el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
-                <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">删除</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </template>
-      </el-table-column>
-    </el-table>
+    <div class="table-panel">
+      <el-table
+        v-loading="loading"
+        :data="filteredProfiles"
+        stripe
+        size="small"
+        height="100%"
+        class="sheet-table"
+        :row-class-name="rowClassName"
+      >
+        <el-table-column type="selection" width="40" />
+        <el-table-column
+          type="index"
+          label="序号"
+          width="56"
+          align="center"
+          :index="(i: number) => i + 1"
+        />
+        <el-table-column prop="code" label="设备参数ID" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="name" label="设备名称" min-width="120" show-overflow-tooltip />
+        <el-table-column label="产品型号" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ modelOf(row) || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="产品厂商" min-width="100" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.source_manufacturer || row.payload?.source_manufacturer || '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="设备类型" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ deviceTypeName(typeIdOf(row)) }}</template>
+        </el-table-column>
+        <el-table-column label="类型归类" min-width="100" show-overflow-tooltip>
+          <template #default="{ row }">{{ typeClassOf(row) }}</template>
+        </el-table-column>
+        <el-table-column label="配置参数" min-width="320">
+          <template #default="{ row }">
+            <div class="config-cell" :title="configParamsOf(row)">{{ configParamsOf(row) }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="100" fixed="right" align="center">
+          <template #default="{ row }">
+            <el-dropdown trigger="click">
+              <el-button type="primary" link>操作</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="openView(row)">查看参数详细</el-dropdown-item>
+                  <el-dropdown-item v-if="canUpdate" @click="openEdit(row)">编辑</el-dropdown-item>
+                  <el-dropdown-item v-if="canDelete" divided @click="handleDelete(row)">删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <ParamProfileDetailDialog
+      v-model="detailVisible"
+      :profile="detailProfile"
+      :device-types="deviceTypes"
+    />
 
     <el-dialog
       v-model="dialogVisible"
       :title="editingId ? '编辑设备参数' : '新建设备参数'"
-      width="820px"
+      width="1120px"
       destroy-on-close
-      top="3vh"
+      top="2vh"
+      class="param-sheet-dialog"
     >
-      <el-form label-width="100px" class="param-form" size="small">
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="设备名称" required>
+      <div class="param-sheet">
+        <!-- 基本信息 -->
+        <section class="sheet-block">
+          <div class="sheet-side">基本信息</div>
+          <div class="sheet-body">
+            <div class="sheet-row cols-3">
+              <label>设备名称</label>
               <el-input
                 v-model="form.name"
-                placeholder="对应采购汇总设备名称"
+                placeholder="采购/管理中的设备名称"
                 @change="onNameChangeForCode"
               />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="设备参数ID" required>
-              <el-input
-                v-model="form.code"
-                maxlength="50"
-                placeholder="唯一设备参数ID，可手动修改"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="设备型号">
-              <el-input v-model="form.source_device_model" placeholder="设备型号" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="设备类型">
+              <label>产品型号</label>
+              <el-input v-model="form.source_device_model" placeholder="产品型号" />
+              <label>产品厂商</label>
+              <el-input v-model="form.source_manufacturer" placeholder="产品厂商" />
+            </div>
+            <div class="sheet-row cols-3">
+              <label>设备类型</label>
               <el-select
                 :model-value="form.device_type_id || undefined"
                 clearable
                 filterable
                 placeholder="选择设备类型"
-                style="width: 100%"
                 @change="onParamDeviceTypePick"
               >
                 <el-option
@@ -799,137 +1042,245 @@ onMounted(async () => {
                   :value="t.id || t.code"
                 />
               </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="厂商">
-              <el-input v-model="form.source_manufacturer" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="描述">
-              <el-input v-model="form.description" placeholder="可选备注" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <div class="param-section-title">系统盘</div>
-        <div class="disk-row">
-          <div class="disk-fields">
-            <el-input-number
-              v-model="form.systemDisk.size_gb"
-              :min="0"
-              :step="100"
-              placeholder="容量GB"
-              controls-position="right"
-            />
-            <span class="disk-field-label">GB ×</span>
-            <el-input-number
-              v-model="form.systemDisk.count"
-              :min="0"
-              :max="100"
-              placeholder="块数"
-              controls-position="right"
-            />
-            <span class="disk-field-label">块</span>
-            <el-select
-              v-model="form.systemDisk.interface"
-              clearable
-              allow-create
-              filterable
-              placeholder="接口"
-              style="width: 110px"
-            >
-              <el-option v-for="i in DISK_INTERFACE_OPTIONS" :key="i" :label="i" :value="i" />
-            </el-select>
-            <el-select
-              v-model="form.systemDisk.media_type"
-              clearable
-              placeholder="介质"
-              style="width: 110px"
-            >
-              <el-option
-                v-for="m in DISK_MEDIA_OPTIONS"
-                :key="m.value"
-                :label="m.label"
-                :value="m.value"
-              />
-            </el-select>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div class="param-section-title">
-          <span>数据盘</span>
-          <el-button type="primary" link @click="addDataDiskRow">+ 添加规格</el-button>
-        </div>
-        <p class="disk-hint">可配置多组数据盘规格。</p>
-        <div v-for="(disk, idx) in form.dataDisks" :key="idx" class="disk-row">
-          <el-form-item :label="`规格 ${idx + 1}`" label-width="70px">
-            <div class="disk-fields">
+        <!-- 参数配置 -->
+        <section class="sheet-block">
+          <div class="sheet-side">参数配置</div>
+          <div class="sheet-body">
+            <div class="sheet-row cols-3">
+              <label>电源功率</label>
               <el-input-number
-                v-model="disk.size_gb"
+                v-model="form.psu_power_w"
                 :min="0"
                 :step="100"
-                placeholder="容量GB"
                 controls-position="right"
+                placeholder="W"
               />
-              <span class="disk-field-label">GB ×</span>
+              <label>设备高度</label>
               <el-input-number
-                v-model="disk.count"
-                :min="0"
-                :max="100"
-                placeholder="块数"
+                v-model="form.height_u"
+                :min="1"
+                :max="48"
                 controls-position="right"
+                placeholder="U"
               />
-              <span class="disk-field-label">块</span>
-              <el-select
-                v-model="disk.interface"
-                clearable
-                allow-create
-                filterable
-                placeholder="接口"
-                style="width: 110px"
-              >
+            </div>
+            <div class="sheet-row cols-3">
+              <label>CPU型号</label>
+              <el-input v-model="form.cpu_model" placeholder="如 Intel Xeon Gold 6330" />
+              <label>颗数</label>
+              <el-input-number v-model="form.cpu_count" :min="0" :max="64" controls-position="right" />
+              <label>核心数</label>
+              <el-input-number v-model="form.cpu_cores" :min="1" :max="512" controls-position="right" />
+            </div>
+            <div class="sheet-row cols-3">
+              <label>内存型号</label>
+              <el-select v-model="form.memory_ddr" clearable filterable allow-create placeholder="DDR4/5">
+                <el-option v-for="o in MEMORY_TYPE_OPTIONS" :key="o" :label="o" :value="o" />
+              </el-select>
+              <label>单条内存大小</label>
+              <el-input-number
+                v-model="form.memory_stick_gb"
+                :min="0"
+                :step="8"
+                controls-position="right"
+                placeholder="GB"
+              />
+              <label>总内存大小</label>
+              <el-input-number
+                v-model="form.memory_total_gb"
+                :min="0"
+                :step="16"
+                controls-position="right"
+                placeholder="GB"
+              />
+            </div>
+
+            <div class="sheet-row cols-4 disk-line">
+              <label class="role-label">系统盘大小</label>
+              <el-input-number v-model="form.systemDisk.size_gb" :min="0" :step="100" controls-position="right" />
+              <label>磁盘数量</label>
+              <el-input-number v-model="form.systemDisk.count" :min="0" :max="100" controls-position="right" />
+              <label>磁盘接口</label>
+              <el-select v-model="form.systemDisk.interface" clearable filterable allow-create>
                 <el-option v-for="i in DISK_INTERFACE_OPTIONS" :key="i" :label="i" :value="i" />
               </el-select>
+              <label>磁盘类型</label>
+              <el-select v-model="form.systemDisk.media_type" clearable>
+                <el-option v-for="m in DISK_MEDIA_OPTIONS" :key="m.value" :label="m.label" :value="m.value" />
+              </el-select>
+            </div>
+            <div class="sheet-row cols-4 disk-line">
+              <label class="role-label">缓存盘大小</label>
+              <el-input-number v-model="form.cacheDisk.size_gb" :min="0" :step="100" controls-position="right" />
+              <label>磁盘数量</label>
+              <el-input-number v-model="form.cacheDisk.count" :min="0" :max="100" controls-position="right" />
+              <label>磁盘接口</label>
+              <el-select v-model="form.cacheDisk.interface" clearable filterable allow-create>
+                <el-option v-for="i in DISK_INTERFACE_OPTIONS" :key="i" :label="i" :value="i" />
+              </el-select>
+              <label>磁盘类型</label>
+              <el-select v-model="form.cacheDisk.media_type" clearable>
+                <el-option v-for="m in DISK_MEDIA_OPTIONS" :key="m.value" :label="m.label" :value="m.value" />
+              </el-select>
+            </div>
+
+            <div
+              v-for="(disk, idx) in form.dataDisks"
+              :key="`data-${idx}`"
+              class="sheet-row cols-4 disk-line"
+            >
+              <label class="role-label">数据盘·规格{{ idx + 1 }}</label>
+              <el-input-number v-model="disk.size_gb" :min="0" :step="100" controls-position="right" />
+              <label>磁盘数量</label>
+              <el-input-number v-model="disk.count" :min="0" :max="100" controls-position="right" />
+              <label>磁盘接口</label>
+              <el-select v-model="disk.interface" clearable filterable allow-create>
+                <el-option v-for="i in DISK_INTERFACE_OPTIONS" :key="i" :label="i" :value="i" />
+              </el-select>
+              <label>磁盘类型</label>
+              <div class="inline-actions">
+                <el-select v-model="disk.media_type" clearable style="flex: 1">
+                  <el-option v-for="m in DISK_MEDIA_OPTIONS" :key="m.value" :label="m.label" :value="m.value" />
+                </el-select>
+                <el-button v-if="form.dataDisks.length > 1" link type="danger" @click="removeDataDiskRow(idx)">
+                  删
+                </el-button>
+                <el-button
+                  v-if="idx === form.dataDisks.length - 1"
+                  link
+                  type="primary"
+                  @click="addDataDiskRow"
+                >
+                  添加规格
+                </el-button>
+              </div>
+            </div>
+
+            <div class="sheet-row cols-4">
+              <label>千兆网卡数量</label>
+              <el-input-number v-model="form.ge_nic_count" :min="0" :max="64" controls-position="right" />
+              <label>千兆接口数量</label>
+              <el-input-number v-model="form.ge_port_count" :min="0" :max="256" controls-position="right" />
+              <label>万兆网卡数量</label>
+              <el-input-number v-model="form.xe_nic_count" :min="0" :max="64" controls-position="right" />
+              <label>万兆接口数量</label>
+              <el-input-number v-model="form.xe_port_count" :min="0" :max="256" controls-position="right" />
+            </div>
+            <div class="sheet-row cols-4">
+              <label>板载接口类型</label>
+              <el-select v-model="form.onboard_type" clearable filterable allow-create>
+                <el-option v-for="o in ONBOARD_TYPE_OPTIONS" :key="o" :label="o" :value="o" />
+              </el-select>
+              <label>板载接口数量</label>
+              <el-input-number v-model="form.onboard_count" :min="0" :max="256" controls-position="right" />
+              <label>PCIe插槽数量</label>
+              <el-input-number v-model="form.pcie_slot_count" :min="0" :max="64" controls-position="right" />
+              <label>RAID卡型号</label>
+              <el-input v-model="form.raid_model" placeholder="如 RAID9460" />
+            </div>
+            <div class="sheet-row cols-4">
+              <label>显卡型号</label>
+              <el-input v-model="form.gpu_model" placeholder="如 NVIDIA A100" />
+              <label>显卡个数</label>
+              <el-input-number v-model="form.gpu_count" :min="0" :max="64" controls-position="right" />
+              <label>显存大小</label>
+              <el-input-number v-model="form.gpu_vram_gb" :min="0" :step="8" controls-position="right" placeholder="GB" />
+              <label>显存带宽</label>
+              <el-input v-model="form.gpu_bandwidth" placeholder="如 2039GB/s" />
+            </div>
+          </div>
+        </section>
+
+        <!-- 网络参数 -->
+        <section class="sheet-block">
+          <div class="sheet-side">网络参数</div>
+          <div class="sheet-body">
+            <div class="sheet-row cols-4">
+              <label>交换容量</label>
+              <el-input v-model="form.switching_capacity" placeholder="如 2.56Tbps" />
+              <label>包转发率</label>
+              <el-input v-model="form.forwarding_rate" placeholder="如 1920Mpps" />
+              <label>业务板卡数量</label>
+              <el-input-number v-model="form.service_card_count" :min="0" :max="256" controls-position="right" />
+              <label>交换板卡数量</label>
+              <el-input-number v-model="form.fabric_card_count" :min="0" :max="256" controls-position="right" />
+            </div>
+            <div class="sheet-row cols-3">
+              <label>接口卡数量</label>
+              <el-input-number
+                v-model="form.interface_card_count"
+                :min="0"
+                :max="256"
+                controls-position="right"
+              />
+              <label>接口卡类型</label>
               <el-select
-                v-model="disk.media_type"
+                v-model="form.interface_card_type"
                 clearable
-                placeholder="介质"
-                style="width: 110px"
+                placeholder="400G / 100G / 40G / 25G / 10G / 1G"
               >
                 <el-option
-                  v-for="m in DISK_MEDIA_OPTIONS"
-                  :key="m.value"
-                  :label="m.label"
-                  :value="m.value"
+                  v-for="o in INTERFACE_CARD_TYPE_OPTIONS"
+                  :key="o"
+                  :label="o"
+                  :value="o"
                 />
               </el-select>
-              <el-button type="danger" link @click="removeDataDiskRow(idx)">删除</el-button>
+              <label>DOWNLINK接口个数</label>
+              <el-input-number
+                v-model="form.downlink_port_count"
+                :min="0"
+                :max="1024"
+                controls-position="right"
+              />
             </div>
-          </el-form-item>
-        </div>
+            <div class="sheet-row cols-3">
+              <label>UPLINK上联接口类型</label>
+              <el-select
+                v-model="form.uplink_port_type"
+                clearable
+                placeholder="400G / 100G / 40G / 25G / 10G"
+              >
+                <el-option
+                  v-for="o in UPLINK_PORT_TYPE_OPTIONS"
+                  :key="o"
+                  :label="o"
+                  :value="o"
+                />
+              </el-select>
+              <label>UPLINK上联接口个数</label>
+              <el-input-number
+                v-model="form.uplink_port_count"
+                :min="0"
+                :max="1024"
+                controls-position="right"
+              />
+            </div>
+          </div>
+        </section>
 
-        <div class="param-section-title">详细参数</div>
-        <el-input
-          v-model="form.detail_params"
-          type="textarea"
-          :rows="3"
-          maxlength="1000"
-          show-word-limit
-          placeholder="填写详细参数说明，如配置备注等"
-        />
-
-        <div class="param-section-title">其他参数</div>
-        <el-input
-          v-model="form.other_params"
-          type="textarea"
-          :rows="3"
-          maxlength="3000"
-          show-word-limit
-          placeholder="可选。风扇、电源、RAID、操作系统等可写在这里"
-        />
-      </el-form>
+        <!-- 其他参数 -->
+        <section class="sheet-block">
+          <div class="sheet-side">其他参数</div>
+          <div class="sheet-body">
+            <div class="sheet-row cols-1">
+              <label>手动输入</label>
+              <el-input
+                v-model="form.other_params"
+                type="textarea"
+                :rows="2"
+                maxlength="3000"
+                show-word-limit
+                placeholder="补充风扇、电源、操作系统等非结构化说明"
+              />
+            </div>
+          </div>
+        </section>
+      </div>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="handleSave">保存</el-button>
@@ -943,6 +1294,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  height: calc(100vh - 220px);
+  min-height: 420px;
 }
 
 .stats-bar {
@@ -952,6 +1305,7 @@ onMounted(async () => {
   align-items: center;
   font-size: 12px;
   color: #5b6b7c;
+  flex-shrink: 0;
 }
 
 .stat-incomplete {
@@ -973,6 +1327,7 @@ onMounted(async () => {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .text-incomplete {
@@ -991,45 +1346,128 @@ onMounted(async () => {
   color: #303133;
 }
 
+.table-panel {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid #8aa0b8;
+  background: #e8f0f8;
+  overflow: hidden;
+}
+
+.sheet-table {
+  --el-table-header-bg-color: #c8d8ea;
+  --el-table-header-text-color: #1f2a37;
+  --el-table-bg-color: #eef4fb;
+  --el-table-tr-bg-color: #eef4fb;
+  --el-table-row-hover-bg-color: #dce8f7;
+  --el-table-border-color: #8aa0b8;
+}
+
+.config-cell {
+  white-space: normal;
+  line-height: 1.45;
+  font-size: 12px;
+  color: #1f2a37;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
 .param-form {
   max-height: 72vh;
   overflow-y: auto;
   padding-right: 8px;
 }
 
-.param-section-title {
+.param-sheet {
+  max-height: 74vh;
+  overflow: auto;
+  padding: 10px;
+  background: #c5d6ea;
+  border: 1px solid #7f94ab;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 12px 0 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-
-.disk-row {
-  margin-bottom: 4px;
-}
-
-.disk-hint {
-  margin: -4px 0 10px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.disk-fields {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
+}
+
+.sheet-block {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 0;
+  background: #e8f0f8;
+  border: 1px solid #8aa0b8;
+}
+
+.sheet-side {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  letter-spacing: 0.18em;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1f2a37;
+  background: #d7e4f2;
+  border-right: 1px solid #8aa0b8;
+  padding: 10px 0;
+}
+
+.sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+
+.sheet-row {
+  display: grid;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.sheet-row.cols-1 {
+  grid-template-columns: 88px 1fr;
+}
+
+.sheet-row.cols-3 {
+  grid-template-columns: 88px 1fr 72px 1fr 88px 1fr;
+}
+
+.sheet-row.cols-4 {
+  grid-template-columns: 96px 1fr 72px 0.8fr 72px 0.9fr 72px 0.9fr;
+}
+
+.sheet-row label {
+  justify-self: end;
+  font-size: 12px;
+  color: #1f2937;
+  white-space: nowrap;
+}
+
+.sheet-row .role-label {
+  font-weight: 600;
+}
+
+.sheet-row :deep(.el-input),
+.sheet-row :deep(.el-select),
+.sheet-row :deep(.el-input-number) {
   width: 100%;
 }
 
-.disk-field-label {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  white-space: nowrap;
+.inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .sheet-row.cols-3,
+  .sheet-row.cols-4 {
+    grid-template-columns: 96px 1fr 88px 1fr;
+  }
 }
 
 </style>

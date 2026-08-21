@@ -87,16 +87,18 @@ class ProfileResponse(BaseModel):
 
 
 class ParamCpuSpec(BaseModel):
+    model: str | None = Field(default=None, max_length=100, description="CPU 型号")
+    count: int | None = Field(default=None, ge=0, le=64, description="CPU 颗数")
     cores: int | None = Field(default=None, ge=1, description="CPU 核心数量")
     architecture: Literal["c86", "arm"] | None = Field(
         default=None, description="CPU 架构：c86 / arm"
     )
-    model: str | None = Field(default=None, max_length=100)
 
 
 class ParamMemorySpec(BaseModel):
+    ddr_type: str | None = Field(default=None, max_length=40, description="内存型号，如 DDR4/DDR5")
+    stick_size_gb: float | None = Field(default=None, ge=0, description="单条内存大小(GB)")
     size_gb: float | None = Field(default=None, ge=0, description="内存总大小(GB)")
-    ddr_type: str | None = Field(default=None, max_length=40, description="DDR 类型")
     modules: int | None = Field(default=None, ge=0, description="内存条数")
 
 
@@ -109,9 +111,9 @@ class ParamDiskSpec(BaseModel):
     media_type: Literal["ssd", "hdd", "nvme"] | None = Field(
         default=None, description="盘类型：ssd / hdd(机械) / nvme"
     )
-    role: Literal["system", "data"] | None = Field(
+    role: Literal["system", "cache", "data"] | None = Field(
         default=None,
-        description="磁盘用途：system=系统盘 / data=数据盘，便于资源统计",
+        description="磁盘用途：system=系统盘 / cache=缓存盘 / data=数据盘",
     )
 
 
@@ -124,6 +126,43 @@ PARAM_DATA_DISK_EXPORT_SLOTS = 3
 class ParamRaidSpec(BaseModel):
     model: str | None = Field(default=None, max_length=100, description="RAID 卡型号")
     params: str | None = Field(default=None, max_length=500, description="RAID 参数说明")
+
+
+class ParamNicSpec(BaseModel):
+    """网卡与扩展接口参数。"""
+
+    ge_nic_count: int | None = Field(default=None, ge=0, le=64, description="千兆网卡数量")
+    ge_port_count: int | None = Field(default=None, ge=0, le=256, description="千兆接口数量")
+    xe_nic_count: int | None = Field(default=None, ge=0, le=64, description="万兆网卡数量")
+    xe_port_count: int | None = Field(default=None, ge=0, le=256, description="万兆接口数量")
+    onboard_type: str | None = Field(default=None, max_length=80, description="板载接口类型")
+    onboard_count: int | None = Field(default=None, ge=0, le=256, description="板载接口数量")
+    pcie_slot_count: int | None = Field(default=None, ge=0, le=64, description="PCIe 插槽数量")
+
+
+class ParamGpuSpec(BaseModel):
+    model: str | None = Field(default=None, max_length=100, description="显卡型号")
+    count: int | None = Field(default=None, ge=0, le=64, description="显卡个数")
+    vram_gb: float | None = Field(default=None, ge=0, description="显存大小(GB)")
+    bandwidth: str | None = Field(default=None, max_length=80, description="显存带宽")
+
+
+class ParamSwitchSpec(BaseModel):
+    """网络设备（交换机等）专用参数。"""
+
+    switching_capacity: str | None = Field(default=None, max_length=80, description="交换容量")
+    forwarding_rate: str | None = Field(default=None, max_length=80, description="包转发率")
+    service_card_count: int | None = Field(default=None, ge=0, le=256, description="业务板卡数量")
+    fabric_card_count: int | None = Field(default=None, ge=0, le=256, description="交换板卡数量")
+    interface_card_count: int | None = Field(default=None, ge=0, le=256, description="接口卡数量")
+    interface_card_type: str | None = Field(
+        default=None, max_length=20, description="接口卡类型：400G/100G/40G/25G/10G/1G"
+    )
+    downlink_port_count: int | None = Field(default=None, ge=0, le=1024, description="DOWNLINK接口个数")
+    uplink_port_type: str | None = Field(
+        default=None, max_length=20, description="UPLINK上联接口类型：400G/100G/40G/25G/10G"
+    )
+    uplink_port_count: int | None = Field(default=None, ge=0, le=1024, description="UPLINK上联接口个数")
 
 
 class ParamCustomField(BaseModel):
@@ -144,7 +183,7 @@ class ParamProfilePayload(BaseModel):
     device_type_id: str | None = Field(default=None, max_length=64)
     # 详细参数（原参考型号/参数型号，可自由填写）
     detail_params: str | None = Field(default=None, max_length=1000)
-    # 其他参数：风扇/电源/RAID/操作系统等合并文本
+    # 其他参数：手动补充说明
     other_params: str | None = Field(default=None, max_length=3000)
 
     cpu: ParamCpuSpec | None = None
@@ -153,13 +192,17 @@ class ParamProfilePayload(BaseModel):
         default_factory=list,
         max_length=PARAM_DISK_SPEC_MAX_COUNT,
         description=(
-            f"磁盘规格列表；建议区分系统盘/数据盘（role）；"
+            f"磁盘规格列表；建议区分系统盘/缓存盘/数据盘（role）；"
             f"前端默认 {PARAM_DISK_SPEC_DEFAULT_COUNT} 行"
         ),
     )
+    nic: ParamNicSpec | None = None
+    gpu: ParamGpuSpec | None = None
+    switch: ParamSwitchSpec | None = None
+    height_u: int | None = Field(default=None, ge=1, le=48, description="设备高度(U)")
     fan_count: int | None = Field(default=None, ge=0, description="风扇数量（兼容旧数据）")
     fan_model: str | None = Field(default=None, max_length=100, description="风扇型号（兼容旧数据）")
-    psu_power_w: float | None = Field(default=None, ge=0, description="电源功率(W)（兼容旧数据）")
+    psu_power_w: float | None = Field(default=None, ge=0, description="电源功率(W)")
     raid: ParamRaidSpec | None = None
     supported_os: list[str] = Field(default_factory=list, description="支持的操作系统（兼容旧数据）")
     custom: list[ParamCustomField] = Field(
@@ -250,23 +293,37 @@ def param_payload_summary(payload: ParamProfilePayload | dict | None) -> str | N
         else ParamProfilePayload.model_validate(payload)
     )
     parts: list[str] = []
-    if data.cpu:
-        cpu_bits = []
-        if data.cpu.architecture:
-            cpu_bits.append(data.cpu.architecture.upper())
+    if data.cpu and (data.cpu.cores or data.cpu.model or data.cpu.count):
+        cpu_bits: list[str] = []
+        if data.cpu.model:
+            cpu_bits.append(data.cpu.model)
+        if data.cpu.count:
+            cpu_bits.append(f"{data.cpu.count}颗")
         if data.cpu.cores:
             cpu_bits.append(f"{data.cpu.cores}核")
+        if data.cpu.architecture:
+            cpu_bits.append(data.cpu.architecture.upper())
         if cpu_bits:
             parts.append("CPU " + "/".join(cpu_bits))
-    if data.memory and data.memory.size_gb is not None:
-        mem = f"{data.memory.size_gb:g}GB"
+    if data.memory and (
+        data.memory.size_gb is not None
+        or data.memory.ddr_type
+        or data.memory.stick_size_gb is not None
+    ):
+        mem_bits: list[str] = []
         if data.memory.ddr_type:
-            mem += f" {data.memory.ddr_type}"
+            mem_bits.append(data.memory.ddr_type)
+        if data.memory.stick_size_gb is not None:
+            mem_bits.append(f"单条{data.memory.stick_size_gb:g}GB")
+        if data.memory.size_gb is not None:
+            mem_bits.append(f"共{data.memory.size_gb:g}GB")
         if data.memory.modules:
-            mem += f"×{data.memory.modules}"
-        parts.append(f"内存 {mem}")
+            mem_bits.append(f"×{data.memory.modules}")
+        if mem_bits:
+            parts.append("内存 " + " ".join(mem_bits))
     if data.disks:
         system_parts: list[str] = []
+        cache_parts: list[str] = []
         data_parts: list[str] = []
         other_parts: list[str] = []
         for d in data.disks:
@@ -286,18 +343,56 @@ def param_payload_summary(payload: ParamProfilePayload | dict | None) -> str | N
             text = " ".join(bit)
             if d.role == "system":
                 system_parts.append(text)
+            elif d.role == "cache":
+                cache_parts.append(text)
             elif d.role == "data":
                 data_parts.append(text)
             else:
                 other_parts.append(text)
         if system_parts:
             parts.append("系统盘 " + " + ".join(system_parts))
+        if cache_parts:
+            parts.append("缓存盘 " + " + ".join(cache_parts))
         if data_parts:
             parts.append("数据盘 " + " + ".join(data_parts))
-        if other_parts and not system_parts and not data_parts:
+        if other_parts and not system_parts and not data_parts and not cache_parts:
             parts.append("磁盘 " + " + ".join(other_parts))
         elif other_parts:
             parts.append("其他盘 " + " + ".join(other_parts))
+    if data.gpu and (data.gpu.model or data.gpu.count):
+        gpu_bits = [b for b in [data.gpu.model or "", f"×{data.gpu.count}" if data.gpu.count else ""] if b]
+        if gpu_bits:
+            parts.append("GPU " + " ".join(gpu_bits))
+    if data.switch and (
+        data.switch.switching_capacity
+        or data.switch.forwarding_rate
+        or data.switch.interface_card_count is not None
+        or data.switch.interface_card_type
+        or data.switch.downlink_port_count is not None
+        or data.switch.uplink_port_type
+        or data.switch.uplink_port_count is not None
+    ):
+        sw_bits = [
+            b
+            for b in [
+                data.switch.switching_capacity or "",
+                data.switch.forwarding_rate or "",
+                f"接口卡{data.switch.interface_card_count}"
+                if data.switch.interface_card_count is not None
+                else "",
+                data.switch.interface_card_type or "",
+                f"DOWN×{data.switch.downlink_port_count}"
+                if data.switch.downlink_port_count is not None
+                else "",
+                f"UP {data.switch.uplink_port_type}" if data.switch.uplink_port_type else "",
+                f"UP×{data.switch.uplink_port_count}"
+                if data.switch.uplink_port_count is not None
+                else "",
+            ]
+            if b
+        ]
+        if sw_bits:
+            parts.append("交换 " + " / ".join(sw_bits))
     if data.detail_params:
         parts.append(f"详细 {data.detail_params[:40]}")
     if data.other_params:

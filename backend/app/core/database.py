@@ -364,6 +364,13 @@ async def _ensure_sqlite_device_contract_columns(connection) -> None:
         ("manufacturer_names", "ALTER TABLE device_contract ADD COLUMN manufacturer_names JSON"),
         ("device_items", "ALTER TABLE device_contract ADD COLUMN device_items JSON"),
         ("contract_total", "ALTER TABLE device_contract ADD COLUMN contract_total NUMERIC(14, 2)"),
+        ("project_budget", "ALTER TABLE device_contract ADD COLUMN project_budget NUMERIC(14, 2)"),
+        ("purchase_org", "ALTER TABLE device_contract ADD COLUMN purchase_org VARCHAR(200)"),
+        ("fund_source", "ALTER TABLE device_contract ADD COLUMN fund_source VARCHAR(100)"),
+        ("using_org", "ALTER TABLE device_contract ADD COLUMN using_org VARCHAR(100)"),
+        ("winning_bidder", "ALTER TABLE device_contract ADD COLUMN winning_bidder VARCHAR(200)"),
+        ("signed_at", "ALTER TABLE device_contract ADD COLUMN signed_at DATE"),
+        ("archived_at", "ALTER TABLE device_contract ADD COLUMN archived_at DATETIME"),
     ]
     for col, sql in alters:
         if col not in columns:

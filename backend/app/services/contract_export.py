@@ -11,9 +11,9 @@ from app.schemas.device_contract import QUANTITY_UNITS, DeviceContractItem
 # 与前端 ContractView 设备明细表头保持一致
 COLUMN_SPECS: list[tuple[str, str, tuple[str, ...]]] = [
     ("item_kind", "类别", ("软硬类别", "类型")),
-    ("device_name", "设备名称", ()),
-    ("device_model_name", "设备型号", ()),
-    ("manufacturer_name", "厂商", ()),
+    ("device_name", "设备名称", ("设备采购名称",)),
+    ("device_model_name", "产品型号", ("设备型号", "型号")),
+    ("manufacturer_name", "产品厂商", ("厂商", "品牌")),
     ("quantity", "采购数量", ()),
     ("quantity_unit", "数量单位", ()),
     ("unit_price", "单价", ()),

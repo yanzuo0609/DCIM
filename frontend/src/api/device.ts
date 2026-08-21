@@ -91,17 +91,19 @@ export interface Profile {
 
 export type CpuArchitecture = 'c86' | 'arm'
 export type DiskMediaType = 'ssd' | 'hdd' | 'nvme'
-export type DiskRole = 'system' | 'data'
+export type DiskRole = 'system' | 'cache' | 'data'
 
 export interface ParamCpuSpec {
+  model?: string | null
+  count?: number | null
   cores?: number | null
   architecture?: CpuArchitecture | null
-  model?: string | null
 }
 
 export interface ParamMemorySpec {
-  size_gb?: number | null
   ddr_type?: string | null
+  stick_size_gb?: number | null
+  size_gb?: number | null
   modules?: number | null
 }
 
@@ -110,13 +112,47 @@ export interface ParamDiskSpec {
   count?: number | null
   interface?: string | null
   media_type?: DiskMediaType | null
-  /** system=系统盘 / data=数据盘 */
+  /** system=系统盘 / cache=缓存盘 / data=数据盘 */
   role?: DiskRole | null
 }
 
 export interface ParamRaidSpec {
   model?: string | null
   params?: string | null
+}
+
+export interface ParamNicSpec {
+  ge_nic_count?: number | null
+  ge_port_count?: number | null
+  xe_nic_count?: number | null
+  xe_port_count?: number | null
+  onboard_type?: string | null
+  onboard_count?: number | null
+  pcie_slot_count?: number | null
+}
+
+export interface ParamGpuSpec {
+  model?: string | null
+  count?: number | null
+  vram_gb?: number | null
+  bandwidth?: string | null
+}
+
+export interface ParamSwitchSpec {
+  switching_capacity?: string | null
+  forwarding_rate?: string | null
+  service_card_count?: number | null
+  fabric_card_count?: number | null
+  /** 接口卡数量 */
+  interface_card_count?: number | null
+  /** 接口卡类型：400G/100G/40G/25G/10G/1G */
+  interface_card_type?: string | null
+  /** DOWNLINK接口个数 */
+  downlink_port_count?: number | null
+  /** UPLINK上联接口类型：400G/100G/40G/25G/10G */
+  uplink_port_type?: string | null
+  /** UPLINK上联接口个数 */
+  uplink_port_count?: number | null
 }
 
 export interface ParamCustomField {
@@ -129,13 +165,15 @@ export interface ParamProfilePayload {
   source_device_model?: string | null
   source_manufacturer?: string | null
   device_type_id?: string | null
-  /** 详细参数（可自由编辑的文本） */
   detail_params?: string | null
-  /** 其他参数：风扇/电源/RAID/操作系统等合并文本 */
   other_params?: string | null
   cpu?: ParamCpuSpec | null
   memory?: ParamMemorySpec | null
   disks?: ParamDiskSpec[]
+  nic?: ParamNicSpec | null
+  gpu?: ParamGpuSpec | null
+  switch?: ParamSwitchSpec | null
+  height_u?: number | null
   fan_count?: number | null
   fan_model?: string | null
   psu_power_w?: number | null
@@ -532,9 +570,9 @@ function makeParamCode(deviceName: string): string {
 }
 
 /**
- * 按采购汇总「设备名称」与设备参数双向关联同步：
- * - 汇总有、参数无 → 新建空待完善参数（名称对齐）
- * - 同名已存在 → 校正名称 / source_device_name，并回填空的型号、厂商
+ * 按资产汇总「设备名称」与资产详细参数双向关联同步：
+ * - 汇总有、参数无 → 新建空待完善参数（名称 / 产品型号 / 产品厂商对齐）
+ * - 同名已存在 → 校正设备名称，并以汇总为准同步产品型号、产品厂商
  * - 参数有、汇总无 → 保留（不删除）
  */
 export async function syncParamProfilesFromContracts(): Promise<ParamProfileSyncResult> {
@@ -621,20 +659,13 @@ export async function syncParamProfilesFromContracts(): Promise<ParamProfileSync
       payload.source_device_name = meta.name
       changed = true
     }
-    if (!(payload.source_device_model || '').trim() && meta.model) {
+    // 以资产汇总为准：有值则对齐产品型号 / 产品厂商
+    if (meta.model && (payload.source_device_model || '').trim() !== meta.model) {
       payload.source_device_model = meta.model
       changed = true
     }
-    if (!(payload.source_manufacturer || '').trim() && meta.manufacturer) {
+    if (meta.manufacturer && (payload.source_manufacturer || '').trim() !== meta.manufacturer) {
       payload.source_manufacturer = meta.manufacturer
-      changed = true
-    }
-    if (
-      !(existed.source_device_model || '').trim()
-      && meta.model
-      && !(payload.source_device_model || '').trim()
-    ) {
-      payload.source_device_model = meta.model
       changed = true
     }
 

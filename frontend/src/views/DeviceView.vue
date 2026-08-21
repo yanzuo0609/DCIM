@@ -208,7 +208,7 @@ async function onFormContractItemChange(key: string | null) {
     form.manufacturer_id = mfg?.id || null
     const modelName = (item.device_model_name || item.device_name || '').trim()
     if (!modelName) {
-      ElMessage.warning('该合同设备未填写型号，请手动选择设备型号')
+      ElMessage.warning('该合同设备未填写型号，请手动选择产品型号')
       applyInferredMountType(item.device_name, form.hostname)
       return
     }
@@ -541,6 +541,16 @@ function paramViewTypeName(p: ParamProfile | null) {
   if (!typeId) return '—'
   const hit = types.value.find((t) => t.id === typeId)
   return hit?.name || '—'
+}
+
+function paramViewTypeClass(p: ParamProfile | null) {
+  if (!p) return '—'
+  const typeId = p.device_type_id || p.payload?.device_type_id
+  if (!typeId) return '—'
+  const hit = types.value.find((t) => t.id === typeId)
+  const code = hit?.code || ''
+  if (!code) return '—'
+  return RESOURCE_CLASS_LABELS[resourceClassOf(code)] || '—'
 }
 
 function paramViewOtherText(p: ParamProfile | null) {
@@ -1038,7 +1048,7 @@ async function syncModelsFromContracts(options?: { quiet?: boolean }) {
     if (parts.length) {
       ElMessage.success(`合同型号同步完成：${parts.join('，')}`)
     } else {
-      ElMessage.info('合同中的设备型号均已存在，无需同步')
+      ElMessage.info('合同中的产品型号均已存在，无需同步')
     }
   }
   return result
@@ -3375,7 +3385,7 @@ void [
                     <el-dropdown-item v-if="canUpdate" command="contract">合同 / 合同设备</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="type">类型</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="model">型号</el-dropdown-item>
-                    <el-dropdown-item v-if="canUpdate" command="manufacturer">厂商</el-dropdown-item>
+                    <el-dropdown-item v-if="canUpdate" command="manufacturer">产品厂商</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="unmount">批量下架</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="mount">移动设备</el-dropdown-item>
                     <el-dropdown-item v-if="canUpdate" command="ip">改 IP</el-dropdown-item>
@@ -3423,10 +3433,10 @@ void [
             <el-table-column prop="name" label="采购名称" min-width="130" show-overflow-tooltip>
               <template #default="{ row }">{{ row.name || '—' }}</template>
             </el-table-column>
-            <el-table-column prop="device_model_name" label="设备型号" min-width="120" show-overflow-tooltip>
+            <el-table-column prop="device_model_name" label="产品型号" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">{{ row.device_model_name || '—' }}</template>
             </el-table-column>
-            <el-table-column prop="manufacturer_name" label="厂商" min-width="100" show-overflow-tooltip>
+            <el-table-column prop="manufacturer_name" label="产品厂商" min-width="100" show-overflow-tooltip>
               <template #default="{ row }">{{ row.manufacturer_name || '—' }}</template>
             </el-table-column>
             <el-table-column label="上架位置" min-width="170" show-overflow-tooltip>
@@ -3516,7 +3526,7 @@ void [
             <el-tab-pane label="BMC 档案" name="bmc" />
             <el-tab-pane label="系统用户档案" name="system" />
             <el-tab-pane label="设备类型" name="type" />
-            <el-tab-pane label="设备型号" name="model" />
+            <el-tab-pane label="产品型号" name="model" />
           </el-tabs>
           <div class="actions" style="margin-bottom: 12px">
             <el-button v-if="canUpdate" type="primary" @click="openProfileCreate">
@@ -3572,7 +3582,7 @@ void [
           <el-table v-else-if="profileSubTab === 'model'" :data="models" stripe>
             <el-table-column prop="code" label="编码" width="160" />
             <el-table-column prop="name" label="型号名称" min-width="160" />
-            <el-table-column prop="manufacturer_name" label="厂商" width="120">
+            <el-table-column prop="manufacturer_name" label="产品厂商" width="120">
               <template #default="{ row }">{{ row.manufacturer_name || '—' }}</template>
             </el-table-column>
             <el-table-column prop="description" label="描述" min-width="180">
@@ -3795,7 +3805,7 @@ void [
             </td>
           </tr>
           <tr>
-            <th>设备型号</th>
+            <th>产品型号</th>
             <td>
               <div class="sheet-inline">
                 <el-select
@@ -3803,7 +3813,7 @@ void [
                   filterable
                   allow-create
                   default-first-option
-                  placeholder="同步合同 / 选择型号"
+                  placeholder="同步合同 / 选择产品型号"
                   style="flex: 1"
                   @change="onDeviceModelSelect"
                 >
@@ -3812,7 +3822,7 @@ void [
                 <el-button v-if="canCreate || canUpdate" link type="primary" @click="openModelCreate">新建</el-button>
               </div>
             </td>
-            <th>厂商</th>
+            <th>产品厂商</th>
             <td>
               <el-select
                 v-model="form.manufacturer_id"
@@ -3820,7 +3830,7 @@ void [
                 filterable
                 allow-create
                 default-first-option
-                placeholder="同步合同"
+                placeholder="同步合同 / 产品厂商"
                 @change="onManufacturerChange"
               >
                 <el-option v-for="m in manufacturers" :key="m.id" :label="m.name" :value="m.id" />
@@ -4146,7 +4156,7 @@ void [
               <td>{{ paramViewProfile.code || '—' }}</td>
             </tr>
             <tr>
-              <th>设备型号</th>
+              <th>产品型号</th>
               <td>
                 {{
                   paramViewProfile.source_device_model
@@ -4154,7 +4164,7 @@ void [
                     || '—'
                 }}
               </td>
-              <th>厂商</th>
+              <th>产品厂商</th>
               <td>
                 {{
                   paramViewProfile.source_manufacturer
@@ -4166,6 +4176,10 @@ void [
             <tr>
               <th>设备类型</th>
               <td>{{ paramViewTypeName(paramViewProfile) }}</td>
+              <th>类型归类</th>
+              <td>{{ paramViewTypeClass(paramViewProfile) }}</td>
+            </tr>
+            <tr>
               <th>状态</th>
               <td>
                 <el-tag
@@ -4176,6 +4190,8 @@ void [
                   {{ paramViewProfile.is_complete ? '已完善' : '待完善' }}
                 </el-tag>
               </td>
+              <th></th>
+              <td></td>
             </tr>
             <tr>
               <th>配置摘要</th>
@@ -4526,7 +4542,7 @@ void [
 
     <el-dialog
       v-model="modelDialogVisible"
-      :title="modelEditingId ? '编辑设备型号' : '新建自定义型号'"
+      :title="modelEditingId ? '编辑产品型号' : '新建自定义产品型号'"
       width="480px"
       destroy-on-close
     >

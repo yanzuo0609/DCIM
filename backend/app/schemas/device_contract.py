@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-QUANTITY_UNITS = frozenset({"台", "个", "件", "套"})
+QUANTITY_UNITS = frozenset({"台", "个", "件", "套", "尺"})
 ITEM_KINDS = frozenset({"hardware", "software"})
 
 
@@ -18,6 +18,7 @@ class DeviceContractItem(BaseModel):
     quantity_unit: str = Field(default="台", max_length=10)
     unit_price: Decimal | None = Field(default=None, ge=0)
     price_unit: str = Field(default="wan", pattern="^(yuan|wan)$")
+    response_quote: Decimal | None = Field(default=None, ge=0)
     line_amount: Decimal | None = None
 
     @field_validator("device_name", "device_model_name")
@@ -169,6 +170,12 @@ class DeviceContractCreate(BaseModel):
     price_unit: str = Field(default="wan", pattern="^(yuan|wan)$")
     purchase_date: date | None = None
     description: str | None = None
+    project_budget: Decimal | None = Field(default=None, ge=0)
+    purchase_org: str | None = Field(default=None, max_length=200)
+    fund_source: str | None = Field(default=None, max_length=100)
+    using_org: str | None = Field(default=None, max_length=100)
+    winning_bidder: str | None = Field(default=None, max_length=200)
+    signed_at: date | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -238,6 +245,13 @@ class DeviceContractUpdate(BaseModel):
     price_unit: str | None = Field(default=None, pattern="^(yuan|wan)$")
     purchase_date: date | None = None
     description: str | None = None
+    project_budget: Decimal | None = Field(default=None, ge=0)
+    purchase_org: str | None = Field(default=None, max_length=200)
+    fund_source: str | None = Field(default=None, max_length=100)
+    using_org: str | None = Field(default=None, max_length=100)
+    winning_bidder: str | None = Field(default=None, max_length=200)
+    signed_at: date | None = None
+    archived: bool | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -307,6 +321,8 @@ class DeviceContractResponse(BaseModel):
     manufacturer_name: str | None = None
     device_model_id: str | None = None
     quantity: int
+    hardware_quantity: int = 0
+    software_quantity: int = 0
     linked_count: int = 0
     # 兼容旧字段：不再作为合同级标准单价使用
     unit_price: Decimal | None = None
@@ -316,6 +332,13 @@ class DeviceContractResponse(BaseModel):
     total_amount: Decimal | None = None
     purchase_date: date | None = None
     description: str | None = None
+    project_budget: Decimal | None = None
+    purchase_org: str | None = None
+    fund_source: str | None = None
+    using_org: str | None = None
+    winning_bidder: str | None = None
+    signed_at: date | None = None
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -331,6 +354,7 @@ class DeviceContractSummaryItem(BaseModel):
     contract_count: int
     avg_unit_price: Decimal | None = None
     remaining_quantity: int = 0
+    contracts: list[dict[str, str]] = Field(default_factory=list)
 
 
 class DeviceContractBindRequest(BaseModel):
